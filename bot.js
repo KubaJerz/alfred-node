@@ -1,3 +1,4 @@
+import "dotenv/config";
 import { Client, GatewayIntentBits, Partials } from "discord.js";
 import { spawn } from "child_process";
 import { readFile, writeFile, mkdir } from "fs/promises";
