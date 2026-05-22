@@ -131,12 +131,24 @@ client.on("messageCreate", async (msg) => {
     return;
   }
 
-  // Strip the mention from server messages
-  let userMessage = isDM
-    ? msg.content
-    : msg.content.replace(/<@!?\d+>/g, "").trim();
+  // Strip mention and trim whitespace from the message
+  const userMessage = msg.content.replace(/<@!?\d+>/g, "").trim();
 
   if (!userMessage) return;
+
+  // Handle /clear or /c command
+  const lowerMsg = userMessage.toLowerCase();
+  if (lowerMsg === "/clear" || lowerMsg === "/c") {
+    console.log(`🧹 Clearing session for ${msg.author.tag}`);
+    await writeState({
+      status: "resolved",
+      last_session_id: null,
+      topic: "session cleared",
+      timestamp: new Date().toISOString(),
+    });
+    await msg.reply("🧹 Session cleared. The next message will start a fresh session with full context.");
+    return;
+  }
 
   console.log(`📨 ${msg.author.tag}: ${userMessage.slice(0, 100)}`);
 
