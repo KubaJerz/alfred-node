@@ -219,7 +219,7 @@ async function loadContext() {
   const today = new Date().toISOString().split("T")[0];
   files.push({ path: `memories/dailies/${today}.md`, label: "DAILY_NOTES" });
 
-  let context = "--- SYSTEM CONTEXT START ---\n";
+  let context = "=== SYSTEM CONTEXT START ===\n";
   context += "The following files contain your core instructions, user preferences, and long-term memory. Use them to guide your response.\n";
 
   for (const file of files) {
@@ -233,7 +233,7 @@ async function loadContext() {
       }
     }
   }
-  context += "\n--- SYSTEM CONTEXT END ---\n\nUser Message: ";
+  context += "\n=== SYSTEM CONTEXT END ===\n\nUser Message: ";
   return context;
 }
 
