@@ -76,9 +76,15 @@ function runClaude(message, sessionId) {
       }
 
       if (!parsed) {
-        // Fallback: treat raw stdout as the reply
+        // Fallback: treat raw stdout as the reply. 
+        // If stdout is empty but there's stderr, show that to help debugging.
+        let result = stdout.trim();
+        if (!result && stderr.trim()) {
+          result = `⚠️ Claude Error:\n\`\`\`\n${stderr.trim().slice(0, 1800)}\n\`\`\``;
+        }
+
         resolve({
-          result: stdout.trim() || "(no response)",
+          result: result || "(no response)",
           session_id: null,
           is_error: code !== 0,
         });
@@ -195,7 +201,7 @@ client.on("messageCreate", async (msg) => {
     console.log(`✅ Replied (${reply.length} chars)`);
   } catch (err) {
     console.error("❌ Error:", err);
-    await msg.reply("Something went wrong — check the bot logs.");
+    await msg.reply(`Something went wrong:\n\`\`\`\n${err.message}\n\`\`\``);
   } finally {
     clearInterval(typingInterval);
   }
