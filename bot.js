@@ -126,11 +126,9 @@ client.on("messageCreate", async (msg) => {
   // Ignore own messages and other bots
   if (msg.author.bot) return;
 
-  // Check if this is a DM or a mention in a server
-  const isDM = !msg.guild;
-  const isMention = msg.mentions.has(client.user);
-
-  if (!isDM && !isMention) return;
+  // Respond to every message from an authorized user — no @mention required,
+  // in DMs and any channel Alfred can see. Access is enforced by the auth
+  // check below, so Alfred only ever acts on messages from ALLOWED_USER_IDS.
 
   // Auth check
   if (ALLOWED_USER_IDS.length && !ALLOWED_USER_IDS.includes(msg.author.id)) {

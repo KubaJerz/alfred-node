@@ -7,6 +7,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
 ### Added
 - `CLAUDE.md` documenting the project and the issue → branch → PR → version workflow.
 - `CHANGELOG.md` (this file).
+- Alfred now responds to every message from an authorized user in any channel
+  it can see, without needing an `@mention`. Access stays restricted to
+  `ALLOWED_USER_IDS`.
 
 ### Changed
 - Expanded `.gitignore` to cover `node_modules/`, `*.log`, and `state.json`.
