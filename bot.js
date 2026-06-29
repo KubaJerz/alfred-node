@@ -126,6 +126,41 @@ client.once("ready", () => {
   }
 });
 
+// ── Connection watchdog ──────────────────────────────────────────────────────
+// After a long suspend (laptop slept for hours), discord.js can end up silently
+// disconnected: the process stays alive — so start-alfred.sh's restart loop
+// never fires — but the gateway socket is dead, so Alfred stops receiving
+// messages. We watch the connection and, if it stays down past a grace period,
+// exit non-zero so the wrapper relaunches us with a fresh login.
+const WATCHDOG_GRACE_MS = parseInt(process.env.WATCHDOG_GRACE_MS || "90000"); // 90s
+let downSince = null;
+
+function restartProcess(reason) {
+  console.error(`🔄 Restarting bot: ${reason}`);
+  process.exit(1); // start-alfred.sh's `while true` loop relaunches us
+}
+
+// discord.js has given up on the session and won't reconnect on its own.
+client.on("invalidated", () => restartProcess("Discord session invalidated"));
+client.on("error", (err) => console.error(`⚠️  Client error: ${err?.message || err}`));
+client.on("shardDisconnect", (e, id) => console.warn(`⚠️  Shard ${id} disconnected (code ${e?.code}); awaiting reconnect…`));
+client.on("shardReconnecting", (id) => console.warn(`… shard ${id} reconnecting`));
+client.on("shardResume", (id) => console.log(`✅ Shard ${id} resumed`));
+
+setInterval(() => {
+  if (client.isReady()) {
+    if (downSince) console.log("✅ Gateway healthy again");
+    downSince = null;
+    return;
+  }
+  if (!downSince) {
+    downSince = Date.now();
+    console.warn("⚠️  Gateway not ready; watching for recovery…");
+  } else if (Date.now() - downSince > WATCHDOG_GRACE_MS) {
+    restartProcess(`gateway down for ${Math.round((Date.now() - downSince) / 1000)}s`);
+  }
+}, 30000);
+
 client.on("messageCreate", async (msg) => {
   // Ignore own messages and other bots
   if (msg.author.bot) return;

@@ -26,6 +26,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
 - `memories/OLD_MEMORY.md` and all code/doc references to it.
 
 ### Fixed
+- Connection watchdog: after a long suspend, discord.js could end up silently
+  disconnected (process alive, gateway dead) so Alfred stopped responding. The
+  bot now exits when the gateway stays down past a grace period so the restart
+  loop relaunches it with a fresh login. Also restarts on `invalidated`.
 - Bot failed to spawn `claude` (exit -2 / ENOENT) when started from
   `start-alfred.sh`. The script is a non-login shell so it never reads
   `~/.profile`, which is what normally adds `~/.local/bin` (where `claude`
