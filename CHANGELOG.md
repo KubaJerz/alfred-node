@@ -10,6 +10,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
 - Alfred now responds to every message from an authorized user in any channel
   it can see, without needing an `@mention`. Access stays restricted to
   `ALLOWED_USER_IDS`.
+- Silent opt-out: Alfred can emit `<no_reply>` (and nothing else) when a message
+  isn't directed at it, and the bot stays completely silent instead of posting.
+  Guidance for when to use it lives in `SOUL.md`.
 
 ### Changed
 - Expanded `.gitignore` to cover `node_modules/`, `*.log`, and `state.json`.

@@ -11,6 +11,10 @@ const ALLOWED_USER_IDS = (process.env.ALLOWED_USER_IDS || "").split(",").filter(
 const AGENT_DIR = process.env.AGENT_DIR || path.resolve(".");
 const TIMEOUT_MS = parseInt(process.env.CLAUDE_TIMEOUT_MS || "120000"); // 2 min default
 
+// Sentinel Alfred emits (and nothing else) when it judges a message isn't
+// directed at it. The bot detects it and stays silent instead of replying.
+const NO_REPLY = "<no_reply>";
+
 if (!DISCORD_TOKEN) {
   console.error("❌ Set DISCORD_TOKEN env var");
   process.exit(1);
@@ -181,7 +185,7 @@ client.on("messageCreate", async (msg) => {
     // Run Claude
     const response = await runClaude(finalMessage, sessionId);
 
-    // Update state
+    // Persist session continuity whether or not we end up replying.
     await writeState({
       last_session_id: response.session_id || state.last_session_id,
       status: "open", // stays open; claude can mark resolved via daily notes
@@ -189,8 +193,21 @@ client.on("messageCreate", async (msg) => {
       timestamp: new Date().toISOString(),
     });
 
+    // Alfred can opt out of replying by emitting ONLY the sentinel — used when
+    // a message clearly isn't directed at it. Tolerate stray markdown/quotes.
+    const replyText = (response.result || "").trim();
+    // Normalize away markdown/quoting/brackets, keep letters + underscore, so
+    // `<no_reply>`, `> <no_reply>`, **<no_reply>** etc. all match. Requiring the
+    // underscore avoids silencing a genuine reply like "no reply" (-> noreply).
+    const canon = (s) => s.toLowerCase().replace(/[^a-z_]/g, "");
+    const isSilent = canon(replyText) === canon(NO_REPLY);
+    if (isSilent) {
+      console.log("🤫 Stayed silent (no_reply sentinel)");
+      return;
+    }
+
     // Send reply (Discord has a 2000 char limit)
-    const reply = response.result || "(empty response)";
+    const reply = replyText || "(empty response)";
     const chunks = splitMessage(reply, 1900);
     for (const chunk of chunks) {
       await msg.reply(chunk);
