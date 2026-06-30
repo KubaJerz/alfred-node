@@ -29,10 +29,10 @@ const STATE_FILE = path.join(AGENT_DIR, "state.json");
 const CHAT_LOG = path.join(AGENT_DIR, "messages.jsonl");
 
 // On /clear, the live transcript is archived under LOGS_DIR and a headless
-// Claude is spawned to consolidate it into memory using MEMORY_PROMPT_FILE.
+// Claude is spawned to fold it into today's daily note using MEMORY_PROMPT_FILE.
+// The nightly dream.sh pass later promotes durable facts from dailies → MEMORY.md.
 const LOGS_DIR = path.join(AGENT_DIR, "logs");
 const MEMORY_PROMPT_FILE = path.join(AGENT_DIR, "memory-prompt.md");
-const MEMORY_FILE = path.join(AGENT_DIR, "memories", "MEMORY.md");
 
 async function logTurn(entry) {
   try {
@@ -75,9 +75,10 @@ async function archiveConversation() {
   return archivePath;
 }
 
-// Spawn a headless Claude to turn an archived transcript into memory. The
-// memory-making prompt lives in memory-prompt.md so it can change without
-// touching code; `{{TRANSCRIPT}}` in it is replaced with the archive path.
+// Spawn a headless Claude to fold an archived transcript into today's daily
+// note. The prompt lives in memory-prompt.md so it can change without touching
+// code: `{{TRANSCRIPT}}` → archive path, `{{DAILY_PATH}}` → today's note path,
+// `{{DAILY}}` → its current contents (so the pass merges instead of clobbering).
 // Detached + unref'd so it never blocks the bot or dies when the bot restarts.
 async function consolidateMemory(archivePath) {
   let template;
@@ -92,22 +93,27 @@ async function consolidateMemory(archivePath) {
     return;
   }
 
-  // Inject the current long-term memory so the pass merges/updates instead of
-  // blindly duplicating. Use {{MEMORY}} in the prompt, else it's appended.
-  let memory = "";
+  // Target today's daily note. Inject its current contents so the pass appends
+  // to what's there instead of overwriting. Use {{DAILY}} in the prompt, else
+  // it's appended. {{DAILY_PATH}} tells the pass where to write.
+  const today = new Date().toISOString().split("T")[0];
+  const dailyRel = `memories/dailies/${today}.md`;
+  let daily = "";
   try {
-    memory = (await readFile(MEMORY_FILE, "utf-8")).trim();
+    daily = (await readFile(path.join(AGENT_DIR, dailyRel), "utf-8")).trim();
   } catch {
-    /* no memory file yet */
+    /* no note for today yet */
   }
 
   let prompt = template.includes("{{TRANSCRIPT}}")
     ? template.replaceAll("{{TRANSCRIPT}}", archivePath)
     : `${template}\n\nTranscript file: ${archivePath}`;
 
-  prompt = prompt.includes("{{MEMORY}}")
-    ? prompt.replaceAll("{{MEMORY}}", memory || "(empty)")
-    : `${prompt}\n\n=== CURRENT MEMORY (${path.relative(AGENT_DIR, MEMORY_FILE)}) ===\n${memory || "(empty)"}\n=== END CURRENT MEMORY ===`;
+  prompt = prompt.replaceAll("{{DAILY_PATH}}", dailyRel);
+
+  prompt = prompt.includes("{{DAILY}}")
+    ? prompt.replaceAll("{{DAILY}}", daily || "(empty)")
+    : `${prompt}\n\n=== TODAY'S DAILY NOTE (${dailyRel}) ===\n${daily || "(empty)"}\n=== END DAILY NOTE ===`;
 
   const args = ["-p", prompt, "--allowedTools", "Read,Write,Edit", "--dangerously-skip-permissions"];
 
@@ -120,7 +126,7 @@ async function consolidateMemory(archivePath) {
       stdio: ["ignore", logFd, logFd],
     });
     proc.unref();
-    console.log(`🧠 Spawned headless memory consolidation (pid ${proc.pid}) → ${archivePath}`);
+    console.log(`🧠 Spawned headless daily-note consolidation (pid ${proc.pid}) → ${archivePath}`);
   } catch (err) {
     console.error(`🧠 Failed to spawn memory consolidation: ${err.message}`);
   }
