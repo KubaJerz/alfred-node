@@ -7,6 +7,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
 ### Added
 - `CLAUDE.md` documenting the project and the issue → branch → PR → version workflow.
 - `CHANGELOG.md` (this file).
+- Bot-level JSONL transcript: every turn through Alfred is appended to
+  `messages.jsonl` — inbound (`dir:"in"`) and outbound (`dir:"out"`, with
+  `kind` of reply/clear/silent/error). This is the bot's own log, separate from
+  Claude Code's per-session `.jsonl`. Added `messages.jsonl` (and other runtime
+  artifacts) to `.gitignore`.
 - Alfred now responds to every message from an authorized user in any channel
   it can see, without needing an `@mention`. Access stays restricted to
   `ALLOWED_USER_IDS`.

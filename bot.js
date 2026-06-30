@@ -1,7 +1,7 @@
 import "dotenv/config";
 import { Client, GatewayIntentBits, Partials } from "discord.js";
 import { spawn } from "child_process";
-import { readFile, writeFile, mkdir } from "fs/promises";
+import { readFile, writeFile, mkdir, appendFile } from "fs/promises";
 import { existsSync } from "fs";
 import path from "path";
 
@@ -22,6 +22,19 @@ if (!DISCORD_TOKEN) {
 
 // ── State management ────────────────────────────────────────────────────────
 const STATE_FILE = path.join(AGENT_DIR, "state.json");
+
+// Append-only JSONL transcript of every turn through the bot — one JSON object
+// per line, both inbound (user → bot) and outbound (bot → user). This is the
+// bot's OWN log, separate from Claude Code's per-session .jsonl files.
+const CHAT_LOG = path.join(AGENT_DIR, "messages.jsonl");
+
+async function logTurn(entry) {
+  try {
+    await appendFile(CHAT_LOG, JSON.stringify({ ts: new Date().toISOString(), ...entry }) + "\n");
+  } catch (err) {
+    console.error(`⚠️  Failed to write ${CHAT_LOG}: ${err.message}`);
+  }
+}
 
 async function readState() {
   try {
@@ -180,6 +193,15 @@ client.on("messageCreate", async (msg) => {
 
   if (!userMessage) return;
 
+  // Log the inbound turn (user → bot) before anything else.
+  await logTurn({
+    dir: "in",
+    user: msg.author.tag,
+    userId: msg.author.id,
+    channel: msg.channelId,
+    text: userMessage,
+  });
+
   // Handle /clear or /c command
   const lowerMsg = userMessage.toLowerCase();
   if (lowerMsg === "/clear" || lowerMsg === "/c") {
@@ -190,7 +212,9 @@ client.on("messageCreate", async (msg) => {
       topic: "session cleared",
       timestamp: new Date().toISOString(),
     });
-    await msg.reply("🧹 Session cleared. The next message will start a fresh session with full context.");
+    const clearReply = "🧹 Session cleared. The next message will start a fresh session with full context.";
+    await msg.reply(clearReply);
+    await logTurn({ dir: "out", kind: "clear", text: clearReply });
     return;
   }
 
@@ -238,6 +262,7 @@ client.on("messageCreate", async (msg) => {
     const isSilent = canon(replyText) === canon(NO_REPLY);
     if (isSilent) {
       console.log("🤫 Stayed silent (no_reply sentinel)");
+      await logTurn({ dir: "out", kind: "silent", text: "", sessionId: response.session_id || null });
       return;
     }
 
@@ -249,9 +274,12 @@ client.on("messageCreate", async (msg) => {
     }
 
     console.log(`✅ Replied (${reply.length} chars)`);
+    await logTurn({ dir: "out", kind: "reply", text: reply, sessionId: response.session_id || null });
   } catch (err) {
     console.error("❌ Error:", err);
-    await msg.reply(`Something went wrong:\n\`\`\`\n${err.message}\n\`\`\``);
+    const errReply = `Something went wrong:\n\`\`\`\n${err.message}\n\`\`\``;
+    await msg.reply(errReply);
+    await logTurn({ dir: "out", kind: "error", text: errReply, error: err.message });
   } finally {
     clearInterval(typingInterval);
   }
