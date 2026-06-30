@@ -32,6 +32,7 @@ const CHAT_LOG = path.join(AGENT_DIR, "messages.jsonl");
 // Claude is spawned to consolidate it into memory using MEMORY_PROMPT_FILE.
 const LOGS_DIR = path.join(AGENT_DIR, "logs");
 const MEMORY_PROMPT_FILE = path.join(AGENT_DIR, "memory-prompt.md");
+const MEMORY_FILE = path.join(AGENT_DIR, "memories", "MEMORY.md");
 
 async function logTurn(entry) {
   try {
@@ -91,9 +92,22 @@ async function consolidateMemory(archivePath) {
     return;
   }
 
-  const prompt = template.includes("{{TRANSCRIPT}}")
+  // Inject the current long-term memory so the pass merges/updates instead of
+  // blindly duplicating. Use {{MEMORY}} in the prompt, else it's appended.
+  let memory = "";
+  try {
+    memory = (await readFile(MEMORY_FILE, "utf-8")).trim();
+  } catch {
+    /* no memory file yet */
+  }
+
+  let prompt = template.includes("{{TRANSCRIPT}}")
     ? template.replaceAll("{{TRANSCRIPT}}", archivePath)
     : `${template}\n\nTranscript file: ${archivePath}`;
+
+  prompt = prompt.includes("{{MEMORY}}")
+    ? prompt.replaceAll("{{MEMORY}}", memory || "(empty)")
+    : `${prompt}\n\n=== CURRENT MEMORY (${path.relative(AGENT_DIR, MEMORY_FILE)}) ===\n${memory || "(empty)"}\n=== END CURRENT MEMORY ===`;
 
   const args = ["-p", prompt, "--allowedTools", "Read,Write,Edit", "--dangerously-skip-permissions"];
 

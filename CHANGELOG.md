@@ -13,7 +13,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
   prompt in `memory-prompt.md` (`{{TRANSCRIPT}}` is replaced with the archive
   path). If `memory-prompt.md` is absent/empty the consolidation is skipped but
   the archive still happens. `messages.jsonl` resets after each archive so every
-  archive is exactly one conversation. `logs/` is gitignored.
+  archive is exactly one conversation. `logs/` is gitignored. The current
+  long-term memory (`memories/MEMORY.md`) is also injected into the prompt
+  (`{{MEMORY}}` placeholder, else appended) so the pass merges instead of
+  duplicating.
 - Bot-level JSONL transcript: every turn through Alfred is appended to
   `messages.jsonl` — inbound (`dir:"in"`) and outbound (`dir:"out"`, with
   `kind` of reply/clear/silent/error). This is the bot's own log, separate from
@@ -25,6 +28,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
 - Silent opt-out: Alfred can emit `<no_reply>` (and nothing else) when a message
   isn't directed at it, and the bot stays completely silent instead of posting.
   Guidance for when to use it lives in `SOUL.md`.
+- `CLAUDE.md` documenting the project and the issue → branch → PR → version workflow.
+- `CHANGELOG.md` (this file).
+
+### Changed
+- Expanded `.gitignore` to cover `node_modules/`, logs, `state.json`, and `messages.jsonl`.
 
 ### Changed
 - Expanded `.gitignore` to cover `node_modules/`, `*.log`, and `state.json`.
