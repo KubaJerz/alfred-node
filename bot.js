@@ -213,7 +213,6 @@ async function loadContext() {
     { path: "SOUL.md", label: "SOUL" },
     { path: "USER.md", label: "USER" },
     { path: "memories/MEMORY.md", label: "LONG_TERM_MEMORY" },
-    { path: "memories/OLD_MEMORY.md", label: "ARCHIVED_MEMORY" },
   ];
 
   const today = new Date().toISOString().split("T")[0];
