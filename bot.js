@@ -2,7 +2,7 @@ import "dotenv/config";
 import { Client, GatewayIntentBits, Partials } from "discord.js";
 import { spawn } from "child_process";
 import { readFile, writeFile, mkdir, appendFile } from "fs/promises";
-import { existsSync } from "fs";
+import { existsSync, openSync } from "fs";
 import path from "path";
 
 // ── Config ──────────────────────────────────────────────────────────────────
@@ -28,11 +28,87 @@ const STATE_FILE = path.join(AGENT_DIR, "state.json");
 // bot's OWN log, separate from Claude Code's per-session .jsonl files.
 const CHAT_LOG = path.join(AGENT_DIR, "messages.jsonl");
 
+// On /clear, the live transcript is archived under LOGS_DIR and a headless
+// Claude is spawned to consolidate it into memory using MEMORY_PROMPT_FILE.
+const LOGS_DIR = path.join(AGENT_DIR, "logs");
+const MEMORY_PROMPT_FILE = path.join(AGENT_DIR, "memory-prompt.md");
+
 async function logTurn(entry) {
   try {
     await appendFile(CHAT_LOG, JSON.stringify({ ts: new Date().toISOString(), ...entry }) + "\n");
   } catch (err) {
     console.error(`⚠️  Failed to write ${CHAT_LOG}: ${err.message}`);
+  }
+}
+
+// On /clear: copy the just-ended conversation from messages.jsonl into
+// logs/<firstTs>_to_<lastTs>.jsonl (UTC, filename-safe), excluding the /clear
+// command itself, then reset the live transcript so the next conversation
+// starts clean. Returns the archive path, or null if there was nothing to save.
+async function archiveConversation() {
+  let raw;
+  try {
+    raw = await readFile(CHAT_LOG, "utf-8");
+  } catch {
+    return null; // no transcript yet
+  }
+
+  const entries = raw
+    .split("\n")
+    .filter(Boolean)
+    .map((l) => { try { return JSON.parse(l); } catch { return null; } })
+    .filter(Boolean)
+    // drop the /clear command line — we want the messages *before* it
+    .filter((e) => !(e.dir === "in" && /^\/(clear|c)$/i.test((e.text || "").trim())));
+
+  if (!entries.length) return null;
+
+  const safe = (ts) => String(ts).replace(/:/g, "-"); // ':' is awkward in filenames
+  const name = `${safe(entries[0].ts)}_to_${safe(entries[entries.length - 1].ts)}.jsonl`;
+
+  await mkdir(LOGS_DIR, { recursive: true });
+  const archivePath = path.join(LOGS_DIR, name);
+  await writeFile(archivePath, entries.map((e) => JSON.stringify(e)).join("\n") + "\n");
+
+  await writeFile(CHAT_LOG, ""); // reset live transcript for the next conversation
+  return archivePath;
+}
+
+// Spawn a headless Claude to turn an archived transcript into memory. The
+// memory-making prompt lives in memory-prompt.md so it can change without
+// touching code; `{{TRANSCRIPT}}` in it is replaced with the archive path.
+// Detached + unref'd so it never blocks the bot or dies when the bot restarts.
+async function consolidateMemory(archivePath) {
+  let template;
+  try {
+    template = (await readFile(MEMORY_PROMPT_FILE, "utf-8")).trim();
+  } catch {
+    console.warn(`🧠 No ${MEMORY_PROMPT_FILE} yet — skipping memory consolidation`);
+    return;
+  }
+  if (!template) {
+    console.warn(`🧠 ${MEMORY_PROMPT_FILE} is empty — skipping memory consolidation`);
+    return;
+  }
+
+  const prompt = template.includes("{{TRANSCRIPT}}")
+    ? template.replaceAll("{{TRANSCRIPT}}", archivePath)
+    : `${template}\n\nTranscript file: ${archivePath}`;
+
+  const args = ["-p", prompt, "--allowedTools", "Read,Write,Edit", "--dangerously-skip-permissions"];
+
+  try {
+    await mkdir(LOGS_DIR, { recursive: true });
+    const logFd = openSync(path.join(LOGS_DIR, "consolidate.log"), "a");
+    const proc = spawn("claude", args, {
+      cwd: AGENT_DIR,
+      detached: true,
+      stdio: ["ignore", logFd, logFd],
+    });
+    proc.unref();
+    console.log(`🧠 Spawned headless memory consolidation (pid ${proc.pid}) → ${archivePath}`);
+  } catch (err) {
+    console.error(`🧠 Failed to spawn memory consolidation: ${err.message}`);
   }
 }
 
@@ -206,15 +282,27 @@ client.on("messageCreate", async (msg) => {
   const lowerMsg = userMessage.toLowerCase();
   if (lowerMsg === "/clear" || lowerMsg === "/c") {
     console.log(`🧹 Clearing session for ${msg.author.tag}`);
+
+    // Archive the just-ended conversation, then kick off memory consolidation.
+    let archivePath = null;
+    try {
+      archivePath = await archiveConversation();
+      if (archivePath) {
+        console.log(`📦 Archived conversation → ${archivePath}`);
+        await consolidateMemory(archivePath);
+      }
+    } catch (err) {
+      console.error(`⚠️  Archive/consolidate failed: ${err.message}`);
+    }
+
     await writeState({
       status: "resolved",
       last_session_id: null,
       topic: "session cleared",
       timestamp: new Date().toISOString(),
     });
-    const clearReply = "🧹 Session cleared. The next message will start a fresh session with full context.";
-    await msg.reply(clearReply);
-    await logTurn({ dir: "out", kind: "clear", text: clearReply });
+    const note = archivePath ? " (archived + consolidating memory)" : "";
+    await msg.reply(`🧹 Session cleared.${note} The next message will start a fresh session with full context.`);
     return;
   }
 

@@ -4,3 +4,4 @@ node_modules/
 alfred.log
 state.json
 messages.jsonl
+logs/
