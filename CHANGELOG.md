@@ -38,6 +38,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
   `memories/MEMORY.md`.
 
 ### Changed
+- Split dev guidance out of `CLAUDE.md` into `CONTRIBUTING.md`. `CLAUDE.md` is
+  auto-loaded by Claude Code from the working dir — and since `bot.js` spawns
+  `claude` in that same dir, the full issue→PR→SemVer workflow was leaking into
+  Alfred's runtime prompt on every message. `CLAUDE.md` is now a short stub that
+  points to `CONTRIBUTING.md` (not auto-loaded) for the workflow.
 - Both memory passes now explicitly permit a no-op: `memory-prompt.md` and the
   `dream.sh` prompt tell the model it's fine to make no edits when nothing is
   worth logging/promoting, so it doesn't invent filler entries.
