@@ -1,7 +1,9 @@
 # Long-Term Memory
 
-_Curated facts promoted from daily notes during dreaming passes._
-_Keep this file short and high-signal._
+_The single long-term memory store. Curated facts promoted from daily notes_
+_during nightly dreaming passes. Keep this file short and high-signal — it is_
+_injected into every prompt. If it ever grows too large to inject every turn,_
+_split it into tiered L1/L2 memory (see issue #8)._
 
 ---
 

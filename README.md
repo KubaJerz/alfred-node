@@ -7,8 +7,7 @@ Alfred Node is a phrygentic personal AI assistant built as a bridge between Disc
 - **Headless Claude**: Alfred runs Claude Code programmatically, managing sessions and context injection without a terminal UI.
 - **Phrygentic Memory**:
     - **Daily Notes**: Active session context is logged to `memories/dailies/`.
-    - **Dreaming**: A nightly pass (`dream.sh`) consolidates daily notes into `memories/MEMORY.md`.
-    - **Archival**: Older memories are eventually moved to `memories/OLD_MEMORY.md`.
+    - **Dreaming**: A nightly pass (`dream.sh`) consolidates daily notes into `memories/MEMORY.md`, a single lean long-term store.
 - **Context Injection**: New sessions automatically load your `SOUL.md` (instructions), `USER.md` (preferences), and long-term memories.
 
 ## Setup

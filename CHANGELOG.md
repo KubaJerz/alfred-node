@@ -10,6 +10,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
 
 ### Changed
 - Expanded `.gitignore` to cover `node_modules/`, `*.log`, and `state.json`.
+- Collapsed the two-tier long-term memory (`MEMORY.md` + `OLD_MEMORY.md`) into a
+  single `memories/MEMORY.md`. `loadContext` no longer injects an archive file,
+  and `dream.sh` curates one lean store instead of demoting items between two.
+  The hot/cold (L1/L2) split is deferred until memory is large enough to need it
+  (tracked in #8).
+
+### Removed
+- `memories/OLD_MEMORY.md` and all code/doc references to it.
 
 ### Fixed
 - Bot failed to spawn `claude` (exit -2 / ENOENT) when started from
