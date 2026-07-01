@@ -38,6 +38,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
   `memories/MEMORY.md`.
 
 ### Changed
+- Both memory passes now explicitly permit a no-op: `memory-prompt.md` and the
+  `dream.sh` prompt tell the model it's fine to make no edits when nothing is
+  worth logging/promoting, so it doesn't invent filler entries.
 - Expanded `.gitignore` to cover `node_modules/`, logs, `state.json`, and `messages.jsonl`.
 - Collapsed the two-tier long-term memory (`MEMORY.md` + `OLD_MEMORY.md`) into a
   single `memories/MEMORY.md`. `loadContext` no longer injects an archive file,

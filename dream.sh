@@ -28,8 +28,12 @@ Be strict — most daily lines should NOT be promoted. Skip anything one-off,
 time-bound, or already in MEMORY.md. Remove memory items that are now outdated
 or contradicted. One concise line per fact; keep MEMORY.md short.
 
+If nothing qualifies, that's completely fine — promote nothing and leave
+MEMORY.md unchanged. Don't force a promotion just to have something to add.
+
 Then append an entry to memories/changelog.json (read it first):
-{ 'date', 'added_to_memory', 'removed_from_memory', 'summary' }." \
+{ 'date', 'added_to_memory', 'removed_from_memory', 'summary' } — use empty
+lists when nothing changed, so the log still records that the pass ran." \
   --output-format json \
   --allowedTools "Bash,Read,Edit,Write" \
   --dangerously-skip-permissions
