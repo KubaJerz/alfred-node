@@ -1,14 +1,7 @@
 # Secrets & env
 .env
-.env.*
-!env.example
-
-# Dependencies
 node_modules/
-
-# Runtime artifacts
-*.log
+alfred.log
 state.json
-
-# OS / editor
-.DS_Store
+messages.jsonl
+logs/

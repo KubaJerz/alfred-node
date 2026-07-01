@@ -1,8 +1,8 @@
 import "dotenv/config";
 import { Client, GatewayIntentBits, Partials } from "discord.js";
 import { spawn } from "child_process";
-import { readFile, writeFile, mkdir } from "fs/promises";
-import { existsSync } from "fs";
+import { readFile, writeFile, mkdir, appendFile } from "fs/promises";
+import { existsSync, openSync } from "fs";
 import path from "path";
 
 // ── Config ──────────────────────────────────────────────────────────────────
@@ -11,6 +11,10 @@ const ALLOWED_USER_IDS = (process.env.ALLOWED_USER_IDS || "").split(",").filter(
 const AGENT_DIR = process.env.AGENT_DIR || path.resolve(".");
 const TIMEOUT_MS = parseInt(process.env.CLAUDE_TIMEOUT_MS || "120000"); // 2 min default
 
+// Sentinel Alfred emits (and nothing else) when it judges a message isn't
+// directed at it. The bot detects it and stays silent instead of replying.
+const NO_REPLY = "<no_reply>";
+
 if (!DISCORD_TOKEN) {
   console.error("❌ Set DISCORD_TOKEN env var");
   process.exit(1);
@@ -18,6 +22,115 @@ if (!DISCORD_TOKEN) {
 
 // ── State management ────────────────────────────────────────────────────────
 const STATE_FILE = path.join(AGENT_DIR, "state.json");
+
+// Append-only JSONL transcript of every turn through the bot — one JSON object
+// per line, both inbound (user → bot) and outbound (bot → user). This is the
+// bot's OWN log, separate from Claude Code's per-session .jsonl files.
+const CHAT_LOG = path.join(AGENT_DIR, "messages.jsonl");
+
+// On /clear, the live transcript is archived under LOGS_DIR and a headless
+// Claude is spawned to fold it into today's daily note using MEMORY_PROMPT_FILE.
+// The nightly dream.sh pass later promotes durable facts from dailies → MEMORY.md.
+const LOGS_DIR = path.join(AGENT_DIR, "logs");
+const MEMORY_PROMPT_FILE = path.join(AGENT_DIR, "memory-prompt.md");
+
+async function logTurn(entry) {
+  try {
+    await appendFile(CHAT_LOG, JSON.stringify({ ts: new Date().toISOString(), ...entry }) + "\n");
+  } catch (err) {
+    console.error(`⚠️  Failed to write ${CHAT_LOG}: ${err.message}`);
+  }
+}
+
+// On /clear: copy the just-ended conversation from messages.jsonl into
+// logs/<firstTs>_to_<lastTs>.jsonl (UTC, filename-safe), excluding the /clear
+// command itself, then reset the live transcript so the next conversation
+// starts clean. Returns the archive path, or null if there was nothing to save.
+async function archiveConversation() {
+  let raw;
+  try {
+    raw = await readFile(CHAT_LOG, "utf-8");
+  } catch {
+    return null; // no transcript yet
+  }
+
+  const entries = raw
+    .split("\n")
+    .filter(Boolean)
+    .map((l) => { try { return JSON.parse(l); } catch { return null; } })
+    .filter(Boolean)
+    // drop the /clear command line — we want the messages *before* it
+    .filter((e) => !(e.dir === "in" && /^\/(clear|c)$/i.test((e.text || "").trim())));
+
+  if (!entries.length) return null;
+
+  const safe = (ts) => String(ts).replace(/:/g, "-"); // ':' is awkward in filenames
+  const name = `${safe(entries[0].ts)}_to_${safe(entries[entries.length - 1].ts)}.jsonl`;
+
+  await mkdir(LOGS_DIR, { recursive: true });
+  const archivePath = path.join(LOGS_DIR, name);
+  await writeFile(archivePath, entries.map((e) => JSON.stringify(e)).join("\n") + "\n");
+
+  await writeFile(CHAT_LOG, ""); // reset live transcript for the next conversation
+  return archivePath;
+}
+
+// Spawn a headless Claude to fold an archived transcript into today's daily
+// note. The prompt lives in memory-prompt.md so it can change without touching
+// code: `{{TRANSCRIPT}}` → archive path, `{{DAILY_PATH}}` → today's note path,
+// `{{DAILY}}` → its current contents (so the pass merges instead of clobbering).
+// Detached + unref'd so it never blocks the bot or dies when the bot restarts.
+async function consolidateMemory(archivePath) {
+  let template;
+  try {
+    template = (await readFile(MEMORY_PROMPT_FILE, "utf-8")).trim();
+  } catch {
+    console.warn(`🧠 No ${MEMORY_PROMPT_FILE} yet — skipping memory consolidation`);
+    return;
+  }
+  if (!template) {
+    console.warn(`🧠 ${MEMORY_PROMPT_FILE} is empty — skipping memory consolidation`);
+    return;
+  }
+
+  // Target today's daily note. Inject its current contents so the pass appends
+  // to what's there instead of overwriting. Use {{DAILY}} in the prompt, else
+  // it's appended. {{DAILY_PATH}} tells the pass where to write.
+  const today = new Date().toISOString().split("T")[0];
+  const dailyRel = `memories/dailies/${today}.md`;
+  let daily = "";
+  try {
+    daily = (await readFile(path.join(AGENT_DIR, dailyRel), "utf-8")).trim();
+  } catch {
+    /* no note for today yet */
+  }
+
+  let prompt = template.includes("{{TRANSCRIPT}}")
+    ? template.replaceAll("{{TRANSCRIPT}}", archivePath)
+    : `${template}\n\nTranscript file: ${archivePath}`;
+
+  prompt = prompt.replaceAll("{{DAILY_PATH}}", dailyRel);
+
+  prompt = prompt.includes("{{DAILY}}")
+    ? prompt.replaceAll("{{DAILY}}", daily || "(empty)")
+    : `${prompt}\n\n=== TODAY'S DAILY NOTE (${dailyRel}) ===\n${daily || "(empty)"}\n=== END DAILY NOTE ===`;
+
+  const args = ["-p", prompt, "--allowedTools", "Read,Write,Edit", "--dangerously-skip-permissions"];
+
+  try {
+    await mkdir(LOGS_DIR, { recursive: true });
+    const logFd = openSync(path.join(LOGS_DIR, "consolidate.log"), "a");
+    const proc = spawn("claude", args, {
+      cwd: AGENT_DIR,
+      detached: true,
+      stdio: ["ignore", logFd, logFd],
+    });
+    proc.unref();
+    console.log(`🧠 Spawned headless daily-note consolidation (pid ${proc.pid}) → ${archivePath}`);
+  } catch (err) {
+    console.error(`🧠 Failed to spawn memory consolidation: ${err.message}`);
+  }
+}
 
 async function readState() {
   try {
@@ -122,15 +235,48 @@ client.once("ready", () => {
   }
 });
 
+// ── Connection watchdog ──────────────────────────────────────────────────────
+// After a long suspend (laptop slept for hours), discord.js can end up silently
+// disconnected: the process stays alive — so start-alfred.sh's restart loop
+// never fires — but the gateway socket is dead, so Alfred stops receiving
+// messages. We watch the connection and, if it stays down past a grace period,
+// exit non-zero so the wrapper relaunches us with a fresh login.
+const WATCHDOG_GRACE_MS = parseInt(process.env.WATCHDOG_GRACE_MS || "90000"); // 90s
+let downSince = null;
+
+function restartProcess(reason) {
+  console.error(`🔄 Restarting bot: ${reason}`);
+  process.exit(1); // start-alfred.sh's `while true` loop relaunches us
+}
+
+// discord.js has given up on the session and won't reconnect on its own.
+client.on("invalidated", () => restartProcess("Discord session invalidated"));
+client.on("error", (err) => console.error(`⚠️  Client error: ${err?.message || err}`));
+client.on("shardDisconnect", (e, id) => console.warn(`⚠️  Shard ${id} disconnected (code ${e?.code}); awaiting reconnect…`));
+client.on("shardReconnecting", (id) => console.warn(`… shard ${id} reconnecting`));
+client.on("shardResume", (id) => console.log(`✅ Shard ${id} resumed`));
+
+setInterval(() => {
+  if (client.isReady()) {
+    if (downSince) console.log("✅ Gateway healthy again");
+    downSince = null;
+    return;
+  }
+  if (!downSince) {
+    downSince = Date.now();
+    console.warn("⚠️  Gateway not ready; watching for recovery…");
+  } else if (Date.now() - downSince > WATCHDOG_GRACE_MS) {
+    restartProcess(`gateway down for ${Math.round((Date.now() - downSince) / 1000)}s`);
+  }
+}, 30000);
+
 client.on("messageCreate", async (msg) => {
   // Ignore own messages and other bots
   if (msg.author.bot) return;
 
-  // Check if this is a DM or a mention in a server
-  const isDM = !msg.guild;
-  const isMention = msg.mentions.has(client.user);
-
-  if (!isDM && !isMention) return;
+  // Respond to every message from an authorized user — no @mention required,
+  // in DMs and any channel Alfred can see. Access is enforced by the auth
+  // check below, so Alfred only ever acts on messages from ALLOWED_USER_IDS.
 
   // Auth check
   if (ALLOWED_USER_IDS.length && !ALLOWED_USER_IDS.includes(msg.author.id)) {
@@ -143,17 +289,40 @@ client.on("messageCreate", async (msg) => {
 
   if (!userMessage) return;
 
+  // Log the inbound turn (user → bot) before anything else.
+  await logTurn({
+    dir: "in",
+    user: msg.author.tag,
+    userId: msg.author.id,
+    channel: msg.channelId,
+    text: userMessage,
+  });
+
   // Handle /clear or /c command
   const lowerMsg = userMessage.toLowerCase();
   if (lowerMsg === "/clear" || lowerMsg === "/c") {
     console.log(`🧹 Clearing session for ${msg.author.tag}`);
+
+    // Archive the just-ended conversation, then kick off memory consolidation.
+    let archivePath = null;
+    try {
+      archivePath = await archiveConversation();
+      if (archivePath) {
+        console.log(`📦 Archived conversation → ${archivePath}`);
+        await consolidateMemory(archivePath);
+      }
+    } catch (err) {
+      console.error(`⚠️  Archive/consolidate failed: ${err.message}`);
+    }
+
     await writeState({
       status: "resolved",
       last_session_id: null,
       topic: "session cleared",
       timestamp: new Date().toISOString(),
     });
-    await msg.reply("🧹 Session cleared. The next message will start a fresh session with full context.");
+    const note = archivePath ? " (archived + consolidating memory)" : "";
+    await msg.reply(`🧹 Session cleared.${note} The next message will start a fresh session with full context.`);
     return;
   }
 
@@ -183,7 +352,7 @@ client.on("messageCreate", async (msg) => {
     // Run Claude
     const response = await runClaude(finalMessage, sessionId);
 
-    // Update state
+    // Persist session continuity whether or not we end up replying.
     await writeState({
       last_session_id: response.session_id || state.last_session_id,
       status: "open", // stays open; claude can mark resolved via daily notes
@@ -191,17 +360,34 @@ client.on("messageCreate", async (msg) => {
       timestamp: new Date().toISOString(),
     });
 
+    // Alfred can opt out of replying by emitting ONLY the sentinel — used when
+    // a message clearly isn't directed at it. Tolerate stray markdown/quotes.
+    const replyText = (response.result || "").trim();
+    // Normalize away markdown/quoting/brackets, keep letters + underscore, so
+    // `<no_reply>`, `> <no_reply>`, **<no_reply>** etc. all match. Requiring the
+    // underscore avoids silencing a genuine reply like "no reply" (-> noreply).
+    const canon = (s) => s.toLowerCase().replace(/[^a-z_]/g, "");
+    const isSilent = canon(replyText) === canon(NO_REPLY);
+    if (isSilent) {
+      console.log("🤫 Stayed silent (no_reply sentinel)");
+      await logTurn({ dir: "out", kind: "silent", text: "", sessionId: response.session_id || null });
+      return;
+    }
+
     // Send reply (Discord has a 2000 char limit)
-    const reply = response.result || "(empty response)";
+    const reply = replyText || "(empty response)";
     const chunks = splitMessage(reply, 1900);
     for (const chunk of chunks) {
       await msg.reply(chunk);
     }
 
     console.log(`✅ Replied (${reply.length} chars)`);
+    await logTurn({ dir: "out", kind: "reply", text: reply, sessionId: response.session_id || null });
   } catch (err) {
     console.error("❌ Error:", err);
-    await msg.reply(`Something went wrong:\n\`\`\`\n${err.message}\n\`\`\``);
+    const errReply = `Something went wrong:\n\`\`\`\n${err.message}\n\`\`\``;
+    await msg.reply(errReply);
+    await logTurn({ dir: "out", kind: "error", text: errReply, error: err.message });
   } finally {
     clearInterval(typingInterval);
   }

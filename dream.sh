@@ -15,21 +15,21 @@ fi
 
 echo "$(date): Starting dreaming pass for $TODAY..."
 
-claude -p "You are running a nightly memory consolidation pass. Do the following:
+claude -p "You are Alfred's nightly dreaming pass — promote only durable facts into long-term memory.
 
-1. Read today's daily notes: memories/dailies/${TODAY}.md
-2. Read memories/MEMORY.md (the single long-term memory store)
-3. Look for items marked with <!-- PROMOTE --> or facts that are durable and useful across sessions
-4. Update memories/MEMORY.md:
-   - Append promoted items (keep it concise, one line per fact)
-   - Remove any items that are now outdated or contradicted
-   - Merge duplicates so the file stays lean and high-signal
-5. Update memories/changelog.json:
-   - Append a new entry for today's date
-   - The entry must include: 'date', 'added_to_memory', 'removed_from_memory', and a brief 'summary'
-   - Read the existing file first to ensure you append to the JSON array correctly
+1. Read today's daily note: memories/dailies/${TODAY}.md
+2. Read current long-term memory: memories/MEMORY.md
 
-Be selective. memories/MEMORY.md should stay short and high-signal." \
+Promote into memories/MEMORY.md only facts that stay true across sessions:
+stable preferences, ongoing projects, key people, standing decisions. Prefer
+items tagged <!-- PROMOTE -->.
+
+Be strict — most daily lines should NOT be promoted. Skip anything one-off,
+time-bound, or already in MEMORY.md. Remove memory items that are now outdated
+or contradicted. One concise line per fact; keep MEMORY.md short.
+
+Then append an entry to memories/changelog.json (read it first):
+{ 'date', 'added_to_memory', 'removed_from_memory', 'summary' }." \
   --output-format json \
   --allowedTools "Bash,Read,Edit,Write" \
   --dangerously-skip-permissions
