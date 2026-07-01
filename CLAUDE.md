@@ -14,6 +14,7 @@ result. A nightly `dream.sh` pass consolidates daily notes into long-term memory
 - **Runtime:** Node.js (currently v24.x via nvm) + `discord.js` v14
 - **Secrets:** live in `.env` (gitignored). Never commit real tokens. `env.example` documents the keys.
 - **Runtime artifacts** (`alfred.log`, `state.json`, `node_modules/`) are gitignored — do not commit them.
+- **Attachments:** Alfred can send files by emitting `{img:path}` / `{pdf:path}` / `{file:path}` in its reply; `bot.js` extracts these, attaches the files, and strips the tokens. Documented for the agent in `SOUL.md`.
 
 ## Working agreement (READ BEFORE CHANGING CODE)
 

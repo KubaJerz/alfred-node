@@ -1,8 +1,8 @@
 import "dotenv/config";
-import { Client, GatewayIntentBits, Partials } from "discord.js";
+import { Client, GatewayIntentBits, Partials, AttachmentBuilder } from "discord.js";
 import { spawn } from "child_process";
 import { readFile, writeFile, mkdir, appendFile } from "fs/promises";
-import { existsSync, openSync } from "fs";
+import { existsSync, openSync, statSync } from "fs";
 import path from "path";
 
 // ── Config ──────────────────────────────────────────────────────────────────
@@ -14,6 +14,15 @@ const TIMEOUT_MS = parseInt(process.env.CLAUDE_TIMEOUT_MS || "120000"); // 2 min
 // Sentinel Alfred emits (and nothing else) when it judges a message isn't
 // directed at it. The bot detects it and stays silent instead of replying.
 const NO_REPLY = "<no_reply>";
+
+// Alfred can attach files by writing {img:path}, {pdf:path}, or {file:path}
+// inline in its reply. All three behave the same — Discord auto-detects type;
+// the prefix is just an author hint. Any readable path works (absolute, or
+// relative to AGENT_DIR), matching the fact that the agent works across all dirs.
+const ATTACH_RE = /\{(?:img|pdf|file):\s*([^}]+?)\s*\}/gi;
+const MAX_FILES_PER_MSG = 10; // Discord's hard cap per message
+const MAX_ATTACHMENTS = parseInt(process.env.MAX_ATTACHMENTS || "30"); // total per reply
+const MAX_FILE_BYTES = parseInt(process.env.MAX_FILE_BYTES || String(8 * 1024 * 1024)); // 8 MB
 
 if (!DISCORD_TOKEN) {
   console.error("❌ Set DISCORD_TOKEN env var");
@@ -374,15 +383,14 @@ client.on("messageCreate", async (msg) => {
       return;
     }
 
-    // Send reply (Discord has a 2000 char limit)
-    const reply = replyText || "(empty response)";
-    const chunks = splitMessage(reply, 1900);
-    for (const chunk of chunks) {
-      await msg.reply(chunk);
-    }
+    // Pull out any {img:}/{pdf:}/{file:} attachments, then send (Discord has a
+    // 2000-char limit per message; files batch to 10 per message).
+    const { text: cleaned, files } = extractAttachments(replyText);
+    const reply = cleaned.trim() || (files.length ? "" : "(empty response)");
+    await sendReply(msg, reply, files);
 
-    console.log(`✅ Replied (${reply.length} chars)`);
-    await logTurn({ dir: "out", kind: "reply", text: reply, sessionId: response.session_id || null });
+    console.log(`✅ Replied (${reply.length} chars${files.length ? `, ${files.length} file(s)` : ""})`);
+    await logTurn({ dir: "out", kind: "reply", text: reply, files: files.length, sessionId: response.session_id || null });
   } catch (err) {
     console.error("❌ Error:", err);
     const errReply = `Something went wrong:\n\`\`\`\n${err.message}\n\`\`\``;
@@ -433,6 +441,57 @@ function splitMessage(text, maxLen) {
     text = text.slice(splitAt).trimStart();
   }
   return chunks;
+}
+
+// Pull {img:}/{pdf:}/{file:} tokens out of a reply, turn the valid ones into
+// Discord attachments, and strip the tokens from the visible text. Each file is
+// renamed attachment_<i>.<ext> — index-based names avoid collisions between
+// files that share a basename. Invalid tokens (missing / too big / over the
+// count cap) are replaced with a short inline note instead of crashing.
+function extractAttachments(text) {
+  const files = [];
+  let i = 0;
+  const cleaned = text.replace(ATTACH_RE, (_match, rawPath) => {
+    const p = rawPath.trim();
+    const label = path.basename(p) || p;
+    if (i >= MAX_ATTACHMENTS) return `⚠️ (skipped ${label} — over ${MAX_ATTACHMENTS}-file limit)`;
+
+    const abs = path.isAbsolute(p) ? p : path.join(AGENT_DIR, p);
+    let stat;
+    try {
+      stat = statSync(abs);
+    } catch {
+      return `⚠️ (couldn't attach ${label} — not found)`;
+    }
+    if (!stat.isFile()) return `⚠️ (couldn't attach ${label} — not a file)`;
+    if (stat.size > MAX_FILE_BYTES) {
+      return `⚠️ (couldn't attach ${label} — ${(stat.size / 1048576).toFixed(1)}MB over ` +
+        `${(MAX_FILE_BYTES / 1048576).toFixed(0)}MB limit)`;
+    }
+
+    files.push(new AttachmentBuilder(abs, { name: `attachment_${i}${path.extname(p)}` }));
+    i++;
+    return ""; // strip the token from the visible reply
+  });
+  return { text: cleaned, files };
+}
+
+// Send a reply that may carry attachments. Text is chunked to Discord's char
+// limit; files ride on the final message, batched to MAX_FILES_PER_MSG.
+async function sendReply(msg, text, files) {
+  const chunks = text ? splitMessage(text, 1900) : [];
+  if (!files.length) {
+    for (const chunk of chunks) await msg.reply(chunk);
+    return;
+  }
+  // Leading chunks go out as plain text; the last chunk rides with the first file batch.
+  for (const chunk of chunks.slice(0, -1)) await msg.reply(chunk);
+  const trailing = chunks.length ? chunks[chunks.length - 1] : "";
+  for (let b = 0; b < files.length; b += MAX_FILES_PER_MSG) {
+    const payload = { files: files.slice(b, b + MAX_FILES_PER_MSG) };
+    if (b === 0 && trailing) payload.content = trailing;
+    await msg.reply(payload);
+  }
 }
 
 // ── Launch ──────────────────────────────────────────────────────────────────
