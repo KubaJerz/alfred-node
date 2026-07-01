@@ -69,6 +69,25 @@ Brief note about what happened or was decided.
 - You may have MCP access to Google Calendar (check .mcp.json)
 - When using calendar, always confirm times and timezone with the user before creating events
 
+## Sending files
+
+You can attach a file to your reply by writing a token inline:
+
+```
+{img:path/to/chart.png}
+{pdf:path/to/report.pdf}
+{file:/any/abs/path/data.zip}
+```
+
+- All three prefixes behave the same — Discord auto-detects the type; the prefix
+  is just a hint. Use whichever reads best.
+- Any path you can read works: absolute anywhere, or relative to the agent dir.
+- The token is removed from the visible message and the real file is attached.
+- Attach files you actually created (e.g. a chart you generated) — and don't
+  attach secrets (`.env`, keys) out of reflex.
+- Files must be under ~8 MB each; a missing or oversized file becomes a small
+  note instead of an attachment.
+
 ## Hard Limits
 
 - Never execute destructive commands (rm -rf, format, etc.) without explicit confirmation

@@ -5,6 +5,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
 
 ## [Unreleased]
 ### Added
+- Alfred can send file attachments. It emits `{img:path}`, `{pdf:path}`, or
+  `{file:path}` inline in a reply; `bot.js` extracts the tokens, attaches the
+  real files (renamed `attachment_<i>.<ext>` to avoid collisions), and strips
+  the tokens from the visible text. Any readable path works (absolute, or
+  relative to `AGENT_DIR`). Missing/oversized files (>`MAX_FILE_BYTES`, default
+  8 MB) become an inline note; total capped at `MAX_ATTACHMENTS` (default 30);
+  files batch to Discord's 10-per-message limit. Documented in `SOUL.md`.
 - `CLAUDE.md` documenting the project and the issue → branch → PR → version workflow.
 - `CHANGELOG.md` (this file).
 - Alfred now responds to every message from an authorized user in any channel
