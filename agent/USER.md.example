@@ -1,0 +1,15 @@
+# User Profile
+
+<!--
+  Template. On first run the bot copies this to agent/var/USER.md, which is
+  gitignored — fill in that copy, not this one. Keep this file free of real
+  personal details; it is committed.
+-->
+
+## Basics
+- Name:
+- Timezone:
+
+## Preferences
+
+## Context

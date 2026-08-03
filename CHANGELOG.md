@@ -5,6 +5,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
 
 ## [Unreleased]
 ### Added
+- `bootstrap()` creates `agent/var/` and seeds `USER.md` (from the new tracked
+  `agent/USER.md.example`), `MEMORY.md`, and `changelog.json` on first run, so a
+  fresh clone works with `npm install && npm start` and no manual setup.
+- Startup check that fails loudly when `AGENT_DIR` has no `SOUL.md`, instead of
+  running with an empty context.
+- `TODO.md` — working backlog for improvements to Alfred.
 - Alfred can send file attachments. It emits `{img:path}`, `{pdf:path}`, or
   `{file:path}` inline in a reply; `bot.js` extracts the tokens, attaches the
   real files (renamed `attachment_<i>.<ext>` to avoid collisions), and strips
@@ -38,6 +44,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
   `memories/MEMORY.md`.
 
 ### Changed
+- **BREAKING — repo restructured into three layers.** The app, Alfred's config,
+  and Alfred's personal data no longer share one directory:
+  - `agent/` holds Alfred's config (`SOUL.md`, `memory-prompt.md`, and its own
+    `CLAUDE.md`) and is now the cwd for every spawned `claude`.
+  - `agent/var/` holds everything personal — `USER.md`, `memories/`, `logs/`,
+    `state.json`, `messages.jsonl` — and is gitignored as a whole.
+  - The repo root keeps the app and dev docs; Alfred never reads them.
+  - `bot.js` resolves `REPO_DIR` from its own module path (not cwd) and derives
+    `AGENT_DIR`/`STATE_DIR` from it; both remain env-overridable.
+
+  **Upgrading:** unset `AGENT_DIR` in your `.env` — an existing value pointing at
+  the repo root now silently starves the bot of context, so the bot refuses to
+  start if `SOUL.md` isn't found there. Update any crontab that writes
+  `dream.log` to `agent/var/logs/dream.log`.
 - Split dev guidance out of `CLAUDE.md` into `CONTRIBUTING.md`. `CLAUDE.md` is
   auto-loaded by Claude Code from the working dir — and since `bot.js` spawns
   `claude` in that same dir, the full issue→PR→SemVer workflow was leaking into
@@ -57,6 +77,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
 - `memories/OLD_MEMORY.md` and all code/doc references to it.
 
 ### Fixed
+- **Personal data is no longer tracked in git.** `USER.md`,
+  `memories/MEMORY.md`, and `memories/changelog.json` were committed;
+  `memories/dailies/` was untracked *and* un-ignored, so any `git add -A` would
+  have committed conversation notes. All now live under the ignored
+  `agent/var/`. (Note: `USER.md` contents remain in git *history* from the
+  initial commit.)
 - Connection watchdog: after a long suspend, discord.js could end up silently
   disconnected (process alive, gateway dead) so Alfred stopped responding. The
   bot now exits when the gateway stays down past a grace period so the restart

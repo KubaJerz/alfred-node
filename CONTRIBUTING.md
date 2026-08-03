@@ -1,21 +1,37 @@
 # Contributing to Alfred Node
 
 Guidance for Claude Code (and humans) working **on** this repository. The bot's
-own runtime instructions live in `SOUL.md`; this file is the dev workflow.
+own runtime instructions live in `agent/SOUL.md`; this file is the dev workflow.
 
 ## What this is
 
 **Alfred Node** is a personal AI assistant that bridges Discord and a headless
 Claude Code instance. `bot.js` is the whole app: it listens for Discord
-messages from authorized users, injects context (`SOUL.md`, `USER.md`, and the
-memory files), runs `claude -p ...` as a subprocess, and replies with the
-result. A nightly `dream.sh` pass consolidates daily notes into long-term memory.
+messages from authorized users, injects context (`agent/SOUL.md`,
+`agent/var/USER.md`, and the memory files), runs `claude -p ...` as a
+subprocess, and replies with the result. A nightly `dream.sh` pass consolidates
+daily notes into long-term memory.
 
 - **Entry point:** `bot.js` (ES modules, `"type": "module"`)
 - **Runtime:** Node.js (currently v24.x via nvm) + `discord.js` v14
 - **Secrets:** live in `.env` (gitignored). Never commit real tokens. `env.example` documents the keys.
-- **Runtime artifacts** (`alfred.log`, `state.json`, `node_modules/`) are gitignored — do not commit them.
-- **Attachments:** Alfred can send files by emitting `{img:path}` / `{pdf:path}` / `{file:path}` in its reply; `bot.js` extracts these, attaches the files, and strips the tokens. Documented for the agent in `SOUL.md`.
+- **Attachments:** Alfred can send files by emitting `{img:path}` / `{pdf:path}` / `{file:path}` in its reply; `bot.js` extracts these, attaches the files, and strips the tokens. Documented for the agent in `agent/SOUL.md`.
+
+### Three layers, kept apart
+
+See `CLAUDE.md` for the full table. The short version:
+
+| path | holds | committed? |
+|---|---|---|
+| repo root | app + dev process | yes |
+| `agent/` | Alfred's config; also its cwd | yes |
+| `agent/var/` | memories, transcripts, logs, `USER.md` | **never** |
+
+`agent/var/` is personal data, guarded by a single `.gitignore` rule. Don't add
+exceptions to it, don't move state files out of it, and don't add anything to
+`agent/` that a person editing this repo needs — that belongs at the root.
+`bot.js` resolves all three from its own module path; `AGENT_DIR`/`STATE_DIR`
+override them but should normally stay unset.
 
 ## Working agreement (READ BEFORE CHANGING CODE)
 

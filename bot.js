@@ -3,13 +3,31 @@ import { Client, GatewayIntentBits, Partials, AttachmentBuilder } from "discord.
 import { spawn } from "child_process";
 import { readFile, writeFile, mkdir, appendFile } from "fs/promises";
 import { existsSync, openSync, statSync } from "fs";
+import { fileURLToPath } from "url";
 import path from "path";
 
 // ── Config ──────────────────────────────────────────────────────────────────
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const ALLOWED_USER_IDS = (process.env.ALLOWED_USER_IDS || "").split(",").filter(Boolean);
-const AGENT_DIR = process.env.AGENT_DIR || path.resolve(".");
 const TIMEOUT_MS = parseInt(process.env.CLAUDE_TIMEOUT_MS || "120000"); // 2 min default
+
+// ── Layout ──────────────────────────────────────────────────────────────────
+// Three kinds of files live here and they don't mix:
+//
+//   REPO_DIR   the app and its dev process (bot.js, CLAUDE.md, CONTRIBUTING).
+//              Alfred never reads these.
+//   AGENT_DIR  Alfred's config — SOUL.md, memory-prompt.md, and its own
+//              CLAUDE.md. Tracked in git, and the cwd we spawn `claude` in,
+//              so Claude Code auto-loads agent/CLAUDE.md rather than the
+//              repo's dev-facing one.
+//   STATE_DIR  Alfred's memory and transcripts. Personal, machine-local,
+//              gitignored wholesale.
+//
+// Resolved from this file rather than cwd so launching from cron, tmux, or any
+// other directory behaves identically.
+const REPO_DIR = path.dirname(fileURLToPath(import.meta.url));
+const AGENT_DIR = process.env.AGENT_DIR || path.join(REPO_DIR, "agent");
+const STATE_DIR = process.env.STATE_DIR || path.join(AGENT_DIR, "var");
 
 // Sentinel Alfred emits (and nothing else) when it judges a message isn't
 // directed at it. The bot detects it and stays silent instead of replying.
@@ -30,18 +48,75 @@ if (!DISCORD_TOKEN) {
 }
 
 // ── State management ────────────────────────────────────────────────────────
-const STATE_FILE = path.join(AGENT_DIR, "state.json");
+const STATE_FILE = path.join(STATE_DIR, "state.json");
 
 // Append-only JSONL transcript of every turn through the bot — one JSON object
 // per line, both inbound (user → bot) and outbound (bot → user). This is the
 // bot's OWN log, separate from Claude Code's per-session .jsonl files.
-const CHAT_LOG = path.join(AGENT_DIR, "messages.jsonl");
+const CHAT_LOG = path.join(STATE_DIR, "messages.jsonl");
 
 // On /clear, the live transcript is archived under LOGS_DIR and a headless
 // Claude is spawned to fold it into today's daily note using MEMORY_PROMPT_FILE.
 // The nightly dream.sh pass later promotes durable facts from dailies → MEMORY.md.
-const LOGS_DIR = path.join(AGENT_DIR, "logs");
+const LOGS_DIR = path.join(STATE_DIR, "logs");
+const MEMORIES_DIR = path.join(STATE_DIR, "memories");
 const MEMORY_PROMPT_FILE = path.join(AGENT_DIR, "memory-prompt.md");
+
+// Paths handed to a spawned `claude` must be relative to AGENT_DIR, since that
+// is its cwd — absolute paths would leak this machine's layout into prompts.
+const agentRel = (abs) => path.relative(AGENT_DIR, abs);
+
+// For log output only: short path when it's inside the repo, absolute when a
+// custom AGENT_DIR/STATE_DIR puts it elsewhere (beats printing ../../../..).
+const prettyPath = (abs) => {
+  const rel = path.relative(REPO_DIR, abs);
+  return rel.startsWith("..") ? abs : rel;
+};
+
+// Build Alfred's state tree on first run so a fresh clone needs no manual
+// setup: `npm install && npm start` is enough. Everything created here is
+// gitignored; USER.md is seeded from the tracked USER.md.example template.
+async function bootstrap() {
+  // A stale AGENT_DIR (e.g. an old .env pointing at the repo root) leaves the
+  // bot running but loading no context — it answers with no persona and no
+  // memory, which is easy to miss. Fail loudly instead of degrading silently.
+  const soul = path.join(AGENT_DIR, "SOUL.md");
+  if (!existsSync(soul)) {
+    console.error(`❌ No SOUL.md at ${soul}`);
+    console.error(`   AGENT_DIR is "${AGENT_DIR}" — is it stale in .env? Unset it to use the default.`);
+    process.exit(1);
+  }
+
+  await mkdir(path.join(MEMORIES_DIR, "dailies"), { recursive: true });
+  await mkdir(LOGS_DIR, { recursive: true });
+
+  const seeds = [
+    { file: path.join(STATE_DIR, "USER.md"), from: path.join(AGENT_DIR, "USER.md.example") },
+    {
+      file: path.join(MEMORIES_DIR, "MEMORY.md"),
+      content:
+        "# Long-Term Memory\n\n" +
+        "_Curated facts promoted from daily notes during nightly dreaming passes._\n" +
+        "_Injected into every new session — keep it short and high-signal._\n\n---\n\n" +
+        "(Nothing here yet.)\n",
+    },
+    { file: path.join(MEMORIES_DIR, "changelog.json"), content: "[]\n" },
+  ];
+
+  for (const seed of seeds) {
+    if (existsSync(seed.file)) continue;
+    let content = seed.content;
+    if (seed.from) {
+      try {
+        content = await readFile(seed.from, "utf-8");
+      } catch {
+        continue; // no template to seed from — skip rather than write junk
+      }
+    }
+    await writeFile(seed.file, content);
+    console.log(`🌱 Created ${prettyPath(seed.file)}`);
+  }
+}
 
 async function logTurn(entry) {
   try {
@@ -106,10 +181,11 @@ async function consolidateMemory(archivePath) {
   // to what's there instead of overwriting. Use {{DAILY}} in the prompt, else
   // it's appended. {{DAILY_PATH}} tells the pass where to write.
   const today = new Date().toISOString().split("T")[0];
-  const dailyRel = `memories/dailies/${today}.md`;
+  const dailyAbs = path.join(MEMORIES_DIR, "dailies", `${today}.md`);
+  const dailyRel = agentRel(dailyAbs);
   let daily = "";
   try {
-    daily = (await readFile(path.join(AGENT_DIR, dailyRel), "utf-8")).trim();
+    daily = (await readFile(dailyAbs, "utf-8")).trim();
   } catch {
     /* no note for today yet */
   }
@@ -403,26 +479,28 @@ client.on("messageCreate", async (msg) => {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 async function loadContext() {
-  const files = [
-    { path: "SOUL.md", label: "SOUL" },
-    { path: "USER.md", label: "USER" },
-    { path: "memories/MEMORY.md", label: "LONG_TERM_MEMORY" },
-  ];
-
   const today = new Date().toISOString().split("T")[0];
-  files.push({ path: `memories/dailies/${today}.md`, label: "DAILY_NOTES" });
+
+  // SOUL lives with the agent's tracked config; the rest is personal state.
+  // Paths are labelled relative to AGENT_DIR so Alfred can reopen any of these
+  // files itself — the labels double as working paths from its cwd.
+  const files = [
+    { path: path.join(AGENT_DIR, "SOUL.md"), label: "SOUL" },
+    { path: path.join(STATE_DIR, "USER.md"), label: "USER" },
+    { path: path.join(MEMORIES_DIR, "MEMORY.md"), label: "LONG_TERM_MEMORY" },
+    { path: path.join(MEMORIES_DIR, "dailies", `${today}.md`), label: "DAILY_NOTES" },
+  ];
 
   let context = "=== SYSTEM CONTEXT START ===\n";
   context += "The following files contain your core instructions, user preferences, and long-term memory. Use them to guide your response.\n";
 
   for (const file of files) {
-    const filePath = path.join(AGENT_DIR, file.path);
-    if (existsSync(filePath)) {
+    if (existsSync(file.path)) {
       try {
-        const content = await readFile(filePath, "utf-8");
-        context += `\n[FILE: ${file.path}]\n${content}\n`;
+        const content = await readFile(file.path, "utf-8");
+        context += `\n[FILE: ${agentRel(file.path)}]\n${content}\n`;
       } catch (e) {
-        console.error(`Error reading ${file.path}:`, e);
+        console.error(`Error reading ${agentRel(file.path)}:`, e);
       }
     }
   }
@@ -495,4 +573,5 @@ async function sendReply(msg, text, files) {
 }
 
 // ── Launch ──────────────────────────────────────────────────────────────────
+await bootstrap();
 client.login(DISCORD_TOKEN);
