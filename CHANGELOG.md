@@ -4,6 +4,19 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [SemVer](https://semver.org/).
 
 ## [Unreleased]
+### Fixed
+- **Concurrent messages no longer race on session state.** A turn reads
+  `state.json`, spawns `claude --resume <id>`, and writes the new id back; two
+  messages arriving close together both resumed the same session and clobbered
+  each other's write. Turns are now chained and run strictly one at a time in
+  arrival order, with a ⏳ reaction marking a message that's waiting. A failing
+  turn doesn't stall the ones behind it.
+- **`state.json` has a single writer again.** `dream.sh` overwrote it wholesale
+  each night, so a pass landing mid-conversation silently reset the session.
+  It now stamps `agent/var/last-dream` instead, and the bot starts a fresh
+  session on the next message when a dream has run since the last turn — which
+  is what forcing a reset was actually for: picking up rewritten memory.
+
 ### Added
 - `bootstrap()` creates `agent/var/` and seeds `USER.md` (from the new tracked
   `agent/USER.md.example`), `MEMORY.md`, and `changelog.json` on first run, so a

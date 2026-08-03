@@ -43,14 +43,10 @@ lists when nothing changed, so the log still records that the pass ran." \
   --allowedTools "Bash,Read,Edit,Write" \
   --dangerously-skip-permissions
 
-# Mark session as resolved after dreaming
-cat > "$STATE_DIR/state.json" <<EOF
-{
-  "last_session_id": null,
-  "status": "resolved",
-  "topic": "nightly dreaming pass",
-  "timestamp": "$(date -Iseconds)"
-}
-EOF
+# Record that a pass ran. The bot owns state.json — this used to overwrite it
+# directly, which reset the session out from under an in-progress conversation
+# if the pass landed mid-chat. The bot reads this stamp instead and starts a
+# fresh session on the next message, so it picks up the rewritten memory.
+date -Iseconds > "$STATE_DIR/last-dream"
 
 echo "$(date): Dreaming complete."
