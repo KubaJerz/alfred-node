@@ -687,4 +687,19 @@ async function sendReply(msg, text, files) {
 
 // ── Launch ──────────────────────────────────────────────────────────────────
 await bootstrap();
-client.login(DISCORD_TOKEN);
+
+// An unreachable network rejects here. Left unhandled it becomes an uncaught
+// exception and a full stack dump — which, at one restart every 5s, is how a
+// single outage produced 380k restarts and a 186 MB log. Exit quietly with a
+// distinct code so the supervisor can tell "no network yet" from "broken" and
+// back off accordingly.
+const EX_TEMPFAIL = 75;
+client.login(DISCORD_TOKEN).catch((err) => {
+  const transient = err?.code === "EAI_AGAIN" || err?.code === "ENOTFOUND" || err?.code === "ENETUNREACH";
+  if (transient) {
+    console.error(`🌐 Can't reach Discord (${err.code}) — exiting for the supervisor to retry`);
+    process.exit(EX_TEMPFAIL);
+  }
+  console.error(`❌ Discord login failed: ${err?.message || err}`);
+  process.exit(1);
+});
