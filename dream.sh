@@ -1,12 +1,17 @@
 #!/bin/bash
 # dream.sh — Run nightly via cron to consolidate daily notes
-# Crontab entry: 0 3 * * * /path/to/my-agent/dream.sh >> /path/to/my-agent/dream.log 2>&1
+# Crontab entry: 0 3 * * * /path/to/alfred-node/dream.sh
 
-AGENT_DIR="$(cd "$(dirname "$0")" && pwd)"
-cd "$AGENT_DIR"
+# The script lives at the repo root, but the pass runs as Alfred: cwd is
+# AGENT_DIR so `claude` picks up agent/CLAUDE.md, and all memory paths are
+# relative to it, under the gitignored var/ tree.
+REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
+AGENT_DIR="${AGENT_DIR:-$REPO_DIR/agent}"
+STATE_DIR="${STATE_DIR:-$AGENT_DIR/var}"
+cd "$AGENT_DIR" || exit 1
 
 TODAY=$(date +%Y-%m-%d)
-NOTES_FILE="memories/dailies/${TODAY}.md"
+NOTES_FILE="var/memories/dailies/${TODAY}.md"
 
 if [ ! -f "$NOTES_FILE" ]; then
   echo "$(date): No notes for today ($TODAY), skipping."
@@ -17,10 +22,10 @@ echo "$(date): Starting dreaming pass for $TODAY..."
 
 claude -p "You are Alfred's nightly dreaming pass — promote only durable facts into long-term memory.
 
-1. Read today's daily note: memories/dailies/${TODAY}.md
-2. Read current long-term memory: memories/MEMORY.md
+1. Read today's daily note: var/memories/dailies/${TODAY}.md
+2. Read current long-term memory: var/memories/MEMORY.md
 
-Promote into memories/MEMORY.md only facts that stay true across sessions:
+Promote into var/memories/MEMORY.md only facts that stay true across sessions:
 stable preferences, ongoing projects, key people, standing decisions. Prefer
 items tagged <!-- PROMOTE -->.
 
@@ -31,7 +36,7 @@ or contradicted. One concise line per fact; keep MEMORY.md short.
 If nothing qualifies, that's completely fine — promote nothing and leave
 MEMORY.md unchanged. Don't force a promotion just to have something to add.
 
-Then append an entry to memories/changelog.json (read it first):
+Then append an entry to var/memories/changelog.json (read it first):
 { 'date', 'added_to_memory', 'removed_from_memory', 'summary' } — use empty
 lists when nothing changed, so the log still records that the pass ran." \
   --output-format json \
@@ -39,7 +44,7 @@ lists when nothing changed, so the log still records that the pass ran." \
   --dangerously-skip-permissions
 
 # Mark session as resolved after dreaming
-cat > state.json <<EOF
+cat > "$STATE_DIR/state.json" <<EOF
 {
   "last_session_id": null,
   "status": "resolved",

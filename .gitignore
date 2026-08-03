@@ -1,8 +1,13 @@
-# Secrets & env
+# Secrets
 .env
+
+# Dependencies
 node_modules/
-alfred.log
-state.json
-messages.jsonl
-logs/
-dream.log
+
+# Alfred's runtime state: memories, transcripts, session state, logs.
+# All personal, all machine-local, none of it ever belongs in git.
+# One rule guards the whole tree — resist adding exceptions to it.
+agent/var/
+
+# Editor scratch
+*.swp

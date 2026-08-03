@@ -1,5 +1,13 @@
 #!/usr/bin/env bash
-exec >> /home/koob/agents/alfred-node/alfred.log 2>&1
+# Launcher: keeps the bot alive under tmux. Started at boot from cron.
+
+# Derive paths from this script's location so the repo can move without
+# editing hardcoded paths here. The log is runtime state, so it lives in the
+# gitignored var/ tree with everything else personal.
+REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
+LOG_DIR="$REPO_DIR/agent/var/logs"
+mkdir -p "$LOG_DIR"
+exec >> "$LOG_DIR/alfred.log" 2>&1
 echo "=== alfred starting at $(date) ==="
 
 export NVM_DIR="$HOME/.nvm"
@@ -12,7 +20,7 @@ nvm use default
 export PATH="$HOME/.local/bin:$PATH"
 echo "claude: $(command -v claude || echo NOT FOUND)"
 
-cd /home/koob/agents/alfred-node || exit 1
+cd "$REPO_DIR" || exit 1
 echo "node: $(command -v node) ($(node -v 2>&1))"
 
 # At @reboot, cron starts us before the network/DNS is ready, so the bot
