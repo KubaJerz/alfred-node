@@ -10,11 +10,7 @@ and move to **Done** with the PR number. Anything with a GitHub issue links to i
 
 ## Now
 
-- [ ] **Scrub `USER.md` from git history.** The restructure stopped *future*
-      commits of personal data, but the initial commit still contains a real
-      name and timezone, and the repo is on GitHub. Needs a `git filter-repo`
-      pass + force-push, or accept it and move on — a deliberate call, not a
-      silent one.
+_(empty — see Next)_
 
 ## Next
 
@@ -39,6 +35,16 @@ and move to **Done** with the PR number. Anything with a GitHub issue links to i
       bootstrap path is the obvious first thing worth a real test.
 - [ ] **Attachment tokens with no file extension** get named `attachment_0` with
       no suffix; Discord may not preview them.
+
+## Decided against
+
+- **Scrubbing `USER.md` from git history.** The initial commit contains a name,
+  timezone, and "uses Google Calendar". Low sensitivity, already public for
+  months, and a `filter-repo` + force-push would break every existing clone.
+  Accepted deliberately (2026-08-02); `agent/var/` prevents any recurrence.
+- **Attachment captions** (`{img:path | caption}`). Designed and declined —
+  because files batch onto the last message, caption↔image adjacency only holds
+  for a single figure. Don't re-propose unprompted.
 
 ## Done
 
