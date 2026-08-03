@@ -5,6 +5,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
 
 ## [Unreleased]
 ### Fixed
+- **A lapsed Claude login is now named as such.** `claude -p` reports an expired
+  session as an ordinary-looking message, so Alfred relayed
+  `Not logged in · Please run /login` as if it were a considered reply (seen for
+  real on 2026-08-01). The bot now recognizes the auth-failure shapes and
+  answers with what to actually do, logs it as `kind:"auth_error"`, and doesn't
+  overwrite session state with the dud turn. Matching is deliberately narrow so
+  a genuine reply that discusses logging in isn't swallowed.
+- **Timeouts say so.** `spawn`'s `timeout` kills the child rather than
+  returning an error, so hitting `CLAUDE_TIMEOUT_MS` surfaced as an empty or
+  garbled reply. A killed-with-no-output run now reports how long it waited and
+  suggests raising the limit or splitting the request.
 - **Concurrent messages no longer race on session state.** A turn reads
   `state.json`, spawns `claude --resume <id>`, and writes the new id back; two
   messages arriving close together both resumed the same session and clobbered
