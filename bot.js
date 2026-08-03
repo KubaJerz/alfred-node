@@ -50,6 +50,10 @@ if (!DISCORD_TOKEN) {
 // ── State management ────────────────────────────────────────────────────────
 const STATE_FILE = path.join(STATE_DIR, "state.json");
 
+// Written by dream.sh after each nightly pass — an ISO timestamp, nothing else.
+// It exists so the dream pass never has to touch state.json.
+const LAST_DREAM_FILE = path.join(STATE_DIR, "last-dream");
+
 // Append-only JSONL transcript of every turn through the bot — one JSON object
 // per line, both inbound (user → bot) and outbound (bot → user). This is the
 // bot's OWN log, separate from Claude Code's per-session .jsonl files.
@@ -217,6 +221,10 @@ async function consolidateMemory(archivePath) {
   }
 }
 
+// state.json has exactly one writer: this process. The nightly dream pass used
+// to overwrite it directly, which silently reset a conversation if it landed
+// mid-session. It now only stamps LAST_DREAM_FILE, and the bot decides what
+// that means for session continuity (see shouldStartFresh).
 async function readState() {
   try {
     return JSON.parse(await readFile(STATE_FILE, "utf-8"));
@@ -227,6 +235,19 @@ async function readState() {
 
 async function writeState(state) {
   await writeFile(STATE_FILE, JSON.stringify(state, null, 2));
+}
+
+// A dreaming pass rewrites long-term memory, so any session started before it
+// is holding a stale copy — the next message should start fresh to pick the new
+// memory up. Resuming across a dream is the one case worth forcing a reset.
+async function dreamedSince(state) {
+  if (!state.timestamp) return false;
+  try {
+    const dreamedAt = (await readFile(LAST_DREAM_FILE, "utf-8")).trim();
+    return Date.parse(dreamedAt) > Date.parse(state.timestamp);
+  } catch {
+    return false; // no dream has run yet
+  }
 }
 
 // ── Claude Code invocation ──────────────────────────────────────────────────
@@ -355,6 +376,22 @@ setInterval(() => {
   }
 }, 30000);
 
+// ── Turn queue ──────────────────────────────────────────────────────────────
+// Discord delivers messages concurrently, but a turn is not reentrant: it reads
+// state.json, spawns `claude --resume <id>`, and writes the new id back. Two in
+// flight would both resume the same session and clobber each other's state, so
+// turns are chained and run strictly one at a time.
+let turnQueue = Promise.resolve();
+let pendingTurns = 0;
+
+function enqueueTurn(fn) {
+  pendingTurns++;
+  // .then(fn, fn) so one failed turn doesn't stall every turn behind it.
+  const run = turnQueue.then(fn, fn).finally(() => pendingTurns--);
+  turnQueue = run.catch(() => {});
+  return run;
+}
+
 client.on("messageCreate", async (msg) => {
   // Ignore own messages and other bots
   if (msg.author.bot) return;
@@ -374,7 +411,8 @@ client.on("messageCreate", async (msg) => {
 
   if (!userMessage) return;
 
-  // Log the inbound turn (user → bot) before anything else.
+  // Log the inbound turn (user → bot) before anything else, so the transcript
+  // reflects arrival order even if the turn then waits its place in the queue.
   await logTurn({
     dir: "in",
     user: msg.author.tag,
@@ -383,6 +421,17 @@ client.on("messageCreate", async (msg) => {
     text: userMessage,
   });
 
+  if (pendingTurns > 0) {
+    console.log(`⏳ ${pendingTurns} turn(s) already in flight — queuing this one`);
+    msg.react("⏳").catch(() => {}); // best-effort; needs the Add Reactions permission
+  }
+  await enqueueTurn(() => handleTurn(msg, userMessage));
+});
+
+// One turn at a time, in arrival order. Everything below reads and writes the
+// single global state.json, so overlapping turns would resume the same session
+// twice and race to write the new session id back.
+async function handleTurn(msg, userMessage) {
   // Handle /clear or /c command
   const lowerMsg = userMessage.toLowerCase();
   if (lowerMsg === "/clear" || lowerMsg === "/c") {
@@ -422,13 +471,15 @@ client.on("messageCreate", async (msg) => {
     const state = await readState();
 
     // Decide: new session or resume
-    const shouldResume = state.status === "open" && state.last_session_id;
+    const dreamed = await dreamedSince(state);
+    const shouldResume = state.status === "open" && state.last_session_id && !dreamed;
     const sessionId = shouldResume ? state.last_session_id : null;
 
     let finalMessage = userMessage;
     if (shouldResume) {
       console.log(`🔄 Resuming session ${sessionId}`);
     } else {
+      if (dreamed) console.log("🌙 A dream pass ran since the last turn — starting fresh to load new memory");
       console.log(`🆕 Starting new session - loading context...`);
       const context = await loadContext();
       finalMessage = context + userMessage;
@@ -440,7 +491,7 @@ client.on("messageCreate", async (msg) => {
     // Persist session continuity whether or not we end up replying.
     await writeState({
       last_session_id: response.session_id || state.last_session_id,
-      status: "open", // stays open; claude can mark resolved via daily notes
+      status: "open", // reset by /clear, or implicitly by the next dream pass
       topic: userMessage.slice(0, 100),
       timestamp: new Date().toISOString(),
     });
@@ -475,7 +526,7 @@ client.on("messageCreate", async (msg) => {
   } finally {
     clearInterval(typingInterval);
   }
-});
+}
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 async function loadContext() {
