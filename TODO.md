@@ -10,7 +10,42 @@ and move to **Done** with the PR number. Anything with a GitHub issue links to i
 
 ## Now
 
-_(empty — see Next)_
+### Integrations — give Alfred hands
+
+Today Alfred has Bash/Read/Edit/Write and nothing else. `agent/SOUL.md` claims
+he "may have MCP access to Google Calendar (check `.mcp.json`)" — **there is no
+`.mcp.json`**, so that line is a lie he's been improvising around. Fix that line
+as part of whichever integration lands first.
+
+- [ ] **Gmail → Alfred via Pub/Sub.** `users.watch()` publishes change
+      notifications to a Cloud Pub/Sub topic. Use a **pull** subscription: this
+      box is a laptop behind NAT, and pull needs no public endpoint or domain
+      verification. Notes: `watch()` expires after 7 days and must be renewed on
+      a timer; notifications carry only a `historyId`, so the bot fetches deltas
+      via `users.history.list`; needs a Google Cloud project + service account.
+      Decide up front whether Alfred *reads* mail only or can send.
+- [ ] **Google Calendar — read on demand, no subscription.** Pub/Sub is for mail
+      only. Calendar entries are expected to change *through Alfred*, so there's
+      no external stream to keep up with and nothing to subscribe to: he reads
+      the window he needs when he needs it (`events.list` over a date range) and
+      writes when asked. No watch channel, no polling loop, no background state
+      to keep in sync — which also sidesteps the fact that `events.watch()` only
+      delivers to an HTTPS webhook on a verified domain this host can't offer.
+      If noticing edits made elsewhere (phone, web UI) ever matters, an
+      incremental `syncToken` poll is the additive way in — deliberately not
+      part of v1.
+- [ ] **Calendar write access, governed by the rules Kuba is providing.**
+      Read+write so Alfred can refactor the calendar, constrained by a ruleset
+      from another repo. **Blocked:** need the repo/path. Open questions once it
+      lands: do the rules live in `agent/` (Alfred reads them at runtime) or are
+      they enforced in `bot.js`? Rules a model is asked to follow are guidance;
+      rules in code are guarantees — destructive calendar edits probably want
+      the latter.
+- [ ] **Notion.** No official Notion CLI exists, so this is a build-or-adopt
+      call: a small CLI wrapper over the Notion API that Alfred drives via Bash
+      (fits his existing tools, no new runtime), or the Notion MCP server (less
+      code, needs MCP wiring that doesn't exist yet). The MCP route pairs well
+      with doing Google over MCP too.
 
 ## Next
 
@@ -20,6 +55,13 @@ _(empty — see Next)_
 
 ## Someday / Maybe
 
+### Later integrations (Kuba, 2026-08-02 — explicitly "for later")
+
+- [ ] **Voice messages.** Discord voice notes arrive as `audio/ogg` attachments.
+      `bot.js` currently reads `msg.content` only and ignores attachments
+      entirely, so this is two pieces: notice inbound attachments at all, then
+      transcribe (local Whisper keeps audio off third-party services, which
+      matters more here than for text).
 - [ ] **Proactive auth health check.** Auth lapses are now caught on the turn
       they happen (#20), but not before. A probe on boot was deliberately
       skipped: it would run inside the launcher's restart loop. A once-daily
