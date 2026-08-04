@@ -1,4 +1,22 @@
 #!/usr/bin/env bash
 # Installed by: git config core.hooksPath .githooks
 # Lives in the repo (unlike .git/hooks/) so it survives a fresh clone.
-exec "$(git rev-parse --show-toplevel)/scripts/check-no-secrets.sh"
+set -euo pipefail
+ROOT="$(git rev-parse --show-toplevel)"
+
+# Secrets first — it's the cheaper check and the one whose failure matters most.
+"$ROOT/scripts/check-no-secrets.sh"
+
+# Then the suite. This is here because a commit already slipped through with a
+# failing test: `npm test | grep ...` masks the exit code, and the pipeline
+# looked like it passed. A hook doesn't care how the command was invoked.
+if ! npm test --silent >/tmp/alfred-pretest.$$ 2>&1; then
+  echo "❌ Tests failing — commit blocked." >&2
+  tail -25 /tmp/alfred-pretest.$$ >&2
+  rm -f /tmp/alfred-pretest.$$
+  echo >&2
+  echo "Bypass only if you know why: git commit --no-verify" >&2
+  exit 1
+fi
+rm -f /tmp/alfred-pretest.$$
+echo "✅ Tests pass."

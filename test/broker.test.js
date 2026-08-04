@@ -3,7 +3,18 @@
 // a guarantee documented in CONTRIBUTING.md or SOUL.md has quietly become false.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { startBroker, OPERATIONS } from "../google/broker.js";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
+// Point at an empty state dir *before* importing the broker, so the credential
+// paths resolve somewhere with nothing in them. Without this the suite picks up
+// whatever real token happens to be on the machine and starts calling Google
+// for real — which makes the tests slow, network-dependent, and capable of
+// touching an actual mailbox. auth.js reads these at import time, so the
+// import has to be dynamic and come after.
+process.env.STATE_DIR = mkdtempSync(path.join(tmpdir(), "alfred-test-"));
+const { startBroker, OPERATIONS } = await import("../google/broker.js");
 
 let broker;
 const quiet = () => {};
@@ -90,9 +101,10 @@ test("listens on loopback only", () => {
 });
 
 test("a missing credential fails cleanly without echoing token material", async () => {
-  // No token.json in a test environment, so this exercises the error path.
+  // STATE_DIR points at an empty temp dir, so this is the unconfigured path
+  // regardless of whether the machine running the tests has real credentials.
   const res = await hit("/mail/search?q=test");
-  assert.ok(res.status >= 400, "should not report success without credentials");
+  assert.equal(res.status, 500, "should not report success without credentials");
   const body = await res.json();
   assert.ok(body.error, "an error message is expected");
   assert.ok(!/stack|at Object|node:internal/i.test(body.error), "stack leaked to caller");
