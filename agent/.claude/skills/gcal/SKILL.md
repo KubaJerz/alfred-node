@@ -95,11 +95,32 @@ naming the event and its guest count; relay that.
 Mail is the opposite case, and don't carry this habit over: mail cannot be
 deleted at all. Label it `to delete` instead.
 
+## Repeating events
+
+Never create a series one event at a time. `--repeat` makes it a single event
+that Google expands, which is also a single `delete` to undo — sixteen separate
+events are sixteen mistakes to clean up.
+
+    --repeat daily|weekly|biweekly|monthly|yearly
+    --until 2026-11-24     inclusive of that day
+    --count 16             alternative to --until; pass one, not both
+
+The weekday comes from `--start`, so a Tuesday start gives a Tuesday series —
+you never state the day separately and the two can't disagree. Leaving out both
+`--until` and `--count` makes it open-ended, which is right for a standing
+meeting and wrong for anything with a last week; ask if you weren't told.
+
+`events` lists each occurrence separately with its own id, and updating or
+deleting one of those ids affects only that occurrence. Use the id from the
+series' first line to change the whole thing.
+
 ## What you can't do yet
 
-- **Recurring events.** No `RRULE` or `EXDATE` support. "Every Monday until May"
-  has to be created as individual events, so say how many that will be before
-  you start making them.
+- **Recurrence more complicated than an interval.** No `BYDAY=MO,WE,FR` for a
+  class meeting three times a week, no "third Thursday", and no `EXDATE` for
+  skipped weeks. For a Monday/Wednesday/Friday class, say so rather than
+  creating three weekly series — that's a decision for Kuba, not a workaround
+  for you to pick.
 
 ## When a command fails
 

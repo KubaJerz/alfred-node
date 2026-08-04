@@ -73,6 +73,83 @@ export function toRangeBound(value) {
   return value; // already carries Z or an explicit offset
 }
 
+const FREQ = {
+  daily: { FREQ: "DAILY" },
+  weekly: { FREQ: "WEEKLY", byDay: true },
+  biweekly: { FREQ: "WEEKLY", INTERVAL: 2, byDay: true },
+  monthly: { FREQ: "MONTHLY" },
+  yearly: { FREQ: "YEARLY" },
+};
+
+const ICAL_DAY = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"];
+
+// The weekday of a start value as iCalendar reads it — resolved in TIMEZONE,
+// because "2026-08-11T23:30" is Tuesday here and Wednesday in UTC.
+function weekdayOf(start) {
+  const iso = start.length === 10 ? `${start}T12:00:00${offsetOn(start)}` : toRangeBound(start);
+  const name = new Intl.DateTimeFormat("en-US", {
+    timeZone: TIMEZONE,
+    weekday: "short",
+  }).format(new Date(iso));
+  return ICAL_DAY[["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].indexOf(name)];
+}
+
+/**
+ * Build the RRULE for a repeating event.
+ *
+ * This exists because the alternative is what it replaced: a weekly meeting
+ * running to November was 16 separate events to create and 16 to undo, which
+ * is not a calendar, it's a transcription. One series is one create and one
+ * delete.
+ *
+ * The weekday is taken from the start date rather than asked for, so
+ * "--repeat weekly" on a Tuesday cannot produce a Wednesday series — the two
+ * facts can't disagree if only one of them is supplied.
+ */
+export function toRecurrence({ repeat, until, count, start } = {}) {
+  if (!repeat) {
+    if (until || (count !== undefined && count !== null && count !== "")) {
+      throw new Error("--until and --count need --repeat");
+    }
+    return undefined;
+  }
+  const spec = FREQ[String(repeat).trim().toLowerCase()];
+  if (!spec) {
+    throw new Error(
+      `unknown --repeat "${repeat}" — expected one of: ${Object.keys(FREQ).join(", ")}`
+    );
+  }
+  // `count` is checked for presence, not truth: `--count 0` is falsy, and a
+  // truthiness test lets it fall through to an *unbounded* series — the one
+  // outcome nobody typing a zero could have wanted.
+  const hasCount = count !== undefined && count !== null && count !== "";
+  if (until && hasCount) throw new Error("--until and --count are alternatives; pass one");
+  if (!start) throw new Error("a start is required to build a recurrence");
+
+  const parts = [`FREQ=${spec.FREQ}`];
+  if (spec.INTERVAL) parts.push(`INTERVAL=${spec.INTERVAL}`);
+  if (spec.byDay) parts.push(`BYDAY=${weekdayOf(start)}`);
+
+  if (hasCount) {
+    const n = Number(count);
+    if (!Number.isInteger(n) || n < 1) throw new Error(`--count must be a positive integer`);
+    parts.push(`COUNT=${n}`);
+  } else if (until) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(until)) throw new Error("--until must be a date (2026-11-24)");
+    if (start.length === 10) {
+      // An all-day series takes a DATE; a timed one takes UTC. Mixing them is
+      // the classic RFC 5545 rejection and Google reports it as a flat 400.
+      parts.push(`UNTIL=${until.replace(/-/g, "")}`);
+    } else {
+      // UNTIL is inclusive of that whole day in Eastern, expressed in UTC as
+      // the spec requires whenever DTSTART carries a zone.
+      const endOfDay = new Date(`${until}T23:59:59${offsetOn(until)}`);
+      parts.push(`UNTIL=${endOfDay.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "")}`);
+    }
+  }
+  return [`RRULE:${parts.join(";")}`];
+}
+
 // Applied to every write. `attendees` is never populated from caller input, and
 // sendUpdates:"none" covers the case that populating it isn't the only way mail
 // goes out: patching an event that *already* has attendees — one created on a

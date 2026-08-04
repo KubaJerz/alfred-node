@@ -5,6 +5,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
 
 ## [Unreleased]
 ### Added
+- **Repeating calendar events.** `gcal.js create --repeat weekly --until
+  2026-11-24` creates one event Google expands, instead of one event per
+  occurrence. A Tuesday class running to November was 16 separate creates and 16
+  separate deletes to undo; it is now one of each. The weekday is taken from
+  `--start` rather than asked for, so the day and the date cannot disagree, and
+  `UNTIL` is emitted in the form the start requires — UTC for a timed series, a
+  bare date for an all-day one, which is the RFC 5545 mismatch Google rejects
+  with an unexplained 400.
 - **Alfred can read mail and run the calendar.** OAuth against a personal Google
   account (not a service account — those can't reach personal Gmail without
   domain-wide delegation, which is Workspace-only). The credentials are held by

@@ -36,6 +36,7 @@ import {
   resolveColor,
   toEventTime,
   toRangeBound,
+  toRecurrence,
   NEVER_NOTIFY,
   TIMEZONE,
 } from "./calendar-rules.js";
@@ -317,13 +318,14 @@ const ROUTES = {
   // it, misreads the rules, or never read them. Attendee names belong in the
   // description, which is a convention the gcal skill explains.
   "POST /calendar/events": async ({ body }) => {
-    const { summary, start, end, location, description, color } = body || {};
+    const { summary, start, end, location, description, color, repeat, until, count } = body || {};
     if (!summary || !start || !end) {
       return { error: "summary, start and end required (ISO 8601)", status: 400 };
     }
-    let colorId;
+    let colorId, recurrence;
     try {
       colorId = resolveColor(color);
+      recurrence = toRecurrence({ repeat, until, count, start });
     } catch (err) {
       return { error: err.message, status: 400 };
     }
@@ -336,11 +338,12 @@ const ROUTES = {
         location,
         description,
         colorId,
+        recurrence,
         start: toEventTime(start),
         end: toEventTime(end),
       },
     });
-    return { id: r.data.id, htmlLink: r.data.htmlLink };
+    return { id: r.data.id, htmlLink: r.data.htmlLink, recurrence: recurrence?.[0] };
   },
 
   "PATCH /calendar/events": async ({ params, body }) => {

@@ -46,8 +46,11 @@ async function main() {
     }
 
     case "create": {
-      const out = await call("POST", "/calendar/events", { body: eventBody() });
-      console.log(`Created ${out.id}\n${out.htmlLink}`);
+      const out = await call("POST", "/calendar/events", {
+        body: { ...eventBody(), repeat: flags.repeat, until: flags.until, count: flags.count },
+      });
+      console.log(`Created ${out.id}${out.recurrence ? ` — ${out.recurrence}` : ""}`);
+      console.log(out.htmlLink);
       break;
     }
 
@@ -84,6 +87,7 @@ async function main() {
         "usage: node ../bin/gcal.js <command>",
         "  events [--from ISO] [--to ISO] [--limit N]",
         "  create --summary <s> --start <ISO> --end <ISO> [--location] [--description] [--color]",
+        "         [--repeat daily|weekly|biweekly|monthly|yearly] [--until YYYY-MM-DD | --count N]",
         "  update <id> [--summary] [--start] [--end] [--location] [--description] [--color]",
         "  delete <id>                         recoverable from Trash for 30 days",
         "",

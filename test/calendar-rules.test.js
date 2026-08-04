@@ -10,6 +10,7 @@ import {
   resolveColor,
   toEventTime,
   toRangeBound,
+  toRecurrence,
   NEVER_NOTIFY,
 } from "../google/calendar-rules.js";
 
@@ -87,4 +88,49 @@ test("range bounds accept a plain date, and land in Eastern", () => {
   }
   assert.equal(toRangeBound(""), undefined);
   assert.equal(toRangeBound(null), undefined);
+});
+
+// A weekly meeting running to November was 16 creates and 16 deletes before
+// this existed. One series is one of each, which also makes it undoable.
+test("recurrence: the weekday comes from the start, so the two can't disagree", () => {
+  // 2026-08-11 is a Tuesday. Nothing asks the caller which day it is.
+  assert.deepEqual(toRecurrence({ repeat: "weekly", start: "2026-08-11T10:30:00" }), [
+    "RRULE:FREQ=WEEKLY;BYDAY=TU",
+  ]);
+  assert.deepEqual(toRecurrence({ repeat: "biweekly", start: "2026-08-11T10:30:00" }), [
+    "RRULE:FREQ=WEEKLY;INTERVAL=2;BYDAY=TU",
+  ]);
+  assert.deepEqual(toRecurrence({ repeat: "daily", start: "2026-08-11T10:30:00" }), [
+    "RRULE:FREQ=DAILY",
+  ]);
+});
+
+test("recurrence: UNTIL is inclusive, and in the form the start requires", () => {
+  // Timed start -> UNTIL must be UTC. Nov 24 23:59:59 EST (-05:00) is the 25th
+  // at 04:59:59Z; truncating to the 24th would drop the last occurrence.
+  assert.deepEqual(
+    toRecurrence({ repeat: "weekly", start: "2026-08-11T10:30:00", until: "2026-11-24" }),
+    ["RRULE:FREQ=WEEKLY;BYDAY=TU;UNTIL=20261125T045959Z"]
+  );
+  // All-day start -> UNTIL must be a bare DATE. Mixing the two is the classic
+  // RFC 5545 rejection, and Google reports it as an unexplained 400.
+  assert.deepEqual(toRecurrence({ repeat: "weekly", start: "2026-08-11", until: "2026-11-24" }), [
+    "RRULE:FREQ=WEEKLY;BYDAY=TU;UNTIL=20261124",
+  ]);
+  assert.deepEqual(toRecurrence({ repeat: "weekly", start: "2026-08-11", count: 16 }), [
+    "RRULE:FREQ=WEEKLY;BYDAY=TU;COUNT=16",
+  ]);
+});
+
+test("recurrence: bad combinations fail here, not at Google", () => {
+  assert.equal(toRecurrence({ start: "2026-08-11T10:30:00" }), undefined);
+  for (const bad of [
+    { repeat: "fortnightly", start: "2026-08-11T10:30:00" },
+    { repeat: "weekly", start: "2026-08-11T10:30:00", until: "2026-11-24", count: 4 },
+    { repeat: "weekly", start: "2026-08-11T10:30:00", until: "November" },
+    { repeat: "weekly", start: "2026-08-11T10:30:00", count: 0 },
+    { until: "2026-11-24", start: "2026-08-11T10:30:00" }, // --until with no --repeat
+  ]) {
+    assert.throws(() => toRecurrence(bad), `${JSON.stringify(bad)} was accepted`);
+  }
 });
