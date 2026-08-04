@@ -24,7 +24,7 @@ import http from "http";
 import { randomBytes } from "crypto";
 import { gmailClient, calendarClient } from "./auth.js";
 import { classify, redact, screen } from "./mail-filter.js";
-import { resolveColor, toEventTime, NEVER_NOTIFY } from "./calendar-rules.js";
+import { resolveColor, toEventTime, NEVER_NOTIFY, TIMEZONE } from "./calendar-rules.js";
 
 // Header rather than a query param: query strings land in logs and shell
 // history, and Alfred's Bash invocations are echoed to the bot log.
@@ -162,6 +162,11 @@ const ROUTES = {
       singleEvents: true,
       orderBy: "startTime",
       maxResults: Math.min(Number(params.get("limit")) || 25, 100),
+      // Without this, Google formats times in the *calendar's* default zone,
+      // which is not necessarily the one we write in — a calendar left on
+      // Europe/Warsaw returns 18:00+02:00 for a noon Eastern meeting. Reads and
+      // writes have to agree, or Alfred reports times six hours off.
+      timeZone: TIMEZONE,
     });
     return {
       events: (r.data.items || []).map((e) => ({

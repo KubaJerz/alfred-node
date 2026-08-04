@@ -16,7 +16,7 @@
 
 import { google } from "googleapis";
 import { readFile, writeFile, mkdir } from "fs/promises";
-import { existsSync } from "fs";
+import { existsSync, readdirSync } from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 
@@ -57,20 +57,34 @@ export const SCOPES = [
   "https://www.googleapis.com/auth/calendar.events",
 ];
 
+// Google hands you a file called client_secret_<long-id>.apps.googleusercontent
+// .com.json. Renaming it is a step people forget and then debug, so accept what
+// the console actually downloads as well as the documented name.
+export function findClientFile() {
+  if (existsSync(CLIENT_FILE)) return CLIENT_FILE;
+  if (!existsSync(GOOGLE_DIR)) return null;
+  const match = readdirSync(GOOGLE_DIR)
+    .filter((f) => /^client_secret.*\.json$/i.test(f))
+    .sort()[0];
+  return match ? path.join(GOOGLE_DIR, match) : null;
+}
+
 export async function loadClientSecrets() {
-  if (!existsSync(CLIENT_FILE)) {
+  const file = findClientFile();
+  if (!file) {
     throw new Error(
-      `No OAuth client at ${CLIENT_FILE}\n` +
+      `No OAuth client in ${GOOGLE_DIR}\n` +
         `Download it from Google Cloud Console > Credentials > OAuth client ID\n` +
-        `(Application type must be "Desktop app"), then save it there.`
+        `(Application type must be "Desktop app") and save it there as\n` +
+        `oauth-client.json — or leave the client_secret*.json name it came with.`
     );
   }
-  const raw = JSON.parse(await readFile(CLIENT_FILE, "utf8"));
+  const raw = JSON.parse(await readFile(file, "utf8"));
   // Desktop clients nest under "installed"; web clients under "web".
   const creds = raw.installed || raw.web;
   if (!creds?.client_id || !creds?.client_secret) {
     throw new Error(
-      `${CLIENT_FILE} doesn't look like an OAuth client file ` +
+      `${file} doesn't look like an OAuth client file ` +
         `(no installed.client_id). Did you download a service account key by mistake?`
     );
   }
