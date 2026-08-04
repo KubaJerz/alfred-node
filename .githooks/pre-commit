@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Installed by: git config core.hooksPath .githooks
+# Lives in the repo (unlike .git/hooks/) so it survives a fresh clone.
+exec "$(git rev-parse --show-toplevel)/scripts/check-no-secrets.sh"
