@@ -20,10 +20,43 @@ as part of whichever integration lands first.
 - [ ] **Gmail → Alfred via Pub/Sub.** `users.watch()` publishes change
       notifications to a Cloud Pub/Sub topic. Use a **pull** subscription: this
       box is a laptop behind NAT, and pull needs no public endpoint or domain
-      verification. Notes: `watch()` expires after 7 days and must be renewed on
-      a timer; notifications carry only a `historyId`, so the bot fetches deltas
-      via `users.history.list`; needs a Google Cloud project + service account.
-      Decide up front whether Alfred *reads* mail only or can send.
+      verification. Auth is OAuth as the user (done, `google/auth.js`) — a
+      service account can't reach a personal mailbox without domain-wide
+      delegation, which is Workspace-only. The service account is for draining
+      the *subscription*, which is our own cloud resource.
+
+      **Delivery is tiered; everything starts at tier 1.** Alfred isn't running
+      between messages — `runClaude` spawns a fresh `claude -p` per turn — so
+      there is nothing to interrupt, and the question is only whether mail
+      creates a turn or waits for one.
+
+      1. *Buffer, silently.* Append a line to `var/pending-mail.jsonl`. No agent,
+         no Discord post. Prepended as a delimited digest to the next real turn
+         (before the `"User Message: "` trailer `loadContext` ends with), then
+         the buffer is cleared — it persists in the session transcript from then
+         on, so re-injecting would only duplicate.
+      2. *Ping without waking him.* bot.js posts to Discord itself. No LLM call.
+         Most of the value of push is knowing mail arrived, and that needs no
+         model.
+      3. *Spawn a turn.* Narrow rules only. Note this lands inside the resumed
+         session, so it pollutes the conversation unless given its own.
+
+      Promote via a **Gmail label** — labelling a thread from your phone retunes
+      what's urgent with no redeploy.
+
+      **Never buffer sensitive mail** (verification codes, OTPs, password
+      resets, sign-in alerts). Injecting one writes it to
+      `~/.claude/projects/<cwd>/<session>.jsonl`, which is outside the repo and
+      therefore outside `agent/var/`, `.gitignore` and the memory funnel alike.
+      Match on subject/snippet and drop the content entirely — record only that
+      *something* was withheld. Alfred can fetch a live code on request instead,
+      which is better anyway since codes expire.
+
+      Fails silently if you get these wrong: `watch()` expires after 7 days and
+      just goes quiet; notifications carry only a `historyId`, and a stale one
+      makes `users.history.list` 404 (needs full-resync fallback); a mailing-list
+      burst or a bulk "mark read" from a phone floods the buffer without
+      coalescing.
 - [ ] **Google Calendar — read on demand, no subscription.** Pub/Sub is for mail
       only. Calendar entries are expected to change *through Alfred*, so there's
       no external stream to keep up with and nothing to subscribe to: he reads
@@ -46,6 +79,14 @@ as part of whichever integration lands first.
       (fits his existing tools, no new runtime), or the Notion MCP server (less
       code, needs MCP wiring that doesn't exist yet). The MCP route pairs well
       with doing Google over MCP too.
+
+- [ ] **Keep mail digests out of long-term memory.** Mostly free already:
+      `logTurn` records `userMessage` before `handleTurn` builds `finalMessage`,
+      so the digest never reaches `messages.jsonl` and the funnel can't see it.
+      A conversation *about* an email is the user's own words and is logged
+      normally — which is the wanted split. The hole is Alfred's *reply*: if he
+      restates the digest, that's logged `dir:"out"` and can reach the daily
+      note. Fix in `memory-prompt.md`, where filtering decisions already live.
 
 ## Next
 
