@@ -5,6 +5,7 @@ import { readFile, writeFile, mkdir, appendFile } from "fs/promises";
 import { existsSync, openSync, statSync } from "fs";
 import { fileURLToPath } from "url";
 import path from "path";
+import { startBroker } from "./google/broker.js";
 
 // ── Config ──────────────────────────────────────────────────────────────────
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
@@ -288,7 +289,16 @@ function runClaude(message, sessionId) {
 
     const proc = spawn("claude", args, {
       cwd: AGENT_DIR,
-      env: { ...process.env, HOME: process.env.HOME },
+      // The broker address and its one-time secret reach the agent through the
+      // environment and never touch disk, so there's no credential file for a
+      // stray `cat` to turn up. The Google tokens themselves stay in this
+      // process — the CLIs in bin/ only ever get a handle to the broker.
+      env: {
+        ...process.env,
+        HOME: process.env.HOME,
+        ALFRED_BROKER: broker.url,
+        ALFRED_BROKER_TOKEN: broker.token,
+      },
       timeout: TIMEOUT_MS,
     });
 
@@ -687,6 +697,12 @@ async function sendReply(msg, text, files) {
 
 // ── Launch ──────────────────────────────────────────────────────────────────
 await bootstrap();
+
+// The broker holds the Google credentials so the agent doesn't have to. It
+// starts even when Google isn't configured yet — the routes then fail with a
+// message naming the missing setup step, which is more useful than the whole
+// bot refusing to boot over an integration that's still optional.
+const broker = await startBroker();
 
 // An unreachable network rejects here. Left unhandled it becomes an uncaught
 // exception and a full stack dump — which, at one restart every 5s, is how a

@@ -1,15 +1,19 @@
 {
   "name": "alfred-node",
-  "version": "2.0.3",
+  "version": "2.2.0",
   "description": "",
   "main": "bot.js",
   "type": "module",
   "scripts": {
     "start": "node bot.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "google:auth": "node google/authorize.js",
+    "test": "node --test test/*.test.js",
+    "check": "bash scripts/check-no-secrets.sh"
   },
   "dependencies": {
+    "@google-cloud/pubsub": "^5.3.1",
     "discord.js": "^14.26.4",
-    "dotenv": "^16.4.5"
+    "dotenv": "^16.4.5",
+    "googleapis": "^173.0.0"
   }
 }

@@ -12,18 +12,84 @@ and move to **Done** with the PR number. Anything with a GitHub issue links to i
 
 ### Integrations — give Alfred hands
 
-Today Alfred has Bash/Read/Edit/Write and nothing else. `agent/SOUL.md` claims
-he "may have MCP access to Google Calendar (check `.mcp.json`)" — **there is no
-`.mcp.json`**, so that line is a lie he's been improvising around. Fix that line
-as part of whichever integration lands first.
+Google access is live as of #25: OAuth consented, credentials held by a broker in
+`bot.js`, and `bin/gmail.js` / `bin/gcal.js` as the agent-facing CLIs, each paired
+with a skill under `agent/.claude/skills/`. What follows is what's left rather
+than what's missing.
+
+- [ ] **A non-ASCII display name in `--to` is still mangled.** The subject is
+      RFC 2047 encoded now, but `To:` is written raw, so `"Café Owner"
+      <a@b.com>` breaks the same way subjects used to. Bare addresses — what
+      Alfred actually passes — are unaffected, which is why this is a note and
+      not a fix: encoding only the display-name phrase means parsing the header,
+      and the bug has no reachable trigger today.
+- [ ] **Two known gaps in the credential filter**, both found auditing the real
+      mailbox in #25, neither a leak:
+      - Sign-in alerts are treated arbitrarily. Firefox's "New sign-in to
+        Firefox" is withheld; TaxAct's and Slack's "sign in from a new device"
+        pass, because only the former matches `new sign-in`. Same category,
+        opposite outcomes — decide whether the category is sensitive and apply
+        it consistently.
+      - `ghr@otp.workday.com` passes: sender rules match `otp@` as a local part,
+        not `otp.` as a subdomain.
+- [ ] **Delete the `bin/google.js` shim.** It exists only so a session resumed
+      across the split gets "this is now `bin/gmail.js`" instead of a stack
+      trace. Safe to remove once no live session predates the split — in
+      practice a week, or straight after the next `dream.sh` cycle in which Kuba
+      confirms a fresh session id in `agent/var/state.json`.
+- [ ] **Recurring events.** No `RRULE`, so "every Monday until May" is fifteen
+      individual `create` calls and fifteen individual deletes to undo. The
+      delete route landing makes this the next-worst asymmetry in the calendar
+      surface.
+- [ ] **Run the agent as a separate Unix user.** This is what turns the broker
+      from a strong default into a guarantee. Alfred currently runs as the same
+      user as `bot.js`, so he can read `agent/var/google/token.json` and call
+      Google directly, bypassing every restriction the broker enforces. No
+      application code fixes that, and Claude Code's own deny rules don't
+      survive Bash. Needs: a second user with its own authenticated Claude Code,
+      a NOPASSWD sudoers rule, `chmod 700` on the credentials dir, and group
+      sharing so memories stay writable.
 
 - [ ] **Gmail → Alfred via Pub/Sub.** `users.watch()` publishes change
       notifications to a Cloud Pub/Sub topic. Use a **pull** subscription: this
       box is a laptop behind NAT, and pull needs no public endpoint or domain
-      verification. Notes: `watch()` expires after 7 days and must be renewed on
-      a timer; notifications carry only a `historyId`, so the bot fetches deltas
-      via `users.history.list`; needs a Google Cloud project + service account.
-      Decide up front whether Alfred *reads* mail only or can send.
+      verification. Auth is OAuth as the user (done, `google/auth.js`) — a
+      service account can't reach a personal mailbox without domain-wide
+      delegation, which is Workspace-only. The service account is for draining
+      the *subscription*, which is our own cloud resource.
+
+      **Delivery is tiered; everything starts at tier 1.** Alfred isn't running
+      between messages — `runClaude` spawns a fresh `claude -p` per turn — so
+      there is nothing to interrupt, and the question is only whether mail
+      creates a turn or waits for one.
+
+      1. *Buffer, silently.* Append a line to `var/pending-mail.jsonl`. No agent,
+         no Discord post. Prepended as a delimited digest to the next real turn
+         (before the `"User Message: "` trailer `loadContext` ends with), then
+         the buffer is cleared — it persists in the session transcript from then
+         on, so re-injecting would only duplicate.
+      2. *Ping without waking him.* bot.js posts to Discord itself. No LLM call.
+         Most of the value of push is knowing mail arrived, and that needs no
+         model.
+      3. *Spawn a turn.* Narrow rules only. Note this lands inside the resumed
+         session, so it pollutes the conversation unless given its own.
+
+      Promote via a **Gmail label** — labelling a thread from your phone retunes
+      what's urgent with no redeploy.
+
+      **Never buffer sensitive mail** (verification codes, OTPs, password
+      resets, sign-in alerts). Injecting one writes it to
+      `~/.claude/projects/<cwd>/<session>.jsonl`, which is outside the repo and
+      therefore outside `agent/var/`, `.gitignore` and the memory funnel alike.
+      Match on subject/snippet and drop the content entirely — record only that
+      *something* was withheld. Alfred can fetch a live code on request instead,
+      which is better anyway since codes expire.
+
+      Fails silently if you get these wrong: `watch()` expires after 7 days and
+      just goes quiet; notifications carry only a `historyId`, and a stale one
+      makes `users.history.list` 404 (needs full-resync fallback); a mailing-list
+      burst or a bulk "mark read" from a phone floods the buffer without
+      coalescing.
 - [ ] **Google Calendar — read on demand, no subscription.** Pub/Sub is for mail
       only. Calendar entries are expected to change *through Alfred*, so there's
       no external stream to keep up with and nothing to subscribe to: he reads
@@ -40,12 +106,24 @@ as part of whichever integration lands first.
       lands: do the rules live in `agent/` (Alfred reads them at runtime) or are
       they enforced in `bot.js`? Rules a model is asked to follow are guidance;
       rules in code are guarantees — destructive calendar edits probably want
-      the latter.
+      the latter. Whatever is guidance goes in the `gcal` skill body, which
+      absorbed `agent/calendar-rules.md`. If that pushes the body past ~200
+      lines, split it into `agent/.claude/skills/gcal/rules.md` referenced from
+      the body — not back out to `agent/`, so everything the skill owns stays
+      under the skill's own directory.
 - [ ] **Notion.** No official Notion CLI exists, so this is a build-or-adopt
       call: a small CLI wrapper over the Notion API that Alfred drives via Bash
       (fits his existing tools, no new runtime), or the Notion MCP server (less
       code, needs MCP wiring that doesn't exist yet). The MCP route pairs well
       with doing Google over MCP too.
+
+- [ ] **Keep mail digests out of long-term memory.** Mostly free already:
+      `logTurn` records `userMessage` before `handleTurn` builds `finalMessage`,
+      so the digest never reaches `messages.jsonl` and the funnel can't see it.
+      A conversation *about* an email is the user's own words and is logged
+      normally — which is the wanted split. The hole is Alfred's *reply*: if he
+      restates the digest, that's logged `dir:"out"` and can reach the daily
+      note. Fix in `memory-prompt.md`, where filtering decisions already live.
 
 ## Next
 
@@ -89,6 +167,52 @@ as part of whichever integration lands first.
   for a single figure. Don't re-propose unprompted.
 
 ## Done
+
+- [x] ~~**Email replies.**~~ `gmail.js reply <id>` builds the draft from the
+      original — `Reply-To` over `From`, a `Re:` that doesn't stack, and the
+      `In-Reply-To`/`References` headers that actually thread it. The old
+      `--thread` flag took an id nothing ever printed, so every reply arrived
+      as a new conversation. Verified against a real message: all four headers
+      correct, and replying to a withheld message refused. (#25)
+- [x] ~~**Calendar delete.**~~ Deferred while the rules were unwritten; they
+      now exist and load themselves. The deciding fact is recoverability —
+      Google keeps deleted events in Trash for 30 days, unlike Gmail, whose
+      delete needs the scope that empties Trash permanently. Deleting an event
+      with guests is refused, because Google says cancellation mail "might
+      still be sent" regardless of the notification setting. Both paths
+      verified live. (#25)
+
+- [x] ~~**Exercise the write paths.**~~ All of them, against the real account:
+      `draft` (multi-line body, round-tripped through `read`), `label`,
+      `mark-read`, `archive` (proven by adding `INBOX` to the probe message
+      first, so no real mail was moved), `cal create` timed and all-day,
+      `cal update` across summary/times/colour with untouched fields
+      preserved, plus both refusals and a rejected colour that created nothing.
+      Two bugs fell out, both pre-existing and neither reachable by reading:
+      `PATCH` bodies were never parsed, and non-ASCII subjects were mangled.
+      Test artifacts are labelled `to delete` in Gmail and named `TO DELETE`
+      on the calendar — there is no delete route, which is the point. (#25)
+
+- [x] ~~**Split the CLI per service, and pair each with a skill.**~~ `bin/gmail.js`
+      and `bin/gcal.js` over a shared `bin/lib/broker-client.js`, each paired
+      with a skill in `agent/.claude/skills/`. Skills *do* resolve in headless
+      `claude -p` — verified by planting one and watching an unprompted
+      invocation fire off the description alone; `agent/SOUL.md` previously
+      claimed otherwise and was wrong. So the command surface, Gmail's query
+      syntax and the whole calendar ruleset now load on a trigger instead of a
+      pointer Alfred has to remember to follow. `agent/calendar-rules.md` folded
+      into the `gcal` skill; SOUL.md keeps only the constraints that must hold
+      on a turn where no skill fires. `bin/notion.js` slots in the same way.
+      (#25)
+- [x] **Google access, end to end** — OAuth (not a service account; personal
+      Gmail can't use one), a credential broker holding the tokens so the agent
+      never does, mail/calendar CLI, credential screening at a single chokepoint,
+      and the calendar ruleset with the invitation rule enforced in code rather
+      than requested. 21 hermetic tests asserting the absences. (#25)
+- [x] **Personal files can't be committed.** `scripts/check-no-secrets.sh` plus a
+      repo-tracked pre-commit hook — path checks, force-add detection,
+      secret-shaped content, and the test suite. Verified against three
+      deliberate leak attempts and a planted failing test. (#25)
 
 - [x] **Stopped the crash loop and capped the log.** An unhandled `EAI_AGAIN`
       from `client.login()` meant a network outage restarted the bot every 5s

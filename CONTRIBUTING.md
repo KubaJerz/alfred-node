@@ -69,7 +69,39 @@ is that every meaningful change is traceable and `main` always works.
 Use Conventional Commits: `type: summary` (e.g. `fix: catch sendTyping rejection`).
 Keep the summary imperative and under ~72 chars.
 
+## First-time setup
+
+Install the pre-commit hook — one line, once per clone:
+
+```sh
+git config core.hooksPath .githooks
+```
+
+This runs `npm run check` before every commit and blocks anything personal from
+being staged. It's opt-in because git won't run repo-supplied hooks without it.
+
 ## Sanity checks before opening a PR
 - `node --check bot.js` — must pass (no syntax errors).
-- Confirm no secrets (`.env`, tokens) are staged: `git diff --cached --stat`.
+- `npm run check` — no personal files or secret-shaped content staged. The
+  pre-commit hook runs this for you if you did the setup above.
 - There is no automated test suite yet; if you add one, wire it into `npm test` and run it before every PR.
+
+## Never in git
+
+`.gitignore` keeps `.env`, `node_modules/` and `agent/var/` out, but a rule only
+protects what someone remembers to look at — and Alfred runs in this repo with
+`Bash`, `Write` and `--dangerously-skip-permissions`, so "nobody would do that"
+isn't a guarantee here. `scripts/check-no-secrets.sh` enforces it on the staged
+set instead:
+
+1. Anything under `agent/var/` or named `.env`, by path — so a weakened
+   `.gitignore` can't silently re-open the hole.
+2. Any gitignored file that reached the index anyway, i.e. `git add -f`.
+3. Secret-shaped content (private keys, `GOCSPX-`, `AIza…`, `ya29.`,
+   refresh tokens, GitHub/OpenAI tokens, Discord bot tokens) in added lines,
+   for credentials pasted into a file whose location is perfectly legitimate.
+4. Runtime state at the repo root (`var/`, `logs/`, `state.json`) — a warning,
+   not a block, since this one guesses.
+
+`git commit --no-verify` bypasses it. If you need that, you almost certainly
+want to fix the staging instead.

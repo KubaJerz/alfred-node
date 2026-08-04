@@ -4,7 +4,76 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [SemVer](https://semver.org/).
 
 ## [Unreleased]
+### Added
+- **Alfred can read mail and run the calendar.** OAuth against a personal Google
+  account (not a service account — those can't reach personal Gmail without
+  domain-wide delegation, which is Workspace-only). The credentials are held by
+  a broker inside `bot.js` that listens on loopback and exposes eight
+  operations; the agent gets the address and a per-boot secret through its
+  environment, so nothing lands on disk for a stray `cat` to find.
+- **Two CLIs, `bin/gmail.js` and `bin/gcal.js`,** each paired with a skill under
+  `agent/.claude/skills/`. Skills load on a description match, so the calendar
+  ruleset arrives when a conversation turns to the calendar instead of being a
+  pointer Alfred has to remember to follow. Verified: telling it "Wednesday the
+  21st" when the 21st is a Friday gets the conflict caught and a question
+  asked, from a file that is never read up front.
+- **Credential screening at a single chokepoint.** Verification codes, OTPs,
+  password resets and sign-in alerts are classified and stripped inside the
+  broker — on search, on read, and on any path added later — because anything
+  reaching the prompt is written to `~/.claude/projects/`, which sits outside
+  `agent/var/`, `.gitignore` and the memory funnel at once. It fails closed.
+  Audited against the real mailbox: 10 of 25 messages withheld, no code passed.
+- **A pre-commit hook that blocks personal files.** Path checks, force-added
+  ignored files, secret-shaped content, and the test suite. Verified against
+  three deliberate leak attempts and a planted failing test.
+
+- **Real replies.** `gmail.js reply <id> --text "…"` builds the draft from the
+  original: recipient (honouring `Reply-To` over `From`), a `Re:` subject that
+  doesn't stack, and the `In-Reply-To`/`References` headers that make the
+  recipient's client file it in the existing conversation. Previously the only
+  option was `draft`, whose `--thread` flag took an id nothing ever printed, so
+  every "reply" arrived as a new conversation. Replying to a withheld message
+  is refused — a reply quotes and addresses the original, which would route
+  screened content back out through an unscreened path.
+- **`gcal.js delete <id>`.** Held back while the calendar rules were unwritten;
+  the rules now exist and load themselves, and the deciding fact is that Google
+  keeps deleted events in a Trash for 30 days and restores them intact. Gmail
+  deletion stays absent because it needs the scope that empties Trash for good.
+  The line is reversibility, not the verb.
+
+### Changed
+- **Deleting an event that has guests is refused.** Google's documentation says
+  of the notification controls that "some emails might still be sent even if you
+  set the value to false", so on an event with attendees, cancellation mail
+  reaching real people isn't fully controllable. Everything else here is built
+  so nobody gets email because of Alfred; this is the case that can't be
+  guaranteed, so it's the case that's carved out.
+- **Sending mail isn't a permission, it's an absence.** There is no send route
+  in the broker at all, so `gmail.js send` names the command only to explain
+  the design and exits 1 without reaching the network. Invitations go further —
+  `attendees` is unreachable from caller input rather than rejected, so "never
+  invite anyone" holds even if Alfred asks for it or never read the rules.
+
 ### Fixed
+- **Calendar update never worked.** The broker read request bodies for `POST`
+  but not `PATCH`, so every update arrived empty and came back "nothing to
+  change" — indistinguishable from asking for nothing. Found by an audit, not
+  by use, because the write paths had never been exercised.
+- **Non-ASCII subject lines were mangled in drafts.** Headers were written as
+  raw UTF-8, which is not valid RFC 5322, so the receiving client read the
+  bytes as latin-1 and `TO DELETE — probe` arrived as `TO DELETE â€” probe`.
+  Subjects are RFC 2047 encoded-words now and the body carries an explicit
+  base64 transfer encoding. Nothing errored — it just looked wrong, and Alfred
+  writes the kind of prose full of em dashes and curly quotes that trips it.
+- **`gcal.js events --from 2026-08-05` failed with "Bad Request".** Google's
+  `timeMin`/`timeMax` require an offset, so a plain date — the obvious thing to
+  type — was rejected, and the error said nothing about why. Found by Alfred in
+  a live turn: he tried a date, tried a date with a time on it, then gave up and
+  listed the whole calendar unfiltered. Bare dates and offset-less times are now
+  interpreted in `America/New_York`, DST included.
+- **Calendar times were six hours off.** `events.list` formats in the
+  *calendar's* default zone, and the account's was `Europe/Warsaw`. Reads now
+  request `America/New_York` explicitly, matching what writes stamp.
 - **A network outage no longer crash-loops the bot.** `client.login()` rejects
   with `EAI_AGAIN` when DNS is unavailable (suspended laptop, dropped Wi-Fi).
   The rejection was unhandled, so Node dumped a stack and exited, and the
