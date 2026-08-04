@@ -99,6 +99,34 @@ than what's missing.
       forwarded copy names the original invitees and Gmail correctly ignores it.
       The gap is real, not a setting someone forgot to tick.
 
+      **⚠️ Tested 2026-08-04, and it changes the design: an inline forward from
+      Outlook has no `.ics` at all.** Kuba forwarded a real one; the message came
+      through as plain `multipart/alternative` — `text/plain` + `text/html`,
+      nothing else. Five *natively received* invitations in the same mailbox all
+      carry `text/calendar; name=invite.ics`, so the part exists right up until
+      the forward drops it. Everything below about `events.import` is correct and
+      applies to nothing, unless one of these holds:
+
+      - **Forward as attachment** (Outlook: Forward as Attachment; Gmail: Forward
+        as attachment) wraps the original as `message/rfc822`, `.ics` intact.
+        Parser has to descend into the nested message. This is the good path and
+        it costs Kuba one different menu item — establish whether it survives
+        before building anything else.
+      - **Parse the human-readable body.** The forwarded text *did* carry
+        everything needed: `When: Occurs every Tuesday from 10:30 AM to 12:30 PM
+        effective 6/30/2026 until 11/24/2026. There are 16 more occurrences.
+        America/New_York`. That is a sentence, not a data format — regexes will
+        pass the demo and fail on the next locale, so this is the one branch
+        where a model belongs, and it must propose rather than write.
+
+      So the handler is two-path: `.ics` present → deterministic import; no
+      `.ics` → Alfred reads the text, proposes an event, Kuba confirms. Don't
+      auto-write from prose.
+
+      Also worth noting from the same test: the message forwarded was an
+      `Accepted:` reply (`METHOD:REPLY`), not an invitation (`METHOD:REQUEST`).
+      Check `METHOD` before importing, or an acceptance notice becomes an event.
+
       **Use `events.import`, not `events.insert`.** It takes the `.ics` file's
       own `iCalUID`, and re-importing the same UID updates the existing event
       instead of making a second one. That is duplicate protection and reschedule
@@ -132,11 +160,12 @@ than what's missing.
       so the invitees land in `--description` as text, which is already the
       convention. The guarantee holds without anyone remembering it.
 
-      **No model in the loop.** Parsing an `.ics` is deterministic, so this
-      belongs in `bot.js` on the Pub/Sub path, not in a turn — which also means
-      it works while Kuba is asleep and not talking to Alfred. Post what was
-      added to Discord so a bad parse is visible the same day rather than at the
-      meeting.
+      **No model in the loop — on the `.ics` path.** Parsing an `.ics` is
+      deterministic, so that branch belongs in `bot.js` on the Pub/Sub path, not
+      in a turn, which also means it works while Kuba is asleep. The prose branch
+      is the opposite: it needs Alfred, and it proposes rather than writes. Post
+      what was added to Discord either way, so a bad parse is visible the same
+      day rather than at the meeting.
 - [ ] **Google Calendar — read on demand, no subscription.** Pub/Sub is for mail
       only. Calendar entries are expected to change *through Alfred*, so there's
       no external stream to keep up with and nothing to subscribe to: he reads
