@@ -111,6 +111,59 @@ try {
         "before they go out. Use `mail draft` and tell him it's ready."
     );
     process.exit(1);
+  } else if (group === "mail" && (action === "archive" || action === "mark-read")) {
+    const id = rest[0] || flags.id;
+    if (!id) throw new Error(`usage: mail ${action} <id>`);
+    const out = await call("POST", "/mail/modify", {
+      body: { id, archive: action === "archive", markRead: true },
+    });
+    console.log(`${id}: removed ${out.removed.join(", ")}`);
+  } else if (group === "mail" && action === "label") {
+    const id = rest[0] || flags.id;
+    if (!id) throw new Error("usage: mail label <id> [--add L] [--remove L]");
+    const out = await call("POST", "/mail/modify", {
+      body: {
+        id,
+        addLabels: flags.add ? [flags.add] : [],
+        removeLabels: flags.remove ? [flags.remove] : [],
+      },
+    });
+    console.log(`${id}: +[${out.added}] -[${out.removed}]`);
+  } else if (group === "mail" && action === "labels") {
+    const { labels } = await call("GET", "/mail/labels");
+    for (const l of labels) console.log(`${l.id}\t${l.name}`);
+  } else if (group === "cal" && action === "create") {
+    const out = await call("POST", "/calendar/events", {
+      body: {
+        summary: flags.summary,
+        start: flags.start,
+        end: flags.end,
+        location: flags.location,
+        description: flags.description,
+      },
+    });
+    console.log(`Created ${out.id}\n${out.htmlLink}`);
+  } else if (group === "cal" && action === "update") {
+    const id = rest[0] || flags.id;
+    if (!id) throw new Error("usage: cal update <id> [--summary s] [--start ISO] ...");
+    const out = await call("PATCH", "/calendar/events", {
+      query: { id },
+      body: {
+        summary: flags.summary,
+        start: flags.start,
+        end: flags.end,
+        location: flags.location,
+        description: flags.description,
+      },
+    });
+    console.log(`Updated ${out.id}\n${out.htmlLink}`);
+  } else if (group === "cal" && action === "delete") {
+    console.error(
+      "Deleting events isn't available to you. The rules for how the calendar may\n" +
+        "be reshaped aren't written yet, so removal stays a human action. Propose\n" +
+        "the change to Kuba instead."
+    );
+    process.exit(1);
   } else if (group === "cal" && action === "events") {
     const { events } = await call("GET", "/calendar/events", {
       query: { from: flags.from, to: flags.to, limit: flags.limit },
@@ -122,10 +175,17 @@ try {
   } else {
     console.error(
       "usage:\n" +
-        "  mail search <query> [--limit N]\n" +
+        "  mail search <query> [--limit N]     Gmail search syntax\n" +
         "  mail read <id>\n" +
         "  mail draft --to <addr> --subject <s> --text <body> [--thread <id>]\n" +
-        "  cal events [--from ISO] [--to ISO] [--limit N]"
+        "  mail archive <id>                   also marks read\n" +
+        "  mail mark-read <id>\n" +
+        "  mail label <id> [--add L] [--remove L]\n" +
+        "  mail labels                         list label ids\n" +
+        "  cal events [--from ISO] [--to ISO] [--limit N]\n" +
+        "  cal create --summary <s> --start <ISO> --end <ISO> [--location] [--description]\n" +
+        "  cal update <id> [--summary] [--start] [--end] [--location] [--description]\n" +
+        "\nNo `mail send` and no `cal delete` — both are human actions by design."
     );
     process.exit(1);
   }

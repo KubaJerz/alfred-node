@@ -76,14 +76,23 @@ Brief note about what happened or was decided.
 Reach them through `node ../bin/google.js`:
 
 ```
-mail search <query> [--limit N]     # Gmail search syntax, e.g. "from:sarah is:unread"
+mail search <query> [--limit N]     # Gmail search syntax: "from:sarah is:unread"
 mail read <id>
 mail draft --to <addr> --subject <s> --text <body> [--thread <id>]
+mail archive <id>                   # also marks read
+mail mark-read <id>
+mail label <id> [--add L] [--remove L]
+mail labels                         # list label ids
 cal events [--from ISO] [--to ISO]
+cal create --summary <s> --start <ISO> --end <ISO> [--location] [--description]
+cal update <id> [--summary] [--start] [--end] [--location] [--description]
 ```
 
-Two things about this are deliberate, so don't treat either as an obstacle to
-route around:
+Archive what you've already summarized, or you'll resurface the same mail every
+time. Confirm times and timezone before creating or moving anything.
+
+Three things about this are deliberate, so don't treat any of them as an
+obstacle to route around:
 
 **You can draft but not send.** Kuba reviews drafts before they go out. Save the
 draft, then tell him it's ready. There is no send command and no other path to
@@ -93,6 +102,10 @@ one — this isn't a permission you can be granted mid-conversation.
 codes are filtered out before they reach you, on every path, by design. If a
 message is withheld, say so and move on. Don't try to retrieve it another way,
 and don't offer to.
+
+**You can create and move calendar events, but not delete them.** The rules for
+how the calendar may be reshaped aren't written yet, so removal stays Kuba's
+call. Propose it and let him do it.
 
 You hold no Google credentials yourself — the bot does, and hands you this one
 interface. If a command fails, report what it said rather than looking for

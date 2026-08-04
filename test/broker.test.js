@@ -36,6 +36,33 @@ test("there is no send route — the capability does not exist", async () => {
   }
 });
 
+test("there is no calendar delete route while the rules are unwritten", async () => {
+  assert.ok(
+    !OPERATIONS.some((op) => op.startsWith("DELETE") || /calendar.*delete/i.test(op)),
+    `a delete operation exists: ${OPERATIONS}`
+  );
+  for (const [method, path] of [
+    ["DELETE", "/calendar/events"],
+    ["POST", "/calendar/events/delete"],
+    ["DELETE", "/mail/message"],
+  ]) {
+    const res = await hit(path, { method });
+    assert.equal(res.status, 404, `${method} ${path} was reachable`);
+  }
+});
+
+test("every write operation validates before reaching Google", async () => {
+  // An empty body must be rejected locally, not forwarded as a malformed call.
+  for (const path of ["/mail/draft", "/calendar/events"]) {
+    const res = await hit(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    assert.equal(res.status, 400, `${path} accepted an empty body`);
+  }
+});
+
 test("rejects unauthenticated and wrong-token callers", async () => {
   const none = await fetch(broker.url + "/mail/search");
   assert.equal(none.status, 401, "no token should be rejected");

@@ -122,6 +122,36 @@ const ROUTES = {
     return { draftId: r.data.id, note: "Draft saved. Sending is not available here." };
   },
 
+  // Triage: archive, mark read, relabel. This is what gmail.modify is for, and
+  // it's what makes the digest workflow work — Alfred can clear what he's
+  // already summarized instead of resurfacing it every turn.
+  "POST /mail/modify": async ({ body }) => {
+    const { id, archive, markRead, addLabels, removeLabels } = body || {};
+    if (!id) return { error: "id required", status: 400 };
+    const add = [...(addLabels || [])];
+    const remove = [...(removeLabels || [])];
+    if (archive) remove.push("INBOX");
+    if (markRead) remove.push("UNREAD");
+    if (!add.length && !remove.length) {
+      return { error: "nothing to change", status: 400 };
+    }
+    const gmail = await gmailClient();
+    await gmail.users.messages.modify({
+      userId: "me",
+      id,
+      requestBody: { addLabelIds: add, removeLabelIds: remove },
+    });
+    return { id, added: add, removed: remove };
+  },
+
+  "GET /mail/labels": async () => {
+    const gmail = await gmailClient();
+    const r = await gmail.users.labels.list({ userId: "me" });
+    return {
+      labels: (r.data.labels || []).map((l) => ({ id: l.id, name: l.name })),
+    };
+  },
+
   "GET /calendar/events": async ({ params }) => {
     const cal = await calendarClient();
     const r = await cal.events.list({
@@ -141,6 +171,51 @@ const ROUTES = {
         location: e.location || "",
       })),
     };
+  },
+
+  // Create and update, but no delete route. The ruleset governing how Alfred
+  // may reshape the calendar isn't written yet, and the pattern that holds
+  // everywhere else here is that an absent capability beats a rule he has to
+  // remember. Removal stays a human action until those rules exist; when they
+  // land, this is the place they get enforced.
+  "POST /calendar/events": async ({ body }) => {
+    const { summary, start, end, location, description } = body || {};
+    if (!summary || !start || !end) {
+      return { error: "summary, start and end required (ISO 8601)", status: 400 };
+    }
+    const cal = await calendarClient();
+    const r = await cal.events.insert({
+      calendarId: "primary",
+      requestBody: {
+        summary,
+        location,
+        description,
+        // Date-only strings are all-day events; anything else carries a time.
+        start: start.length === 10 ? { date: start } : { dateTime: start },
+        end: end.length === 10 ? { date: end } : { dateTime: end },
+      },
+    });
+    return { id: r.data.id, htmlLink: r.data.htmlLink };
+  },
+
+  "PATCH /calendar/events": async ({ params, body }) => {
+    const id = params.get("id");
+    if (!id) return { error: "id required", status: 400 };
+    const { summary, start, end, location, description } = body || {};
+    const patch = {};
+    if (summary !== undefined) patch.summary = summary;
+    if (location !== undefined) patch.location = location;
+    if (description !== undefined) patch.description = description;
+    if (start) patch.start = start.length === 10 ? { date: start } : { dateTime: start };
+    if (end) patch.end = end.length === 10 ? { date: end } : { dateTime: end };
+    if (!Object.keys(patch).length) return { error: "nothing to change", status: 400 };
+    const cal = await calendarClient();
+    const r = await cal.events.patch({
+      calendarId: "primary",
+      eventId: id,
+      requestBody: patch,
+    });
+    return { id: r.data.id, htmlLink: r.data.htmlLink };
   },
 };
 
