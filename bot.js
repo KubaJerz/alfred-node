@@ -251,6 +251,26 @@ async function dreamedSince(state) {
 }
 
 // ── Claude Code invocation ──────────────────────────────────────────────────
+// A lapsed login doesn't look like an error from out here: `claude -p` prints a
+// short human message and Alfred happily forwards it as a reply. Match the
+// shapes it uses so the bot can name the real problem instead. Deliberately
+// narrow — a false positive would mask a genuine reply about logging in.
+const AUTH_FAILURE_PATTERNS = [
+  /not logged in/i,
+  /please run\s+\/login/i,
+  /run `?\/login/i,
+  /invalid api key/i,
+  /authentication_error/i,
+  /oauth token (has )?expired/i,
+];
+
+function isAuthFailure(stdout, stderr) {
+  // Only inspect the first part: a long genuine reply that happens to discuss
+  // logging in shouldn't trip this, but a bare auth notice is short and early.
+  const head = `${stdout}\n${stderr}`.slice(0, 600);
+  return AUTH_FAILURE_PATTERNS.some((re) => re.test(head));
+}
+
 function runClaude(message, sessionId) {
   return new Promise((resolve, reject) => {
     const args = [
@@ -278,9 +298,36 @@ function runClaude(message, sessionId) {
     proc.stdout.on("data", (d) => (stdout += d.toString()));
     proc.stderr.on("data", (d) => (stderr += d.toString()));
 
-    proc.on("close", (code) => {
+    proc.on("close", (code, signal) => {
       if (code !== 0) {
-        console.error(`⚠️  Claude exited ${code}: ${stderr}`);
+        console.error(`⚠️  Claude exited ${code}${signal ? ` (${signal})` : ""}: ${stderr}`);
+      }
+
+      // spawn's `timeout` kills the child rather than returning an error, so a
+      // timeout otherwise arrived as an empty/garbled reply. Report it plainly.
+      if (signal && !stdout.trim()) {
+        const secs = Math.round(TIMEOUT_MS / 1000);
+        resolve({
+          result: `⏱️ That took longer than ${secs}s, so I stopped it. Ask again, or break it into smaller steps — raise \`CLAUDE_TIMEOUT_MS\` if it genuinely needs longer.`,
+          session_id: null,
+          is_error: true,
+          is_timeout: true,
+        });
+        return;
+      }
+
+      // An expired headless login comes back as an ordinary-looking message,
+      // so Alfred would relay "Not logged in · Please run /login" as if it were
+      // a considered reply. Catch it and say what actually needs doing.
+      if (isAuthFailure(stdout, stderr)) {
+        console.error("🔑 Claude Code is not authenticated — run `claude` on the host and /login");
+        resolve({
+          result: "🔑 My Claude session isn't authenticated anymore. Run `claude` on the host and sign in with `/login`, then try me again.",
+          session_id: null,
+          is_error: true,
+          is_auth_error: true,
+        });
+        return;
       }
 
       // claude -p --output-format json may return multiple JSON lines
@@ -488,13 +535,28 @@ async function handleTurn(msg, userMessage) {
     // Run Claude
     const response = await runClaude(finalMessage, sessionId);
 
-    // Persist session continuity whether or not we end up replying.
-    await writeState({
-      last_session_id: response.session_id || state.last_session_id,
-      status: "open", // reset by /clear, or implicitly by the next dream pass
-      topic: userMessage.slice(0, 100),
-      timestamp: new Date().toISOString(),
-    });
+    // An auth lapse or timeout produced no session and did no work — recording
+    // it as the session's latest turn would just push the real one out of view.
+    const infraFailed = response.is_auth_error || response.is_timeout;
+
+    if (!infraFailed) {
+      // Persist session continuity whether or not we end up replying.
+      await writeState({
+        last_session_id: response.session_id || state.last_session_id,
+        status: "open", // reset by /clear, or implicitly by the next dream pass
+        topic: userMessage.slice(0, 100),
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    // These are bot-level failures, not things Alfred said. Send them straight
+    // out, skipping the <no_reply> and attachment handling below.
+    if (infraFailed) {
+      const kind = response.is_auth_error ? "auth_error" : "timeout";
+      await msg.reply(response.result);
+      await logTurn({ dir: "out", kind, text: response.result });
+      return;
+    }
 
     // Alfred can opt out of replying by emitting ONLY the sentinel — used when
     // a message clearly isn't directed at it. Tolerate stray markdown/quotes.
@@ -625,4 +687,19 @@ async function sendReply(msg, text, files) {
 
 // ── Launch ──────────────────────────────────────────────────────────────────
 await bootstrap();
-client.login(DISCORD_TOKEN);
+
+// An unreachable network rejects here. Left unhandled it becomes an uncaught
+// exception and a full stack dump — which, at one restart every 5s, is how a
+// single outage produced 380k restarts and a 186 MB log. Exit quietly with a
+// distinct code so the supervisor can tell "no network yet" from "broken" and
+// back off accordingly.
+const EX_TEMPFAIL = 75;
+client.login(DISCORD_TOKEN).catch((err) => {
+  const transient = err?.code === "EAI_AGAIN" || err?.code === "ENOTFOUND" || err?.code === "ENETUNREACH";
+  if (transient) {
+    console.error(`🌐 Can't reach Discord (${err.code}) — exiting for the supervisor to retry`);
+    process.exit(EX_TEMPFAIL);
+  }
+  console.error(`❌ Discord login failed: ${err?.message || err}`);
+  process.exit(1);
+});
