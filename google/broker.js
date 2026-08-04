@@ -32,7 +32,13 @@ import http from "http";
 import { randomBytes } from "crypto";
 import { gmailClient, calendarClient } from "./auth.js";
 import { classify, redact, screen } from "./mail-filter.js";
-import { resolveColor, toEventTime, NEVER_NOTIFY, TIMEZONE } from "./calendar-rules.js";
+import {
+  resolveColor,
+  toEventTime,
+  toRangeBound,
+  NEVER_NOTIFY,
+  TIMEZONE,
+} from "./calendar-rules.js";
 
 // Header rather than a query param: query strings land in logs and shell
 // history, and Alfred's Bash invocations are echoed to the bot log.
@@ -242,8 +248,8 @@ const ROUTES = {
     const cal = await calendarClient();
     const r = await cal.events.list({
       calendarId: "primary",
-      timeMin: params.get("from") || new Date().toISOString(),
-      timeMax: params.get("to") || undefined,
+      timeMin: toRangeBound(params.get("from")) || new Date().toISOString(),
+      timeMax: toRangeBound(params.get("to")),
       singleEvents: true,
       orderBy: "startTime",
       maxResults: Math.min(Number(params.get("limit")) || 25, 100),

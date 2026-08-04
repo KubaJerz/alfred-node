@@ -9,6 +9,7 @@ import {
   TIMEZONE,
   resolveColor,
   toEventTime,
+  toRangeBound,
   NEVER_NOTIFY,
 } from "../google/calendar-rules.js";
 
@@ -67,4 +68,23 @@ test("date-only input is all-day and carries no timezone", () => {
     timeZone: TIMEZONE,
   });
   assert.equal(TIMEZONE, "America/New_York");
+});
+
+// Alfred found this one in a live turn: `--from 2026-08-05` came back "Bad
+// Request", so did `--from 2026-08-05T00:00:00`, and he gave up and listed the
+// whole calendar. Google wants an offset; a date is what anyone would type.
+test("range bounds accept a plain date, and land in Eastern", () => {
+  assert.equal(toRangeBound("2026-08-05"), "2026-08-05T00:00:00-04:00");
+  assert.equal(toRangeBound("2026-08-05T00:00:00"), "2026-08-05T00:00:00-04:00");
+  assert.equal(toRangeBound("2026-08-05T14:30"), "2026-08-05T14:30:00-04:00");
+
+  // Winter is -05:00. A hardcoded offset would be wrong for half the year.
+  assert.equal(toRangeBound("2026-11-20"), "2026-11-20T00:00:00-05:00");
+
+  // Anything already carrying a zone is left exactly as it is.
+  for (const explicit of ["2026-08-05T00:00:00Z", "2026-08-05T00:00:00-07:00"]) {
+    assert.equal(toRangeBound(explicit), explicit);
+  }
+  assert.equal(toRangeBound(""), undefined);
+  assert.equal(toRangeBound(null), undefined);
 });

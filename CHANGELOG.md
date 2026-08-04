@@ -65,6 +65,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
   Subjects are RFC 2047 encoded-words now and the body carries an explicit
   base64 transfer encoding. Nothing errored — it just looked wrong, and Alfred
   writes the kind of prose full of em dashes and curly quotes that trips it.
+- **`gcal.js events --from 2026-08-05` failed with "Bad Request".** Google's
+  `timeMin`/`timeMax` require an offset, so a plain date — the obvious thing to
+  type — was rejected, and the error said nothing about why. Found by Alfred in
+  a live turn: he tried a date, tried a date with a time on it, then gave up and
+  listed the whole calendar unfiltered. Bare dates and offset-less times are now
+  interpreted in `America/New_York`, DST included.
 - **Calendar times were six hours off.** `events.list` formats in the
   *calendar's* default zone, and the account's was `Europe/Warsaw`. Reads now
   request `America/New_York` explicitly, matching what writes stamp.

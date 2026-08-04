@@ -41,6 +41,38 @@ export function toEventTime(value) {
     : { dateTime: value, timeZone: TIMEZONE };
 }
 
+// The offset TIMEZONE is running at on a given date, as "-04:00" / "-05:00".
+// Taken from the zone database rather than hardcoded, so it follows DST instead
+// of being right for half the year.
+function offsetOn(date) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: TIMEZONE,
+    timeZoneName: "longOffset",
+  }).formatToParts(new Date(`${date}T12:00:00Z`));
+  const name = parts.find((p) => p.type === "timeZoneName")?.value || "GMT+00:00";
+  return name.replace("GMT", "") || "+00:00";
+}
+
+// timeMin/timeMax must be RFC 3339 *with* an offset. Google rejects a bare
+// "2026-08-05" with a flat "Bad Request", which says nothing about what was
+// wrong — Alfred hit this, tried the same thing with a time on it, hit it
+// again, and gave up and listed the whole calendar unfiltered. A date is the
+// obvious thing to pass to --from, so the obvious thing is made to work here
+// rather than documented as a gotcha.
+//
+// A date with no time means midnight, and the range stays half-open:
+// --from 2026-08-05 --to 2026-08-06 is exactly Wednesday.
+export function toRangeBound(value) {
+  if (!value) return undefined;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return `${value}T00:00:00${offsetOn(value)}`;
+  const naive = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}(:\d{2})?)$/.exec(value);
+  if (naive) {
+    const time = naive[3] ? naive[2] : `${naive[2]}:00`;
+    return `${naive[1]}T${time}${offsetOn(naive[1])}`;
+  }
+  return value; // already carries Z or an explicit offset
+}
+
 // Applied to every write. `attendees` is never populated from caller input, and
 // sendUpdates:"none" covers the case that populating it isn't the only way mail
 // goes out: patching an event that *already* has attendees — one created on a
