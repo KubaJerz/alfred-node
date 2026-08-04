@@ -410,21 +410,36 @@ test("the send refusal isn't reachable by another spelling of the same word", as
   }
 });
 
-test("no arguments prints usage and exits non-zero", async () => {
-  for (const [file, marker] of [
-    ["gmail.js", /usage: node \.\.\/bin\/gmail\.js/],
-    ["gcal.js", /usage: node \.\.\/bin\/gcal\.js/],
-  ]) {
+// Asking what a tool does is not an error; getting the command wrong is. The
+// skills point at --help instead of restating the flags, so help has to behave
+// like every other tool — stdout, exit 0 — or a piped read turns reading the
+// manual into a failed command.
+test("--help prints usage on stdout and exits 0, with no broker needed", async () => {
+  for (const file of ["gmail.js", "gcal.js"]) {
+    for (const args of [["--help"], ["-h"], ["help"], []]) {
+      requests = [];
+      const out = await run(file, args, cleanEnv()); // no ALFRED_BROKER at all
+      assert.equal(out.code, 0, `${file} ${args.join(" ")} exited ${out.code}`);
+      assert.match(out.stdout, new RegExp(`usage: node \\.\\./bin/${file.replace(".", "\\.")}`));
+      assert.equal(out.stderr, "", `${file} ${args.join(" ")} wrote to stderr`);
+      assert.equal(requests.length, 0);
+    }
+  }
+  // Usage is also where the absences are stated, so a confused turn reads them
+  // without having to attempt the command first.
+  assert.match((await run("gmail.js", ["--help"])).stdout, /No `send`/);
+  assert.match((await run("gcal.js", ["--help"])).stdout, /guests is refused/);
+});
+
+test("an unrecognised command is an error, unlike --help", async () => {
+  for (const file of ["gmail.js", "gcal.js"]) {
     requests = [];
-    const out = await run(file, []);
-    assert.equal(out.code, 1);
-    assert.match(out.stderr, marker);
+    const out = await run(file, ["frobnicate"]);
+    assert.equal(out.code, 1, `${file} frobnicate exited 0`);
+    assert.match(out.stderr, /usage:/);
+    assert.equal(out.stdout, "", "a refusal on stdout reads as a result");
     assert.equal(requests.length, 0);
   }
-  // Usage is also where the two absences are stated, so a confused turn reads
-  // them without having to attempt the command first.
-  assert.match((await run("gmail.js", [])).stderr, /No `send`/);
-  assert.match((await run("gcal.js", [])).stderr, /guests is refused/);
 });
 
 test("the dropped group word is named, not quietly absorbed", async () => {

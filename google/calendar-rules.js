@@ -106,10 +106,23 @@ function weekdayOf(start) {
  * "--repeat weekly" on a Tuesday cannot produce a Wednesday series — the two
  * facts can't disagree if only one of them is supplied.
  */
-export function toRecurrence({ repeat, until, count, start } = {}) {
+export function toRecurrence({ repeat, until, count, days, rrule, start } = {}) {
+  // The escape hatch. `--repeat` covers the common shapes; iCalendar covers
+  // things nobody enumerated in advance ("third Thursday", "last weekday of the
+  // month"). Refusing those would make the tool narrower than the calendar it
+  // drives, and a wrong recurrence is one delete away — not the kind of mistake
+  // worth removing the ability to make.
+  if (rrule) {
+    if (repeat || until || count || days) {
+      throw new Error("--rrule replaces --repeat/--until/--count/--days; pass one or the other");
+    }
+    const body = String(rrule).trim().replace(/^RRULE:/i, "");
+    if (!/^FREQ=/i.test(body)) throw new Error("--rrule must start with FREQ=");
+    return [`RRULE:${body}`];
+  }
   if (!repeat) {
-    if (until || (count !== undefined && count !== null && count !== "")) {
-      throw new Error("--until and --count need --repeat");
+    if (until || days || (count !== undefined && count !== null && count !== "")) {
+      throw new Error("--until, --count and --days need --repeat");
     }
     return undefined;
   }
@@ -124,11 +137,25 @@ export function toRecurrence({ repeat, until, count, start } = {}) {
   // outcome nobody typing a zero could have wanted.
   const hasCount = count !== undefined && count !== null && count !== "";
   if (until && hasCount) throw new Error("--until and --count are alternatives; pass one");
-  if (!start) throw new Error("a start is required to build a recurrence");
+  // Only a weekday-bearing rule needs the start; DAILY/MONTHLY/YEARLY do not,
+  // which is what makes changing a series' recurrence possible without one.
+  if (spec.byDay && !days && !start) {
+    throw new Error("a weekly repeat needs a start date or --days, so the day is not guessed");
+  }
 
   const parts = [`FREQ=${spec.FREQ}`];
   if (spec.INTERVAL) parts.push(`INTERVAL=${spec.INTERVAL}`);
-  if (spec.byDay) parts.push(`BYDAY=${weekdayOf(start)}`);
+  if (days) {
+    // A class that meets Monday/Wednesday/Friday is one series, not three.
+    const list = String(days).toUpperCase().split(/[,\s]+/).filter(Boolean);
+    const bad = list.filter((d) => !ICAL_DAY.includes(d));
+    if (bad.length) {
+      throw new Error(`unknown day(s) ${bad.join(", ")} — expected ${ICAL_DAY.join(", ")}`);
+    }
+    parts.push(`BYDAY=${list.join(",")}`);
+  } else if (spec.byDay) {
+    parts.push(`BYDAY=${weekdayOf(start)}`);
+  }
 
   if (hasCount) {
     const n = Number(count);
@@ -136,7 +163,7 @@ export function toRecurrence({ repeat, until, count, start } = {}) {
     parts.push(`COUNT=${n}`);
   } else if (until) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(until)) throw new Error("--until must be a date (2026-11-24)");
-    if (start.length === 10) {
+    if (start && start.length === 10) {
       // An all-day series takes a DATE; a timed one takes UTC. Mixing them is
       // the classic RFC 5545 rejection and Google reports it as a flat 400.
       parts.push(`UNTIL=${until.replace(/-/g, "")}`);

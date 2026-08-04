@@ -6,16 +6,17 @@
 // to log the token. Nothing here touches disk; there is no file for a stray
 // `cat` to find.
 //
-// The env check runs at import rather than in each CLI: it's the same failure
-// for both, and a check that runs unconditionally isn't one a third CLI can
-// forget. That does mean importing this exits when the env is absent, so tests
-// must spawn the CLIs rather than import them — exit code and stderr are the
-// contract anyway.
+// The env check happens on first use, not at import. It used to run at import,
+// which meant `--help` exited 1 without printing anything — and a skill that
+// says "run --help for the flags" instead of restating them depends on that
+// working with no broker in sight. Reading the manual shouldn't require the
+// tool to be plugged in.
 
 const BASE = process.env.ALFRED_BROKER;
 const TOKEN = process.env.ALFRED_BROKER_TOKEN;
 
-if (!BASE || !TOKEN) {
+function requireBroker() {
+  if (BASE && TOKEN) return;
   console.error(
     "Broker unavailable — ALFRED_BROKER/ALFRED_BROKER_TOKEN are not set.\n" +
       "This runs inside a turn spawned by bot.js; it can't be used standalone."
@@ -30,6 +31,17 @@ export function fail(...lines) {
   console.error(lines.join("\n"));
   process.exit(1);
 }
+
+// Usage on stdout, exit 0. `--help` is not an error, and a skill that points
+// here instead of restating the flags depends on it behaving like every other
+// tool — otherwise `set -e` or a piped read turns asking for help into a
+// failure.
+export function usage(...lines) {
+  console.log(lines.join("\n"));
+  process.exit(0);
+}
+
+export const wantsHelp = (action) => ["--help", "-h", "help", undefined].includes(action);
 
 // --key value pairs; everything else is positional.
 export function parseFlags(args) {
@@ -52,6 +64,7 @@ export function requireId(rest, flags, usage) {
 }
 
 export async function call(method, path, { query = {}, body } = {}) {
+  requireBroker();
   const url = new URL(BASE + path);
   for (const [k, v] of Object.entries(query)) {
     if (v !== undefined && v !== null && v !== "") url.searchParams.set(k, v);
