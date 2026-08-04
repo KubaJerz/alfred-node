@@ -13,8 +13,9 @@ and move to **Done** with the PR number. Anything with a GitHub issue links to i
 ### Integrations — give Alfred hands
 
 Google access is live as of #25: OAuth consented, credentials held by a broker in
-`bot.js`, and `bin/google.js` as the agent-facing CLI. What follows is what's
-left rather than what's missing.
+`bot.js`, and `bin/gmail.js` / `bin/gcal.js` as the agent-facing CLIs, each paired
+with a skill under `agent/.claude/skills/`. What follows is what's left rather
+than what's missing.
 
 - [ ] **Exercise the write paths.** Read paths and refusals are verified against
       the real account; `mail draft`, `mail archive`, `mail label`,
@@ -30,14 +31,16 @@ left rather than what's missing.
         it consistently.
       - `ghr@otp.workday.com` passes: sender rules match `otp@` as a local part,
         not `otp.` as a subdomain.
-- [ ] **Split the CLI per service, and pair each with a skill.** Skills *do*
-      resolve in headless `claude -p` — verified by planting one and watching an
-      unprompted invocation fire off the description alone. `agent/SOUL.md`
-      previously claimed otherwise; that was wrong. This means real progressive
-      disclosure with triggers, instead of a pointer Alfred has to remember to
-      follow. One skill per service, each owning one CLI (`bin/gmail.js`,
-      `bin/gcal.js`, later `bin/notion.js`), which also stops SOUL.md growing a
-      section per integration.
+- [ ] **Delete the `bin/google.js` shim.** It exists only so a session resumed
+      across the split gets "this is now `bin/gmail.js`" instead of a stack
+      trace. Safe to remove once no live session predates the split — in
+      practice a week, or straight after the next `dream.sh` cycle in which Kuba
+      confirms a fresh session id in `agent/var/state.json`.
+- [ ] **`--thread` on `gmail.js draft` can't actually be used.** Neither
+      `search` nor `read` prints a `threadId`, so there is no way to obtain the
+      value the flag takes and every draft goes out as a fresh message rather
+      than a reply in-thread. Pre-existing, unchanged by the split. Fix is in
+      the broker's mail responses, not the CLI.
 - [ ] **Run the agent as a separate Unix user.** This is what turns the broker
       from a strong default into a guarantee. Alfred currently runs as the same
       user as `bot.js`, so he can read `agent/var/google/token.json` and call
@@ -103,7 +106,11 @@ left rather than what's missing.
       lands: do the rules live in `agent/` (Alfred reads them at runtime) or are
       they enforced in `bot.js`? Rules a model is asked to follow are guidance;
       rules in code are guarantees — destructive calendar edits probably want
-      the latter.
+      the latter. Whatever is guidance goes in the `gcal` skill body, which
+      absorbed `agent/calendar-rules.md`. If that pushes the body past ~200
+      lines, split it into `agent/.claude/skills/gcal/rules.md` referenced from
+      the body — not back out to `agent/`, so everything the skill owns stays
+      under the skill's own directory.
 - [ ] **Notion.** No official Notion CLI exists, so this is a build-or-adopt
       call: a small CLI wrapper over the Notion API that Alfred drives via Bash
       (fits his existing tools, no new runtime), or the Notion MCP server (less
@@ -161,6 +168,17 @@ left rather than what's missing.
 
 ## Done
 
+- [x] ~~**Split the CLI per service, and pair each with a skill.**~~ `bin/gmail.js`
+      and `bin/gcal.js` over a shared `bin/lib/broker-client.js`, each paired
+      with a skill in `agent/.claude/skills/`. Skills *do* resolve in headless
+      `claude -p` — verified by planting one and watching an unprompted
+      invocation fire off the description alone; `agent/SOUL.md` previously
+      claimed otherwise and was wrong. So the command surface, Gmail's query
+      syntax and the whole calendar ruleset now load on a trigger instead of a
+      pointer Alfred has to remember to follow. `agent/calendar-rules.md` folded
+      into the `gcal` skill; SOUL.md keeps only the constraints that must hold
+      on a turn where no skill fires. `bin/notion.js` slots in the same way.
+      (#25)
 - [x] **Google access, end to end** — OAuth (not a service account; personal
       Gmail can't use one), a credential broker holding the tokens so the agent
       never does, mail/calendar CLI, credential screening at a single chokepoint,

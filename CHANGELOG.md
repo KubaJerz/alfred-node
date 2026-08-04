@@ -4,7 +4,44 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [SemVer](https://semver.org/).
 
 ## [Unreleased]
+### Added
+- **Alfred can read mail and run the calendar.** OAuth against a personal Google
+  account (not a service account — those can't reach personal Gmail without
+  domain-wide delegation, which is Workspace-only). The credentials are held by
+  a broker inside `bot.js` that listens on loopback and exposes eight
+  operations; the agent gets the address and a per-boot secret through its
+  environment, so nothing lands on disk for a stray `cat` to find.
+- **Two CLIs, `bin/gmail.js` and `bin/gcal.js`,** each paired with a skill under
+  `agent/.claude/skills/`. Skills load on a description match, so the calendar
+  ruleset arrives when a conversation turns to the calendar instead of being a
+  pointer Alfred has to remember to follow. Verified: telling it "Wednesday the
+  21st" when the 21st is a Friday gets the conflict caught and a question
+  asked, from a file that is never read up front.
+- **Credential screening at a single chokepoint.** Verification codes, OTPs,
+  password resets and sign-in alerts are classified and stripped inside the
+  broker — on search, on read, and on any path added later — because anything
+  reaching the prompt is written to `~/.claude/projects/`, which sits outside
+  `agent/var/`, `.gitignore` and the memory funnel at once. It fails closed.
+  Audited against the real mailbox: 10 of 25 messages withheld, no code passed.
+- **A pre-commit hook that blocks personal files.** Path checks, force-added
+  ignored files, secret-shaped content, and the test suite. Verified against
+  three deliberate leak attempts and a planted failing test.
+
+### Changed
+- **Sending mail and deleting events aren't permissions, they're absences.**
+  There is no send route and no delete route in the broker; the CLIs name both
+  commands only to explain the design and exit 1. Invitations go further —
+  `attendees` is unreachable from caller input rather than rejected, so "never
+  invite anyone" holds even if Alfred asks for it or never read the rules.
+
 ### Fixed
+- **Calendar update never worked.** The broker read request bodies for `POST`
+  but not `PATCH`, so every update arrived empty and came back "nothing to
+  change" — indistinguishable from asking for nothing. Found by an audit, not
+  by use, because the write paths had never been exercised.
+- **Calendar times were six hours off.** `events.list` formats in the
+  *calendar's* default zone, and the account's was `Europe/Warsaw`. Reads now
+  request `America/New_York` explicitly, matching what writes stamp.
 - **A network outage no longer crash-loops the bot.** `client.login()` rejects
   with `EAI_AGAIN` when DNS is unavailable (suspended laptop, dropped Wi-Fi).
   The rejection was unhandled, so Node dumped a stack and exited, and the

@@ -12,6 +12,10 @@ This directory is yours. Everything under `var/` is your own state: personal,
 machine-local, and never committed to git.
 
 - `SOUL.md` — your instructions
+- `.claude/skills/` — instructions for specific capabilities (mail, calendar).
+  They load themselves when the conversation needs them; you don't read them up
+  front. Note the location: these are config, not state, so they live here and
+  not under `var/`.
 - `var/USER.md` — who your user is
 - `var/memories/MEMORY.md` — long-term memory (curated nightly)
 - `var/memories/dailies/YYYY-MM-DD.md` — today's notes; this is where you write

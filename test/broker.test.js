@@ -120,6 +120,27 @@ test("malformed POST bodies are rejected, not crashed on", async () => {
   assert.equal(res.status, 400);
 });
 
+// The stub-broker CLI tests can't catch this: a stub that parses every method's
+// body will happily accept a PATCH the real server drops on the floor. The
+// symptom was indistinguishable from a user error — "nothing to change" — and
+// it meant calendar update had never worked at all.
+test("a PATCH body is actually read, not silently discarded", async () => {
+  const res = await hit("/calendar/events?id=abc", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ summary: "renamed" }),
+  });
+  const body = await res.json();
+  assert.notEqual(
+    body.error,
+    "nothing to change",
+    "the request body never reached the route — PATCH parsing regressed"
+  );
+  // With no credentials configured it can't get further than the auth layer,
+  // which is the proof it got past validation and tried to call Google.
+  assert.equal(res.status, 500);
+});
+
 test("draft requires a recipient, so an empty call can't create junk", async () => {
   const res = await hit("/mail/draft", {
     method: "POST",

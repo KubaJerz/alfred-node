@@ -292,7 +292,7 @@ function runClaude(message, sessionId) {
       // The broker address and its one-time secret reach the agent through the
       // environment and never touch disk, so there's no credential file for a
       // stray `cat` to turn up. The Google tokens themselves stay in this
-      // process — bin/google.js only ever gets a handle to the broker.
+      // process — the CLIs in bin/ only ever get a handle to the broker.
       env: {
         ...process.env,
         HOME: process.env.HOME,

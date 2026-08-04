@@ -1,8 +1,8 @@
 // The credential broker.
 //
 // Alfred never holds Google credentials. bot.js does, and exposes a deliberately
-// small set of operations over loopback; Alfred reaches them through bin/mail.js,
-// which carries no secrets of its own.
+// small set of operations over loopback; Alfred reaches them through bin/gmail.js
+// and bin/gcal.js, which carry no secrets of their own.
 //
 // This is what turns three separate promises into one mechanism:
 //
@@ -188,7 +188,7 @@ const ROUTES = {
   // rejected, it's unreachable — there is no path from caller input to the
   // attendees field, so "never send invitations" holds even if Alfred asks for
   // it, misreads the rules, or never read them. Attendee names belong in the
-  // description, which is a convention agent/calendar-rules.md explains.
+  // description, which is a convention the gcal skill explains.
   "POST /calendar/events": async ({ body }) => {
     const { summary, start, end, location, description, color } = body || {};
     if (!summary || !start || !end) {
@@ -281,7 +281,12 @@ export async function startBroker({ port = 0, log = console.log } = {}) {
       }
 
       let body = null;
-      if (req.method === "POST") {
+      // PATCH belongs here as much as POST. It was missing, and the failure was
+      // silent in exactly the wrong way: `PATCH /calendar/events` got body=null,
+      // built an empty patch, and returned "nothing to change" — which reads as
+      // "you asked for nothing" rather than "this route cannot receive input".
+      // Calendar update had never once worked.
+      if (req.method === "POST" || req.method === "PATCH") {
         const chunks = [];
         for await (const c of req) chunks.push(c);
         // Cap the body so a runaway loop can't exhaust memory in the bot process.

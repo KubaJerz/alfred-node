@@ -1,6 +1,7 @@
 // Calendar conventions that are cheap to get wrong and expensive to undo.
 //
-// The full ruleset Alfred reads is agent/calendar-rules.md. What lives *here*
+// The full ruleset Alfred reads is agent/.claude/skills/gcal/SKILL.md, which
+// loads itself when a conversation turns to the calendar. What lives *here*
 // is the subset that shouldn't depend on him having read it: an invitation sent
 // by mistake reaches real people and can't be recalled, so it's enforced rather
 // than requested.
