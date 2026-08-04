@@ -12,10 +12,40 @@ and move to **Done** with the PR number. Anything with a GitHub issue links to i
 
 ### Integrations — give Alfred hands
 
-Today Alfred has Bash/Read/Edit/Write and nothing else. `agent/SOUL.md` claims
-he "may have MCP access to Google Calendar (check `.mcp.json`)" — **there is no
-`.mcp.json`**, so that line is a lie he's been improvising around. Fix that line
-as part of whichever integration lands first.
+Google access is live as of #25: OAuth consented, credentials held by a broker in
+`bot.js`, and `bin/google.js` as the agent-facing CLI. What follows is what's
+left rather than what's missing.
+
+- [ ] **Exercise the write paths.** Read paths and refusals are verified against
+      the real account; `mail draft`, `mail archive`, `mail label`,
+      `cal create` and `cal update` have never run against Google. Three bugs
+      came out of doing this for the read paths — assume the same rate here. The
+      calendar writes need a scratch event, not a real one.
+- [ ] **Two known gaps in the credential filter**, both found auditing the real
+      mailbox in #25, neither a leak:
+      - Sign-in alerts are treated arbitrarily. Firefox's "New sign-in to
+        Firefox" is withheld; TaxAct's and Slack's "sign in from a new device"
+        pass, because only the former matches `new sign-in`. Same category,
+        opposite outcomes — decide whether the category is sensitive and apply
+        it consistently.
+      - `ghr@otp.workday.com` passes: sender rules match `otp@` as a local part,
+        not `otp.` as a subdomain.
+- [ ] **Split the CLI per service, and pair each with a skill.** Skills *do*
+      resolve in headless `claude -p` — verified by planting one and watching an
+      unprompted invocation fire off the description alone. `agent/SOUL.md`
+      previously claimed otherwise; that was wrong. This means real progressive
+      disclosure with triggers, instead of a pointer Alfred has to remember to
+      follow. One skill per service, each owning one CLI (`bin/gmail.js`,
+      `bin/gcal.js`, later `bin/notion.js`), which also stops SOUL.md growing a
+      section per integration.
+- [ ] **Run the agent as a separate Unix user.** This is what turns the broker
+      from a strong default into a guarantee. Alfred currently runs as the same
+      user as `bot.js`, so he can read `agent/var/google/token.json` and call
+      Google directly, bypassing every restriction the broker enforces. No
+      application code fixes that, and Claude Code's own deny rules don't
+      survive Bash. Needs: a second user with its own authenticated Claude Code,
+      a NOPASSWD sudoers rule, `chmod 700` on the credentials dir, and group
+      sharing so memories stay writable.
 
 - [ ] **Gmail → Alfred via Pub/Sub.** `users.watch()` publishes change
       notifications to a Cloud Pub/Sub topic. Use a **pull** subscription: this
@@ -130,6 +160,16 @@ as part of whichever integration lands first.
   for a single figure. Don't re-propose unprompted.
 
 ## Done
+
+- [x] **Google access, end to end** — OAuth (not a service account; personal
+      Gmail can't use one), a credential broker holding the tokens so the agent
+      never does, mail/calendar CLI, credential screening at a single chokepoint,
+      and the calendar ruleset with the invitation rule enforced in code rather
+      than requested. 21 hermetic tests asserting the absences. (#25)
+- [x] **Personal files can't be committed.** `scripts/check-no-secrets.sh` plus a
+      repo-tracked pre-commit hook — path checks, force-add detection,
+      secret-shaped content, and the test suite. Verified against three
+      deliberate leak attempts and a planted failing test. (#25)
 
 - [x] **Stopped the crash loop and capped the log.** An unhandled `EAI_AGAIN`
       from `client.login()` meant a network outage restarted the bot every 5s
