@@ -7,7 +7,7 @@
   "scripts": {
     "start": "node bot.js",
     "google:auth": "node google/authorize.js",
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "node --test test/*.test.js",
     "check": "bash scripts/check-no-secrets.sh"
   },
   "dependencies": {
