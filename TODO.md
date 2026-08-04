@@ -37,11 +37,10 @@ than what's missing.
       trace. Safe to remove once no live session predates the split — in
       practice a week, or straight after the next `dream.sh` cycle in which Kuba
       confirms a fresh session id in `agent/var/state.json`.
-- [ ] **`--thread` on `gmail.js draft` can't actually be used.** Neither
-      `search` nor `read` prints a `threadId`, so there is no way to obtain the
-      value the flag takes and every draft goes out as a fresh message rather
-      than a reply in-thread. Pre-existing, unchanged by the split. Fix is in
-      the broker's mail responses, not the CLI.
+- [ ] **Recurring events.** No `RRULE`, so "every Monday until May" is fifteen
+      individual `create` calls and fifteen individual deletes to undo. The
+      delete route landing makes this the next-worst asymmetry in the calendar
+      surface.
 - [ ] **Run the agent as a separate Unix user.** This is what turns the broker
       from a strong default into a guarantee. Alfred currently runs as the same
       user as `bot.js`, so he can read `agent/var/google/token.json` and call
@@ -168,6 +167,20 @@ than what's missing.
   for a single figure. Don't re-propose unprompted.
 
 ## Done
+
+- [x] ~~**Email replies.**~~ `gmail.js reply <id>` builds the draft from the
+      original — `Reply-To` over `From`, a `Re:` that doesn't stack, and the
+      `In-Reply-To`/`References` headers that actually thread it. The old
+      `--thread` flag took an id nothing ever printed, so every reply arrived
+      as a new conversation. Verified against a real message: all four headers
+      correct, and replying to a withheld message refused. (#25)
+- [x] ~~**Calendar delete.**~~ Deferred while the rules were unwritten; they
+      now exist and load themselves. The deciding fact is recoverability —
+      Google keeps deleted events in Trash for 30 days, unlike Gmail, whose
+      delete needs the scope that empties Trash permanently. Deleting an event
+      with guests is refused, because Google says cancellation mail "might
+      still be sent" regardless of the notification setting. Both paths
+      verified live. (#25)
 
 - [x] ~~**Exercise the write paths.**~~ All of them, against the real account:
       `draft` (multi-line body, round-tripped through `read`), `label`,

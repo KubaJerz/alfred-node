@@ -67,6 +67,17 @@ const CANNED = {
   },
   "POST /calendar/events": { id: "e1", htmlLink: "https://calendar.example/e1" },
   "PATCH /calendar/events": { id: "e1", htmlLink: "https://calendar.example/e1" },
+  "DELETE /calendar/events": {
+    id: "e1",
+    summary: "Quiz",
+    note: "Deleted. Recoverable from Google Calendar's Trash for 30 days.",
+  },
+  "POST /mail/reply": {
+    draftId: "r1",
+    to: "sarah@example.com",
+    subject: "Re: lab meeting",
+    note: "Reply saved as a draft, in-thread. Sending is not available here.",
+  },
 };
 
 let server;
@@ -142,7 +153,8 @@ function run(file, args, env) {
 const SURFACE = [
   ["gmail.js", ["search", "from:sarah", "is:unread", "--limit", "5"]],
   ["gmail.js", ["read", "m1"]],
-  ["gmail.js", ["draft", "--to", "a@b.com", "--subject", "Re: x", "--text", "two words", "--thread", "t1"]],
+  ["gmail.js", ["draft", "--to", "a@b.com", "--subject", "Re: x", "--text", "two words"]],
+  ["gmail.js", ["reply", "m1", "--text", "sounds good"]],
   ["gmail.js", ["archive", "m1"]],
   ["gmail.js", ["mark-read", "m1"]],
   ["gmail.js", ["label", "m1", "--add", "Label_9", "--remove", "INBOX"]],
@@ -150,6 +162,7 @@ const SURFACE = [
   ["gcal.js", ["events", "--from", "2026-01-21T00:00:00", "--to", "2026-01-22T00:00:00", "--limit", "5"]],
   ["gcal.js", ["create", "--summary", "Quiz", "--start", "2026-01-21", "--end", "2026-01-21", "--color", "banana"]],
   ["gcal.js", ["update", "e1", "--start", "2026-01-21T14:00:00", "--color", "basil"]],
+  ["gcal.js", ["delete", "e1"]],
 ];
 
 const calls = new Map(); // "gmail.js draft" -> { result, request }
@@ -248,7 +261,15 @@ test("write commands send exactly the body the broker route unpacks", () => {
   const expected = {
     "gmail.js draft": {
       route: "POST /mail/draft",
-      body: { to: "a@b.com", subject: "Re: x", text: "two words", threadId: "t1" },
+      body: { to: "a@b.com", subject: "Re: x", text: "two words" },
+    },
+    // A reply sends only the original's id and the new text. Everything that
+    // makes it thread — In-Reply-To, References, the Re: subject, the recipient
+    // — is derived by the broker from the original, because the CLI cannot see
+    // any of it and a reply assembled from guesses starts a new conversation.
+    "gmail.js reply": {
+      route: "POST /mail/reply",
+      body: { id: "m1", text: "sounds good" },
     },
     "gmail.js archive": {
       route: "POST /mail/modify",
@@ -349,26 +370,37 @@ test("gmail.js send makes no request at all — the capability does not exist", 
   assert.match(out.stderr, /draft/, "the refusal should name what to do instead");
 });
 
-test("gcal.js delete makes no request at all — removal stays a human action", async () => {
-  requests = [];
-  const out = await run("gcal.js", ["delete", "e1"]);
-  assert.equal(requests.length, 0, `delete reached the broker: ${JSON.stringify(requests)}`);
-  assert.notEqual(out.code, 0, "delete exited 0, which reads as deleted");
-  assert.equal(out.stdout, "");
-  assert.match(out.stderr, /isn't available to you/);
-  assert.match(out.stderr, /Propose\s+the change to Kuba/);
+// Calendar delete is allowed and mail delete is not, and the reason is
+// reversibility rather than the verb: a deleted event sits in Google's Trash
+// for 30 days, a deleted message needs a scope that empties Trash for good.
+// This asserts the id travels where the route reads it, and that the caller is
+// told the deletion is recoverable — an agent that thinks removal is permanent
+// hedges on requests it should just carry out.
+test("gcal.js delete sends the id on the query string and reports the trash window", () => {
+  const { request, result } = calls.get("gcal.js delete");
+  assert.equal(`${request.method} ${request.pathname}`, "DELETE /calendar/events");
+  assert.deepEqual(request.query, { id: "e1" });
+  assert.equal(request.raw, "", "delete should carry no body");
+  assert.equal(result.code, 0);
+  assert.match(result.stdout, /30 days/);
 });
 
-test("neither refusal is reachable by another spelling of the same word", async () => {
-  // The point is that no argv reaches a send or a delete, not that two specific
-  // words are caught. Anything unrecognised must fall through to usage, which
-  // also makes no request.
+test("a delete with no id never reaches the broker", async () => {
+  requests = [];
+  const out = await run("gcal.js", ["delete"]);
+  assert.notEqual(out.code, 0);
+  assert.equal(requests.length, 0, "an id-less delete was forwarded");
+});
+
+test("the send refusal isn't reachable by another spelling of the same word", async () => {
+  // The point is that no argv reaches a send, not that one specific word is
+  // caught. Anything unrecognised must fall through to usage, which also makes
+  // no request.
   for (const [file, args] of [
     ["gmail.js", ["send"]],
     ["gmail.js", ["mail", "send", "--to", "a@b.com"]],
     ["gmail.js", ["Send"]],
-    ["gcal.js", ["delete"]],
-    ["gcal.js", ["cal", "delete", "e1"]],
+    ["gmail.js", ["reply"]],
     ["gcal.js", ["remove", "e1"]],
   ]) {
     requests = [];
@@ -392,7 +424,7 @@ test("no arguments prints usage and exits non-zero", async () => {
   // Usage is also where the two absences are stated, so a confused turn reads
   // them without having to attempt the command first.
   assert.match((await run("gmail.js", [])).stderr, /No `send`/);
-  assert.match((await run("gcal.js", [])).stderr, /No `delete`/);
+  assert.match((await run("gcal.js", [])).stderr, /guests is refused/);
 });
 
 test("the dropped group word is named, not quietly absorbed", async () => {

@@ -1,6 +1,6 @@
 ---
 name: gcal
-description: Kuba's Google Calendar, through bin/gcal.js, plus the rules that govern it. Use whenever a message touches the schedule — what's on my calendar, what do I have today or tomorrow or this week, am I free Thursday, when is that meeting, is anything on this weekend, put that on the calendar, add the quiz, schedule it, block out time, move it to Friday, reschedule, push it back an hour, change where it is. Covers listing events, creating and updating them, and the rules that apply before any write: Eastern time, checking the date, never inventing a time, the colour categories, no invitations, no deletes. Read this before creating or changing any event.
+description: Kuba's Google Calendar, through bin/gcal.js, plus the rules that govern it. Use whenever a message touches the schedule — what's on my calendar, what do I have today or tomorrow or this week, am I free Thursday, when is that meeting, is anything on this weekend, put that on the calendar, add the quiz, schedule it, block out time, move it to Friday, reschedule, push it back an hour, change where it is, cancel that meeting, delete the event, take it off my calendar, clear Friday. Covers listing events, creating, updating and deleting them, and the rules that apply before any write: Eastern time, checking the date, never inventing a time, the colour categories, no invitations, and which deletions are refused. Read this before creating, changing or removing any event.
 ---
 
 # Google Calendar
@@ -79,10 +79,24 @@ This is enforced in `google/broker.js`, not left to you to remember.
 **Record attendees in `--description` instead.** Names and emails as text, so
 the information is on the event without anyone being notified.
 
+## Deleting
+
+`delete <id>` works, and you don't need to be precious about it. The event goes
+to Google Calendar's Trash and stays restorable for thirty days with its guests,
+location and description intact, so a deletion Kuba asked for is an ordinary
+request — do it and say you did, rather than proposing it back to him.
+
+Two things still hold. Say which event you're removing before you remove
+several, since undoing a batch means thirty days of clicking. And deleting an
+event that has guests on it is refused — cancellation email to real people isn't
+something this can reliably suppress, so those stay Kuba's. You'll get an error
+naming the event and its guest count; relay that.
+
+Mail is the opposite case, and don't carry this habit over: mail cannot be
+deleted at all. Label it `to delete` instead.
+
 ## What you can't do yet
 
-- **Delete events.** No command and no route behind it. Propose the removal and
-  let Kuba do it; don't tell him something was removed.
 - **Recurring events.** No `RRULE` or `EXDATE` support. "Every Monday until May"
   has to be created as individual events, so say how many that will be before
   you start making them.

@@ -55,14 +55,19 @@ async function main() {
 
     case "draft": {
       const out = await call("POST", "/mail/draft", {
-        body: {
-          to: flags.to,
-          subject: flags.subject,
-          text: flags.text,
-          threadId: flags.thread,
-        },
+        body: { to: flags.to, subject: flags.subject, text: flags.text },
       });
       console.log(`Draft ${out.draftId} saved. ${out.note}`);
+      break;
+    }
+
+    case "reply": {
+      const id = requireId(rest, flags, "reply <id> --text <body>");
+      const out = await call("POST", "/mail/reply", {
+        body: { id, text: flags.text },
+      });
+      console.log(`Draft ${out.draftId} saved — to ${out.to}, "${out.subject}".`);
+      console.log(out.note);
       break;
     }
 
@@ -122,7 +127,8 @@ async function main() {
         "usage: node ../bin/gmail.js <command>",
         "  search <query> [--limit N]          Gmail search syntax",
         "  read <id>",
-        "  draft --to <addr> --subject <s> --text <body> [--thread <id>]",
+        "  draft --to <addr> --subject <s> --text <body>",
+        "  reply <id> --text <body>            in-thread, headers built for you",
         "  archive <id>                        also marks read",
         "  mark-read <id>",
         "  label <id> [--add L] [--remove L]",

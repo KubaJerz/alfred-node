@@ -47,19 +47,35 @@ test("there is no send route — the capability does not exist", async () => {
   }
 });
 
-test("there is no calendar delete route while the rules are unwritten", async () => {
+// Mail deletion and calendar deletion are not the same decision, and this test
+// exists to keep them from drifting into each other. Calendar delete is allowed
+// because Google keeps the event in a Trash for 30 days; Gmail deletion needs
+// the one scope that empties Trash permanently, which was never requested. The
+// line is reversibility, not squeamishness about destructive verbs.
+test("mail cannot be deleted at all — the scope was never requested", async () => {
   assert.ok(
-    !OPERATIONS.some((op) => op.startsWith("DELETE") || /calendar.*delete/i.test(op)),
-    `a delete operation exists: ${OPERATIONS}`
+    !OPERATIONS.some((op) => /mail.*delete|delete.*mail/i.test(op)),
+    `a mail delete operation exists: ${OPERATIONS}`
   );
   for (const [method, path] of [
-    ["DELETE", "/calendar/events"],
-    ["POST", "/calendar/events/delete"],
     ["DELETE", "/mail/message"],
+    ["POST", "/mail/delete"],
+    ["DELETE", "/mail/search"],
   ]) {
     const res = await hit(path, { method });
     assert.equal(res.status, 404, `${method} ${path} was reachable`);
   }
+});
+
+test("calendar delete exists, but not without an id", async () => {
+  assert.ok(
+    OPERATIONS.includes("DELETE /calendar/events"),
+    "the calendar delete route went missing"
+  );
+  const res = await hit("/calendar/events", { method: "DELETE" });
+  assert.equal(res.status, 400, "an id-less delete must be rejected before Google is called");
+  const body = await res.json();
+  assert.match(body.error, /id required/);
 });
 
 test("every write operation validates before reaching Google", async () => {

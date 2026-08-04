@@ -4,14 +4,22 @@
 // small set of operations over loopback; Alfred reaches them through bin/gmail.js
 // and bin/gcal.js, which carry no secrets of their own.
 //
-// This is what turns three separate promises into one mechanism:
+// This is what turns four separate promises into one mechanism:
 //
 //   "can't send mail"          -> there is no send route
 //   "can't see login codes"    -> every response goes through screen()
-//   "can't hard-delete"        -> never granted the scope in the first place
+//   "can't delete mail"        -> never granted the scope in the first place
+//   "can't email anyone"       -> attendees unreachable; deleting an event
+//                                 with guests is refused
 //
 // A capability that doesn't exist can't be misused by a confused turn, and
 // doesn't depend on Alfred reading and obeying an instruction.
+//
+// Note what is *not* on that list: deleting a calendar event. The test is
+// reversibility, not how destructive a verb sounds. Google keeps deleted events
+// in a Trash for 30 days and restores them intact, so removal is an ordinary
+// operation; Gmail deletion would need the scope that empties Trash for good,
+// which is why it stays absent.
 //
 // What this does NOT fix on its own: Alfred runs as the same Unix user as
 // bot.js, so he can still read agent/var/google/token.json and call Google
@@ -137,6 +145,69 @@ const ROUTES = {
     return { draftId: r.data.id, note: "Draft saved. Sending is not available here." };
   },
 
+  // A reply is not a draft with "Re:" typed into the subject. Threading lives in
+  // In-Reply-To and References, which point at the original's Message-ID — get
+  // those wrong and the recipient's client files it as a new conversation. So
+  // the broker builds the reply from the original rather than asking Alfred to
+  // assemble headers he cannot see.
+  "POST /mail/reply": async ({ body }) => {
+    const { id, text } = body || {};
+    if (!id || !text) return { error: "id and text required", status: 400 };
+    const gmail = await gmailClient();
+    const r = await gmail.users.messages.get({ userId: "me", id, format: "full" });
+    const h = headerMap(r.data.payload);
+
+    // Refuse before composing. A reply quotes and addresses the original, so
+    // replying to a withheld message is a way to route its content back out
+    // through a path that isn't screened — and there is no sane reason to
+    // answer a verification code anyway.
+    const verdict = classify({
+      from: h.from,
+      subject: h.subject,
+      snippet: r.data.snippet,
+      body: extractBody(r.data.payload),
+    });
+    if (verdict.sensitive) {
+      return { error: "that message is withheld; there is nothing to reply to", status: 403 };
+    }
+
+    const messageId = h["message-id"];
+    if (!messageId) return { error: "original has no Message-ID to thread against", status: 422 };
+    const to = h["reply-to"] || h.from;
+    if (!to) return { error: "original has no sender to reply to", status: 422 };
+    const subject = /^re:/i.test(h.subject || "") ? h.subject : `Re: ${h.subject || "(no subject)"}`;
+    // References accumulates the whole chain; In-Reply-To names only the parent.
+    const references = [h.references, messageId].filter(Boolean).join(" ");
+
+    const draft = await gmail.users.drafts.create({
+      userId: "me",
+      requestBody: {
+        message: {
+          threadId: r.data.threadId,
+          raw: Buffer.from(
+            [
+              `To: ${to}`,
+              `Subject: ${encodeHeader(subject)}`,
+              `In-Reply-To: ${messageId}`,
+              `References: ${references}`,
+              "Content-Type: text/plain; charset=utf-8",
+              "Content-Transfer-Encoding: base64",
+              "",
+              Buffer.from(text, "utf8").toString("base64").replace(/(.{76})/g, "$1\r\n"),
+            ].join("\r\n"),
+            "utf8"
+          ).toString("base64url"),
+        },
+      },
+    });
+    return {
+      draftId: draft.data.id,
+      to,
+      subject,
+      note: "Reply saved as a draft, in-thread. Sending is not available here.",
+    };
+  },
+
   // Triage: archive, mark read, relabel. This is what gmail.modify is for, and
   // it's what makes the digest workflow work — Alfred can clear what he's
   // already summarized instead of resurfacing it every turn.
@@ -193,11 +264,47 @@ const ROUTES = {
     };
   },
 
-  // Create and update, but no delete route. The ruleset governing how Alfred
-  // may reshape the calendar isn't written yet, and the pattern that holds
-  // everywhere else here is that an absent capability beats a rule he has to
-  // remember. Removal stays a human action until those rules exist; when they
-  // land, this is the place they get enforced.
+  // Delete exists, on two specific grounds — this was refused for a while, so
+  // the reasoning matters.
+  //
+  // First, it is recoverable. Google Calendar keeps deleted events in a per-
+  // calendar Trash for 30 days and restores them with guests, location and
+  // description intact. That is categorically unlike Gmail, where deletion
+  // needs the one scope that empties Trash for good, which we never requested.
+  // The pattern here isn't "deny everything irreversible", it's "deny what
+  // can't be taken back".
+  //
+  // Second, the rules that were missing now exist, in the gcal skill, and they
+  // load themselves when calendar work starts rather than waiting to be read.
+  //
+  // What is still refused is deleting an event with guests on it. Google's own
+  // documentation says of the notification controls that "some emails might
+  // still be sent even if you set the value to false" — so on an event with
+  // attendees, cancellation mail reaching real people is possible and not
+  // fully in our control. "Nobody gets email because of Alfred" is the promise
+  // held hardest here, so the uncontrollable case is the one carved out.
+  "DELETE /calendar/events": async ({ params }) => {
+    const id = params.get("id");
+    if (!id) return { error: "id required", status: 400 };
+    const cal = await calendarClient();
+    const existing = await cal.events.get({ calendarId: "primary", eventId: id });
+    if (existing.data.attendees?.length) {
+      return {
+        error:
+          `"${existing.data.summary || id}" has ${existing.data.attendees.length} guest(s). ` +
+          "Deleting it can send them cancellation email, which can't be reliably " +
+          "suppressed, so this one is Kuba's to remove.",
+        status: 403,
+      };
+    }
+    await cal.events.delete({ calendarId: "primary", eventId: id, ...NEVER_NOTIFY });
+    return {
+      id,
+      summary: existing.data.summary || "",
+      note: "Deleted. Recoverable from Google Calendar's Trash for 30 days.",
+    };
+  },
+
   // Note what is *not* destructured out of the body: attendees. It isn't
   // rejected, it's unreachable — there is no path from caller input to the
   // attendees field, so "never send invitations" holds even if Alfred asks for

@@ -1,6 +1,6 @@
 ---
 name: gmail
-description: Kuba's email, through bin/gmail.js. Use whenever a message touches mail — check my email, anything new in the inbox, what came in today, did Sarah reply, what did she say, any unread, read that one, is there a receipt or confirmation or tracking number, archive it, mark it read, put a label on it, draft a reply, write back to him, a morning or daily mail digest. Use it before answering whether any mail has arrived at all, since searching is the only way to know. Covers Gmail search syntax, reading one message, drafting for Kuba to send, archiving and labels, and messages that come back withheld because they are verification codes.
+description: Kuba's email, through bin/gmail.js. Use whenever a message touches mail — check my email, anything new in the inbox, what came in today, did Sarah reply, what did she say, any unread, read that one, is there a receipt or confirmation or tracking number, archive it, mark it read, put a label on it, draft a reply, reply to that, write back to him, answer her, delete that email, a morning or daily mail digest. Use it before answering whether any mail has arrived at all, since searching is the only way to know. Covers Gmail search syntax, reading one message, drafting for Kuba to send, archiving and labels, and messages that come back withheld because they are verification codes.
 ---
 
 # Gmail
@@ -9,7 +9,8 @@ Kuba's mailbox, through `bin/gmail.js`. Run it from your working directory:
 
     node ../bin/gmail.js search "from:sarah is:unread" [--limit 10]
     node ../bin/gmail.js read <id>
-    node ../bin/gmail.js draft --to <addr> --subject <s> --text <body> [--thread <id>]
+    node ../bin/gmail.js draft --to <addr> --subject <s> --text <body>
+    node ../bin/gmail.js reply <id> --text <body>
     node ../bin/gmail.js archive <id>            # also marks read
     node ../bin/gmail.js mark-read <id>
     node ../bin/gmail.js label <id> [--add L] [--remove L]
@@ -65,8 +66,13 @@ That isn't a rule you're being asked to keep — there is no send command, and n
 send route in the broker behind it, so it isn't a permission that can be granted
 mid-conversation. `node ../bin/gmail.js send` prints that and exits 1.
 
-(`--thread <id>` keeps a reply in its thread. Nothing currently prints thread
-ids, so in practice a draft goes out as a fresh message.)
+**Answering something? Use `reply <id>`, not `draft`.** Pass the id of the
+message being answered and your text; the recipient, the `Re:` subject and the
+threading headers are all taken from the original. A reply built by hand out of
+`draft` lands in the recipient's client as a brand-new conversation, because
+threading lives in headers you can't see from here.
+
+Replying to a withheld message is refused. There is nothing there to answer.
 
 ## When a command fails
 

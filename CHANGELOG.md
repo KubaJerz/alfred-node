@@ -27,10 +27,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
   ignored files, secret-shaped content, and the test suite. Verified against
   three deliberate leak attempts and a planted failing test.
 
+- **Real replies.** `gmail.js reply <id> --text "…"` builds the draft from the
+  original: recipient (honouring `Reply-To` over `From`), a `Re:` subject that
+  doesn't stack, and the `In-Reply-To`/`References` headers that make the
+  recipient's client file it in the existing conversation. Previously the only
+  option was `draft`, whose `--thread` flag took an id nothing ever printed, so
+  every "reply" arrived as a new conversation. Replying to a withheld message
+  is refused — a reply quotes and addresses the original, which would route
+  screened content back out through an unscreened path.
+- **`gcal.js delete <id>`.** Held back while the calendar rules were unwritten;
+  the rules now exist and load themselves, and the deciding fact is that Google
+  keeps deleted events in a Trash for 30 days and restores them intact. Gmail
+  deletion stays absent because it needs the scope that empties Trash for good.
+  The line is reversibility, not the verb.
+
 ### Changed
-- **Sending mail and deleting events aren't permissions, they're absences.**
-  There is no send route and no delete route in the broker; the CLIs name both
-  commands only to explain the design and exit 1. Invitations go further —
+- **Deleting an event that has guests is refused.** Google's documentation says
+  of the notification controls that "some emails might still be sent even if you
+  set the value to false", so on an event with attendees, cancellation mail
+  reaching real people isn't fully controllable. Everything else here is built
+  so nobody gets email because of Alfred; this is the case that can't be
+  guaranteed, so it's the case that's carved out.
+- **Sending mail isn't a permission, it's an absence.** There is no send route
+  in the broker at all, so `gmail.js send` names the command only to explain
+  the design and exits 1 without reaching the network. Invitations go further —
   `attendees` is unreachable from caller input rather than rejected, so "never
   invite anyone" holds even if Alfred asks for it or never read the rules.
 
