@@ -39,6 +39,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
   but not `PATCH`, so every update arrived empty and came back "nothing to
   change" — indistinguishable from asking for nothing. Found by an audit, not
   by use, because the write paths had never been exercised.
+- **Non-ASCII subject lines were mangled in drafts.** Headers were written as
+  raw UTF-8, which is not valid RFC 5322, so the receiving client read the
+  bytes as latin-1 and `TO DELETE — probe` arrived as `TO DELETE â€” probe`.
+  Subjects are RFC 2047 encoded-words now and the body carries an explicit
+  base64 transfer encoding. Nothing errored — it just looked wrong, and Alfred
+  writes the kind of prose full of em dashes and curly quotes that trips it.
 - **Calendar times were six hours off.** `events.list` formats in the
   *calendar's* default zone, and the account's was `Europe/Warsaw`. Reads now
   request `America/New_York` explicitly, matching what writes stamp.

@@ -14,7 +14,7 @@ import path from "node:path";
 // touching an actual mailbox. auth.js reads these at import time, so the
 // import has to be dynamic and come after.
 process.env.STATE_DIR = mkdtempSync(path.join(tmpdir(), "alfred-test-"));
-const { startBroker, OPERATIONS } = await import("../google/broker.js");
+const { startBroker, OPERATIONS, encodeHeader } = await import("../google/broker.js");
 
 let broker;
 const quiet = () => {};
@@ -139,6 +139,26 @@ test("a PATCH body is actually read, not silently discarded", async () => {
   // With no credentials configured it can't get further than the auth layer,
   // which is the proof it got past validation and tried to call Google.
   assert.equal(res.status, 500);
+});
+
+// Caught by drafting a real message titled "TO DELETE — probe" and reading it
+// back as "TO DELETE â€” probe". Nothing errors; the subject is just quietly
+// wrong, and Alfred writes the kind of prose that trips it constantly.
+test("non-ASCII subjects survive as encoded-words, not mojibake", () => {
+  assert.equal(encodeHeader("Re: lab meeting"), "Re: lab meeting", "ASCII must pass through untouched");
+
+  const dash = encodeHeader("TO DELETE — probe");
+  assert.match(dash, /^=\?UTF-8\?B\?[A-Za-z0-9+/=]+\?=$/, "non-ASCII must be an RFC 2047 encoded-word");
+  assert.equal(
+    Buffer.from(dash.slice(10, -2), "base64").toString("utf8"),
+    "TO DELETE — probe",
+    "the encoded-word must decode back to the original"
+  );
+
+  for (const s of ["café", "naïve", "“curly”", "日本語", "emoji 🎉"]) {
+    const round = Buffer.from(encodeHeader(s).slice(10, -2), "base64").toString("utf8");
+    assert.equal(round, s, `${s} did not round-trip`);
+  }
 });
 
 test("draft requires a recipient, so an empty call can't create junk", async () => {

@@ -49,6 +49,13 @@ tomorrow morning. `archive` marks read as well, which is usually what you want;
 Label ids aren't label names. Get them from `labels` rather than guessing at
 one.
 
+**When Kuba asks you to delete mail, label it `to delete` instead.** You have no
+delete route and won't be getting one — Gmail's delete scope is the one that
+empties Trash permanently, and it was never requested. The label is the honest
+version of the request: it gathers everything in one place for him to clear in a
+single pass, and nothing is lost if you got the wrong message. Say that's what
+you did rather than saying it's deleted.
+
 ## Drafting, never sending
 
 `draft` saves to Kuba's Drafts folder and gives you back the draft id. Then tell

@@ -46,6 +46,16 @@ function headerMap(payload) {
   return out;
 }
 
+// Header values are ASCII-only per RFC 5322; anything else has to be an RFC 2047
+// encoded-word. Skipping this doesn't fail loudly — the receiving client reads
+// the UTF-8 bytes as latin-1, so an em dash becomes "â€”" and an accented name
+// becomes noise. Alfred writes prose, so em dashes and curly quotes are the
+// common case, not the exotic one.
+export function encodeHeader(value) {
+  if (/^[\x20-\x7E]*$/.test(value)) return value;
+  return `=?UTF-8?B?${Buffer.from(value, "utf8").toString("base64")}?=`;
+}
+
 function toMessage(msg) {
   const h = headerMap(msg.payload);
   return {
@@ -106,17 +116,21 @@ const ROUTES = {
     const gmail = await gmailClient();
     const mime = [
       `To: ${to}`,
-      `Subject: ${subject || "(no subject)"}`,
+      `Subject: ${encodeHeader(subject || "(no subject)")}`,
       "Content-Type: text/plain; charset=utf-8",
+      "Content-Transfer-Encoding: base64",
       "",
-      text,
+      // Base64 rather than raw 8-bit. charset=utf-8 describes the bytes but
+      // doesn't license sending them unencoded, and a long line of prose with
+      // no CRLF can also exceed the 998-octet line limit.
+      Buffer.from(text, "utf8").toString("base64").replace(/(.{76})/g, "$1\r\n"),
     ].join("\r\n");
     const r = await gmail.users.drafts.create({
       userId: "me",
       requestBody: {
         message: {
           threadId,
-          raw: Buffer.from(mime).toString("base64url"),
+          raw: Buffer.from(mime, "utf8").toString("base64url"),
         },
       },
     });

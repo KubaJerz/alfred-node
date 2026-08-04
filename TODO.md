@@ -17,11 +17,12 @@ Google access is live as of #25: OAuth consented, credentials held by a broker i
 with a skill under `agent/.claude/skills/`. What follows is what's left rather
 than what's missing.
 
-- [ ] **Exercise the write paths.** Read paths and refusals are verified against
-      the real account; `mail draft`, `mail archive`, `mail label`,
-      `cal create` and `cal update` have never run against Google. Three bugs
-      came out of doing this for the read paths — assume the same rate here. The
-      calendar writes need a scratch event, not a real one.
+- [ ] **A non-ASCII display name in `--to` is still mangled.** The subject is
+      RFC 2047 encoded now, but `To:` is written raw, so `"Café Owner"
+      <a@b.com>` breaks the same way subjects used to. Bare addresses — what
+      Alfred actually passes — are unaffected, which is why this is a note and
+      not a fix: encoding only the display-name phrase means parsing the header,
+      and the bug has no reachable trigger today.
 - [ ] **Two known gaps in the credential filter**, both found auditing the real
       mailbox in #25, neither a leak:
       - Sign-in alerts are treated arbitrarily. Firefox's "New sign-in to
@@ -167,6 +168,17 @@ than what's missing.
   for a single figure. Don't re-propose unprompted.
 
 ## Done
+
+- [x] ~~**Exercise the write paths.**~~ All of them, against the real account:
+      `draft` (multi-line body, round-tripped through `read`), `label`,
+      `mark-read`, `archive` (proven by adding `INBOX` to the probe message
+      first, so no real mail was moved), `cal create` timed and all-day,
+      `cal update` across summary/times/colour with untouched fields
+      preserved, plus both refusals and a rejected colour that created nothing.
+      Two bugs fell out, both pre-existing and neither reachable by reading:
+      `PATCH` bodies were never parsed, and non-ASCII subjects were mangled.
+      Test artifacts are labelled `to delete` in Gmail and named `TO DELETE`
+      on the calendar — there is no delete route, which is the point. (#25)
 
 - [x] ~~**Split the CLI per service, and pair each with a skill.**~~ `bin/gmail.js`
       and `bin/gcal.js` over a shared `bin/lib/broker-client.js`, each paired
