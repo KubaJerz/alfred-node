@@ -24,6 +24,7 @@ import http from "http";
 import { randomBytes } from "crypto";
 import { gmailClient, calendarClient } from "./auth.js";
 import { classify, redact, screen } from "./mail-filter.js";
+import { resolveColor, toEventTime, NEVER_NOTIFY } from "./calendar-rules.js";
 
 // Header rather than a query param: query strings land in logs and shell
 // history, and Alfred's Bash invocations are echoed to the bot log.
@@ -178,21 +179,33 @@ const ROUTES = {
   // everywhere else here is that an absent capability beats a rule he has to
   // remember. Removal stays a human action until those rules exist; when they
   // land, this is the place they get enforced.
+  // Note what is *not* destructured out of the body: attendees. It isn't
+  // rejected, it's unreachable — there is no path from caller input to the
+  // attendees field, so "never send invitations" holds even if Alfred asks for
+  // it, misreads the rules, or never read them. Attendee names belong in the
+  // description, which is a convention agent/calendar-rules.md explains.
   "POST /calendar/events": async ({ body }) => {
-    const { summary, start, end, location, description } = body || {};
+    const { summary, start, end, location, description, color } = body || {};
     if (!summary || !start || !end) {
       return { error: "summary, start and end required (ISO 8601)", status: 400 };
+    }
+    let colorId;
+    try {
+      colorId = resolveColor(color);
+    } catch (err) {
+      return { error: err.message, status: 400 };
     }
     const cal = await calendarClient();
     const r = await cal.events.insert({
       calendarId: "primary",
+      ...NEVER_NOTIFY,
       requestBody: {
         summary,
         location,
         description,
-        // Date-only strings are all-day events; anything else carries a time.
-        start: start.length === 10 ? { date: start } : { dateTime: start },
-        end: end.length === 10 ? { date: end } : { dateTime: end },
+        colorId,
+        start: toEventTime(start),
+        end: toEventTime(end),
       },
     });
     return { id: r.data.id, htmlLink: r.data.htmlLink };
@@ -201,18 +214,28 @@ const ROUTES = {
   "PATCH /calendar/events": async ({ params, body }) => {
     const id = params.get("id");
     if (!id) return { error: "id required", status: 400 };
-    const { summary, start, end, location, description } = body || {};
+    const { summary, start, end, location, description, color } = body || {};
     const patch = {};
     if (summary !== undefined) patch.summary = summary;
     if (location !== undefined) patch.location = location;
     if (description !== undefined) patch.description = description;
-    if (start) patch.start = start.length === 10 ? { date: start } : { dateTime: start };
-    if (end) patch.end = end.length === 10 ? { date: end } : { dateTime: end };
+    if (start) patch.start = toEventTime(start);
+    if (end) patch.end = toEventTime(end);
+    if (color !== undefined) {
+      try {
+        patch.colorId = resolveColor(color);
+      } catch (err) {
+        return { error: err.message, status: 400 };
+      }
+    }
     if (!Object.keys(patch).length) return { error: "nothing to change", status: 400 };
     const cal = await calendarClient();
+    // NEVER_NOTIFY matters more here than on insert: an event created elsewhere
+    // may already carry attendees, and patching it would mail every one of them.
     const r = await cal.events.patch({
       calendarId: "primary",
       eventId: id,
+      ...NEVER_NOTIFY,
       requestBody: patch,
     });
     return { id: r.data.id, htmlLink: r.data.htmlLink };

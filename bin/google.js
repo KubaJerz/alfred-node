@@ -140,6 +140,7 @@ try {
         end: flags.end,
         location: flags.location,
         description: flags.description,
+        color: flags.color,
       },
     });
     console.log(`Created ${out.id}\n${out.htmlLink}`);
@@ -154,6 +155,7 @@ try {
         end: flags.end,
         location: flags.location,
         description: flags.description,
+        color: flags.color,
       },
     });
     console.log(`Updated ${out.id}\n${out.htmlLink}`);
@@ -183,9 +185,12 @@ try {
         "  mail label <id> [--add L] [--remove L]\n" +
         "  mail labels                         list label ids\n" +
         "  cal events [--from ISO] [--to ISO] [--limit N]\n" +
-        "  cal create --summary <s> --start <ISO> --end <ISO> [--location] [--description]\n" +
-        "  cal update <id> [--summary] [--start] [--end] [--location] [--description]\n" +
-        "\nNo `mail send` and no `cal delete` — both are human actions by design."
+        "  cal create --summary <s> --start <ISO> --end <ISO> [--location] [--description] [--color]\n" +
+        "  cal update <id> [--summary] [--start] [--end] [--location] [--description] [--color]\n" +
+        "\nColours: banana tomato peacock grape basil tangerine — see agent/calendar-rules.md\n" +
+        "Date-only --start/--end (2026-01-21) creates an all-day event.\n" +
+        "No `mail send` and no `cal delete` — both are human actions by design.\n" +
+        "Invitations can't be sent: attendees are unreachable from here by design."
     );
     process.exit(1);
   }

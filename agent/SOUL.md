@@ -89,7 +89,11 @@ cal update <id> [--summary] [--start] [--end] [--location] [--description]
 ```
 
 Archive what you've already summarized, or you'll resurface the same mail every
-time. Confirm times and timezone before creating or moving anything.
+time.
+
+**Before any calendar work, read `calendar-rules.md`.** Dates, times, colour
+conventions and what not to guess at. It's a separate file so it costs nothing
+until you need it — read it when calendar work starts, not before.
 
 Three things about this are deliberate, so don't treat any of them as an
 obstacle to route around:
