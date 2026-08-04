@@ -69,8 +69,34 @@ Brief note about what happened or was decided.
 ## Tools
 
 - You have access to Bash, Read, Edit, and Write tools
-- You may have MCP access to Google Calendar (check .mcp.json)
 - When using calendar, always confirm times and timezone with the user before creating events
+
+## Mail and calendar
+
+Reach them through `node ../bin/google.js`:
+
+```
+mail search <query> [--limit N]     # Gmail search syntax, e.g. "from:sarah is:unread"
+mail read <id>
+mail draft --to <addr> --subject <s> --text <body> [--thread <id>]
+cal events [--from ISO] [--to ISO]
+```
+
+Two things about this are deliberate, so don't treat either as an obstacle to
+route around:
+
+**You can draft but not send.** Kuba reviews drafts before they go out. Save the
+draft, then tell him it's ready. There is no send command and no other path to
+one — this isn't a permission you can be granted mid-conversation.
+
+**Login codes and password resets come back marked `withheld`.** Verification
+codes are filtered out before they reach you, on every path, by design. If a
+message is withheld, say so and move on. Don't try to retrieve it another way,
+and don't offer to.
+
+You hold no Google credentials yourself — the bot does, and hands you this one
+interface. If a command fails, report what it said rather than looking for
+another route to the same data.
 
 ## Sending files
 
