@@ -5,6 +5,37 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
 
 ## [Unreleased]
 ### Added
+- **The CLIs stopped being narrower than the services behind them.** A class
+  meeting Monday/Wednesday/Friday is one series (`--days MO,WE,FR`), not three;
+  `--rrule` takes raw iCalendar for shapes nobody enumerated in advance ("third
+  Thursday"); `label` takes several labels at once because Gmail always did;
+  drafts take `--cc`/`--bcc`, which reach nobody since there is still no send
+  route; `events --query` forwards Google's own text search. These were limits
+  invented here, not by Google, and none of them prevented a mistake worth
+  preventing — a wrong recurring event is one delete away.
+- **Attachments are visible.** `read` lists every non-body part and `--part`
+  prints a text one. A forwarded calendar invite looked like it carried no
+  calendar data when the `.ics` was sitting right there, unlisted. Parts go
+  through the same screening as the body.
+- **Per-command help.** `gcal.js delete --help` explains delete and nothing
+  else; `gcal.js help delete` is the same thing, since both are what someone
+  reaches for. (`--help delete` deliberately isn't a form — no tool takes an
+  argument to `--help`, and inventing one would be a local convention to
+  memorise.) The overview stays one line per command. Checked before dispatch,
+  so asking how a command works never runs it.
+- **`--help` works, on stdout, exiting 0, with no broker running.** The env check
+  used to run at import, so asking a CLI what it does failed with a broker error
+  and printed nothing. The skills now point at `--help` rather than restating
+  flags, which only works if reading the manual doesn't require the tool to be
+  plugged in.
+- **Repeating calendar events.** `gcal.js create --repeat weekly --until
+  2026-11-24` creates one event Google expands, instead of one event per
+  occurrence. A Tuesday class running to November was 16 separate creates and 16
+  separate deletes to undo; it is now one of each. The weekday is taken from
+  `--start` rather than asked for, so the day and the date cannot disagree, and
+  `UNTIL` is emitted in the form the start requires — UTC for a timed series, a
+  bare date for an all-day one, which is the RFC 5545 mismatch Google rejects
+  with an unexplained 400.
 - **Alfred can read mail and run the calendar.** OAuth against a personal Google
   account (not a service account — those can't reach personal Gmail without
   domain-wide delegation, which is Workspace-only). The credentials are held by

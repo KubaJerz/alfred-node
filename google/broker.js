@@ -36,6 +36,7 @@ import {
   resolveColor,
   toEventTime,
   toRangeBound,
+  toRecurrence,
   NEVER_NOTIFY,
   TIMEZONE,
 } from "./calendar-rules.js";
@@ -119,17 +120,49 @@ const ROUTES = {
     // exactly the shape a metadata-only check misses.
     const verdict = classify({ ...meta, body });
     if (verdict.sensitive) return { message: redact(meta) };
-    return { message: { ...meta, body } };
+
+    // Attachments were invisible until now, which is how a forwarded invite
+    // looked like "no calendar data" when the .ics was sitting right there.
+    // Listed always; fetched only when asked, so reading a message doesn't drag
+    // every attachment into the transcript.
+    const parts = listParts(r.data.payload);
+    const want = params.get("part");
+    if (want) {
+      const hit = parts.find((p) => p.id === want || p.filename === want);
+      if (!hit) return { error: `no such part: ${want}`, status: 404 };
+      if (!/^text\//i.test(hit.mimeType)) {
+        return { error: `part ${want} is ${hit.mimeType}, not text`, status: 415 };
+      }
+      let data = hit.data;
+      if (!data && hit.attachmentId) {
+        const att = await gmail.users.messages.attachments.get({
+          userId: "me",
+          messageId: id,
+          id: hit.attachmentId,
+        });
+        data = att.data.data;
+      }
+      const text = Buffer.from(data || "", "base64url").toString("utf8");
+      // A part is content too, so it gets the same screening the body gets.
+      if (classify({ ...meta, body: text }).sensitive) return { message: redact(meta) };
+      return { message: { ...meta, part: hit.filename || hit.id, body: text } };
+    }
+    return { message: { ...meta, body, parts: parts.map(({ data, ...p }) => p) } };
   },
 
   // Draft, never send. users.messages.send is reachable with the scope we hold,
   // which is precisely why it isn't reachable here.
   "POST /mail/draft": async ({ body }) => {
-    const { to, subject, text, threadId } = body || {};
+    const { to, cc, bcc, subject, text, threadId } = body || {};
     if (!to || !text) return { error: "to and text required", status: 400 };
     const gmail = await gmailClient();
     const mime = [
       `To: ${to}`,
+      // cc/bcc reach nobody from here — a draft is not a sent message, and there
+      // is still no send route. Leaving them out only meant Kuba had to add
+      // recipients by hand before sending.
+      ...(cc ? [`Cc: ${cc}`] : []),
+      ...(bcc ? [`Bcc: ${bcc}`] : []),
       `Subject: ${encodeHeader(subject || "(no subject)")}`,
       "Content-Type: text/plain; charset=utf-8",
       "Content-Transfer-Encoding: base64",
@@ -157,7 +190,7 @@ const ROUTES = {
   // the broker builds the reply from the original rather than asking Alfred to
   // assemble headers he cannot see.
   "POST /mail/reply": async ({ body }) => {
-    const { id, text } = body || {};
+    const { id, text, cc, bcc } = body || {};
     if (!id || !text) return { error: "id and text required", status: 400 };
     const gmail = await gmailClient();
     const r = await gmail.users.messages.get({ userId: "me", id, format: "full" });
@@ -193,6 +226,8 @@ const ROUTES = {
           raw: Buffer.from(
             [
               `To: ${to}`,
+              ...(cc ? [`Cc: ${cc}`] : []),
+              ...(bcc ? [`Bcc: ${bcc}`] : []),
               `Subject: ${encodeHeader(subject)}`,
               `In-Reply-To: ${messageId}`,
               `References: ${references}`,
@@ -250,6 +285,7 @@ const ROUTES = {
       calendarId: "primary",
       timeMin: toRangeBound(params.get("from")) || new Date().toISOString(),
       timeMax: toRangeBound(params.get("to")),
+      q: params.get("q") || undefined,
       singleEvents: true,
       orderBy: "startTime",
       maxResults: Math.min(Number(params.get("limit")) || 25, 100),
@@ -317,13 +353,15 @@ const ROUTES = {
   // it, misreads the rules, or never read them. Attendee names belong in the
   // description, which is a convention the gcal skill explains.
   "POST /calendar/events": async ({ body }) => {
-    const { summary, start, end, location, description, color } = body || {};
+    const { summary, start, end, location, description, color,
+            repeat, until, count, days, rrule } = body || {};
     if (!summary || !start || !end) {
       return { error: "summary, start and end required (ISO 8601)", status: 400 };
     }
-    let colorId;
+    let colorId, recurrence;
     try {
       colorId = resolveColor(color);
+      recurrence = toRecurrence({ repeat, until, count, days, rrule, start });
     } catch (err) {
       return { error: err.message, status: 400 };
     }
@@ -336,17 +374,19 @@ const ROUTES = {
         location,
         description,
         colorId,
+        recurrence,
         start: toEventTime(start),
         end: toEventTime(end),
       },
     });
-    return { id: r.data.id, htmlLink: r.data.htmlLink };
+    return { id: r.data.id, htmlLink: r.data.htmlLink, recurrence: recurrence?.[0] };
   },
 
   "PATCH /calendar/events": async ({ params, body }) => {
     const id = params.get("id");
     if (!id) return { error: "id required", status: 400 };
-    const { summary, start, end, location, description, color } = body || {};
+    const { summary, start, end, location, description, color,
+            repeat, until, count, days, rrule } = body || {};
     const patch = {};
     if (summary !== undefined) patch.summary = summary;
     if (location !== undefined) patch.location = location;
@@ -356,6 +396,22 @@ const ROUTES = {
     if (color !== undefined) {
       try {
         patch.colorId = resolveColor(color);
+      } catch (err) {
+        return { error: err.message, status: 400 };
+      }
+    }
+    if (repeat || rrule) {
+      // The weekday of a weekly rule normally comes from the start date. On a
+      // patch there may not be one, and defaulting would invent a day — say so
+      // instead of picking Tuesday because the epoch happened to land there.
+      if (repeat && !start && !days && !rrule) {
+        return {
+          error: "changing to a weekly repeat needs --start or --days, so the day isn't guessed",
+          status: 400,
+        };
+      }
+      try {
+        patch.recurrence = toRecurrence({ repeat, until, count, days, rrule, start });
       } catch (err) {
         return { error: err.message, status: 400 };
       }
@@ -373,6 +429,27 @@ const ROUTES = {
     return { id: r.data.id, htmlLink: r.data.htmlLink };
   },
 };
+
+// Every non-body part, flattened. Anything with a filename is an attachment;
+// text/calendar usually has none, which is exactly the part worth surfacing.
+function listParts(payload, out = [], depth = 0) {
+  if (!payload || depth > 8) return out;
+  for (const p of payload.parts || []) {
+    const isBody = /^text\/(plain|html)$/i.test(p.mimeType) && !p.filename;
+    if (!isBody && !/^multipart\//i.test(p.mimeType)) {
+      out.push({
+        id: p.partId,
+        filename: p.filename || "",
+        mimeType: p.mimeType,
+        size: p.body?.size || 0,
+        attachmentId: p.body?.attachmentId,
+        data: p.body?.data,
+      });
+    }
+    listParts(p, out, depth + 1);
+  }
+  return out;
+}
 
 function extractBody(payload, depth = 0) {
   if (!payload || depth > 8) return "";

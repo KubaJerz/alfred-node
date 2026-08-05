@@ -6,16 +6,17 @@
 // to log the token. Nothing here touches disk; there is no file for a stray
 // `cat` to find.
 //
-// The env check runs at import rather than in each CLI: it's the same failure
-// for both, and a check that runs unconditionally isn't one a third CLI can
-// forget. That does mean importing this exits when the env is absent, so tests
-// must spawn the CLIs rather than import them — exit code and stderr are the
-// contract anyway.
+// The env check happens on first use, not at import. It used to run at import,
+// which meant `--help` exited 1 without printing anything — and a skill that
+// says "run --help for the flags" instead of restating them depends on that
+// working with no broker in sight. Reading the manual shouldn't require the
+// tool to be plugged in.
 
 const BASE = process.env.ALFRED_BROKER;
 const TOKEN = process.env.ALFRED_BROKER_TOKEN;
 
-if (!BASE || !TOKEN) {
+function requireBroker() {
+  if (BASE && TOKEN) return;
   console.error(
     "Broker unavailable — ALFRED_BROKER/ALFRED_BROKER_TOKEN are not set.\n" +
       "This runs inside a turn spawned by bot.js; it can't be used standalone."
@@ -30,6 +31,54 @@ export function fail(...lines) {
   console.error(lines.join("\n"));
   process.exit(1);
 }
+
+// Usage on stdout, exit 0. `--help` is not an error, and a skill that points
+// here instead of restating the flags depends on it behaving like every other
+// tool — otherwise `set -e` or a piped read turns asking for help into a
+// failure.
+export function usage(...lines) {
+  console.log(lines.join("\n"));
+  process.exit(0);
+}
+
+export const wantsHelp = (action) => ["--help", "-h", "help", undefined].includes(action);
+
+/**
+ * Print help — the whole surface, or one command's worth.
+ *
+ * Both conventional spellings work, because both are what someone reaches for:
+ *   gcal.js --help          everything, one line per command
+ *   gcal.js delete --help   just delete, with the detail
+ *   gcal.js help delete     same thing
+ * `--help delete` is deliberately not a form: no tool takes an argument to
+ * --help, and pretending otherwise would be a local convention to memorise.
+ *
+ * @param {string} bin        e.g. "gcal.js", for the usage line
+ * @param {object} commands   name -> { use, detail: string[] }
+ * @param {string[]} notes    facts that apply across commands
+ * @param {string} [topic]    one command name, or undefined for everything
+ */
+export function help(bin, commands, notes, topic) {
+  if (topic) {
+    const entry = commands[topic];
+    if (!entry) {
+      fail(`no such command: ${topic}`, "", `try: node ../bin/${bin} --help`);
+    }
+    usage(`usage: node ../bin/${bin} ${entry.use}`, "", ...entry.detail);
+  }
+  usage(
+    `usage: node ../bin/${bin} <command>`,
+    "",
+    ...Object.values(commands).map((c) => `  ${c.use}`),
+    "",
+    `Any one of them in detail: node ../bin/${bin} <command> --help`,
+    "",
+    ...notes
+  );
+}
+
+// `--help` anywhere in the flags, whatever value the parser attached to it.
+export const flaggedHelp = (flags) => "help" in flags || "h" in flags;
 
 // --key value pairs; everything else is positional.
 export function parseFlags(args) {
@@ -52,6 +101,7 @@ export function requireId(rest, flags, usage) {
 }
 
 export async function call(method, path, { query = {}, body } = {}) {
+  requireBroker();
   const url = new URL(BASE + path);
   for (const [k, v] of Object.entries(query)) {
     if (v !== undefined && v !== null && v !== "") url.searchParams.set(k, v);

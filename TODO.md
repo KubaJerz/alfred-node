@@ -37,10 +37,14 @@ than what's missing.
       trace. Safe to remove once no live session predates the split — in
       practice a week, or straight after the next `dream.sh` cycle in which Kuba
       confirms a fresh session id in `agent/var/state.json`.
-- [ ] **Recurring events.** No `RRULE`, so "every Monday until May" is fifteen
-      individual `create` calls and fifteen individual deletes to undo. The
-      delete route landing makes this the next-worst asymmetry in the calendar
-      surface.
+- [ ] **Recurrence beyond a plain interval.** `--repeat` covers daily, weekly,
+      biweekly, monthly and yearly. Not covered: several days a week
+      (`BYDAY=MO,WE,FR`), "the third Thursday", and `EXDATE` — the skipped weeks
+      for a holiday or a cancelled session. `EXDATE` is the one that matters for
+      forwarded invites, since a `.ics` carries exceptions that prose cannot.
+      Editing one occurrence of a series already works: `events.list` returns
+      instance ids, and updating or deleting one of those touches only that
+      occurrence.
 - [ ] **Run the agent as a separate Unix user.** This is what turns the broker
       from a strong default into a guarantee. Alfred currently runs as the same
       user as `bot.js`, so he can read `agent/var/google/token.json` and call
