@@ -9,7 +9,7 @@
 //
 // There is no `send`. Drafts are saved for a human to send.
 
-import { call, parseFlags, requireId, fail, usage, wantsHelp } from "./lib/broker-client.js";
+import { call, parseFlags, requireId, fail, help, wantsHelp, flaggedHelp } from "./lib/broker-client.js";
 
 const [action, ...args] = process.argv.slice(2);
 
@@ -32,7 +32,99 @@ function renderMessages(messages) {
   }
 }
 
+const HELP = {
+  search: {
+    use: 'search <query> [--limit N]',
+    detail: [
+      "Gmail's own syntax, unchanged: from: to: subject: is:unread has:attachment",
+      "newer_than:2d label:\"to delete\" filename:ics. Quote the whole query.",
+      "",
+      "Returns metadata only — id, date, sender, subject, snippet. Bodies come",
+      "from `read`, one at a time, so a broad query can't pull a mailbox into the",
+      "conversation by accident. Don't undo that by looping read over the results.",
+      "",
+      "Messages shown as `withheld` are verification codes and the like, stripped",
+      "before they reach here.",
+    ],
+  },
+  read: {
+    use: "read <id> [--part <name|id>]",
+    detail: [
+      "One message's body, plus a list of any attachments it carries.",
+      "",
+      "--part fetches one of those attachments, if it's text. A calendar invite's",
+      "invite.ics is the usual reason: it holds the real recurrence rule and any",
+      "skipped dates, which the human-readable body doesn't express.",
+      "",
+      "Attachments are screened the same way bodies are.",
+    ],
+  },
+  reply: {
+    use: "reply <id> --text <body> [--cc] [--bcc]",
+    detail: [
+      "Drafts an answer to that message. Use this rather than `draft` whenever",
+      "you're responding to something.",
+      "",
+      "The recipient, the Re: subject and the threading headers are taken from",
+      "the original, so it lands inside the existing conversation. A reply built",
+      "by hand out of `draft` arrives as a brand-new thread.",
+      "",
+      "Saved as a draft. Kuba sends it. Refused on a withheld message.",
+    ],
+  },
+  draft: {
+    use: "draft --to <addr> --subject <s> --text <body> [--cc] [--bcc]",
+    detail: [
+      "A new message, saved to Drafts. Never sent — there is no send command and",
+      "no send route behind it, so this isn't a permission that can be granted",
+      "mid-conversation. Tell Kuba the draft is ready; never say it went out.",
+      "",
+      "cc and bcc reach nobody from here, for the same reason.",
+    ],
+  },
+  archive: {
+    use: "archive <id>",
+    detail: [
+      "Out of the inbox, and marked read — mail that left the inbox but is still",
+      "bold is a state nobody asked for.",
+      "",
+      "Archive what you've already summarized, or the same mail comes back at",
+      "him tomorrow morning.",
+    ],
+  },
+  "mark-read": {
+    use: "mark-read <id>",
+    detail: ["Marks it read and leaves it in the inbox."],
+  },
+  label: {
+    use: "label <id> [--add a,b] [--remove c,d]",
+    detail: [
+      "Several labels at once, comma-separated.",
+      "",
+      "Label ids are not label names — get them from `labels`.",
+      "",
+      "`to delete` is where mail goes when Kuba asks you to delete something.",
+      "Mail can't actually be deleted from here; that permission was never asked",
+      "for, and unlike a calendar event, deleted mail isn't recoverable.",
+    ],
+  },
+  labels: {
+    use: "labels",
+    detail: ["Every label's id and name, including the ones Kuba made himself."],
+  },
+};
+
+const NOTES = [
+  "No `send`: drafts are Kuba's to send. No delete: label `to delete` instead.",
+  "Verification codes come back `withheld` on every path, by design.",
+];
+
 async function main() {
+  // `draft --help` must not fall through to `draft`, or asking how a command
+  // works runs it. Checked before the switch, for every command.
+  if (flaggedHelp(flags) && HELP[action]) help("gmail.js", HELP, NOTES, action);
+
+
   switch (action) {
     case "search": {
       // Unquoted queries still work: everything positional rejoins into one q.
@@ -134,25 +226,16 @@ async function main() {
       // Asking for help is not a failure: stdout, exit 0. `mail search` from a
       // session resumed across the rename is, since a parser that forgives it
       // would make this text a lie.
-      (wantsHelp(action) ? usage : fail)(
-        ...(action === "mail"
-          ? ['There\'s no `mail` group word — the file name carries it: `node ../bin/gmail.js search "…"`', ""]
-          : []),
-        "usage: node ../bin/gmail.js <command>",
-        "",
-        "  search <query> [--limit N]     full Gmail syntax: from: is:unread newer_than:2d",
-        "  read <id> [--part <name|id>]   lists attachments; --part prints a text one",
-        "  draft --to <addr> --subject <s> --text <body> [--cc] [--bcc]",
-        "  reply <id> --text <body>       in-thread; recipient and headers from the original",
-        "  archive <id>                   also marks read",
-        "  mark-read <id>",
-        "  label <id> [--add a,b] [--remove c,d]",
-        "  labels                         id and name of every label",
-        "",
-        "No `send` and no delete — drafts are Kuba\'s to send, and mail is his to",
-        "remove. Label it `to delete` instead.",
-        "Messages marked `withheld` are verification codes, stripped at the broker."
-      );
+      if (!wantsHelp(action)) {
+        fail(
+          ...(action === "mail"
+            ? ['There\'s no `mail` group word — the file name carries it: `node ../bin/gmail.js search "…"`', ""]
+            : [`no such command: ${action}`, ""]),
+          "usage: node ../bin/gmail.js <command>",
+          ...Object.values(HELP).map((c) => `  ${c.use}`)
+        );
+      }
+      help("gmail.js", HELP, NOTES, rest[0]);
   }
 }
 

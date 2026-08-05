@@ -43,6 +43,43 @@ export function usage(...lines) {
 
 export const wantsHelp = (action) => ["--help", "-h", "help", undefined].includes(action);
 
+/**
+ * Print help — the whole surface, or one command's worth.
+ *
+ * Both conventional spellings work, because both are what someone reaches for:
+ *   gcal.js --help          everything, one line per command
+ *   gcal.js delete --help   just delete, with the detail
+ *   gcal.js help delete     same thing
+ * `--help delete` is deliberately not a form: no tool takes an argument to
+ * --help, and pretending otherwise would be a local convention to memorise.
+ *
+ * @param {string} bin        e.g. "gcal.js", for the usage line
+ * @param {object} commands   name -> { use, detail: string[] }
+ * @param {string[]} notes    facts that apply across commands
+ * @param {string} [topic]    one command name, or undefined for everything
+ */
+export function help(bin, commands, notes, topic) {
+  if (topic) {
+    const entry = commands[topic];
+    if (!entry) {
+      fail(`no such command: ${topic}`, "", `try: node ../bin/${bin} --help`);
+    }
+    usage(`usage: node ../bin/${bin} ${entry.use}`, "", ...entry.detail);
+  }
+  usage(
+    `usage: node ../bin/${bin} <command>`,
+    "",
+    ...Object.values(commands).map((c) => `  ${c.use}`),
+    "",
+    `Any one of them in detail: node ../bin/${bin} <command> --help`,
+    "",
+    ...notes
+  );
+}
+
+// `--help` anywhere in the flags, whatever value the parser attached to it.
+export const flaggedHelp = (flags) => "help" in flags || "h" in flags;
+
 // --key value pairs; everything else is positional.
 export function parseFlags(args) {
   const flags = {};

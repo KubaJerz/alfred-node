@@ -14,8 +14,9 @@ description: Kuba's email, and the rules for handling it. Use whenever a message
     label <id>       --add a,b --remove c,d
     labels           every label's id and name
 
-`node ../bin/gmail.js --help` for the flags. The rest of this file is what
-`--help` can't tell you.
+`node ../bin/gmail.js <command> --help` for one command in full, or
+`--help` on its own for the list. The rest of this file is what `--help`
+can't tell you.
 
 ## Read narrowly
 

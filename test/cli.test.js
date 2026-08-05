@@ -428,7 +428,38 @@ test("--help prints usage on stdout and exits 0, with no broker needed", async (
   // Usage is also where the absences are stated, so a confused turn reads them
   // without having to attempt the command first.
   assert.match((await run("gmail.js", ["--help"])).stdout, /No `send`/);
-  assert.match((await run("gcal.js", ["--help"])).stdout, /guests is refused/);
+  assert.match((await run("gcal.js", ["--help"])).stdout, /guests, where deleting is refused/);
+});
+
+// Both conventional spellings, because both are what someone reaches for. The
+// important half is that `delete --help` explains delete rather than running it.
+test("per-command help works and never performs the command", async () => {
+  for (const [file, command, marker] of [
+    ["gcal.js", "delete", /Trash/],
+    ["gcal.js", "create", /--rrule/],
+    ["gmail.js", "reply", /brand-new thread/],
+    ["gmail.js", "label", /to delete/],
+  ]) {
+    for (const args of [[command, "--help"], ["help", command]]) {
+      requests = [];
+      const out = await run(file, args, cleanEnv());
+      assert.equal(out.code, 0, `${file} ${args.join(" ")} exited ${out.code}`);
+      assert.match(out.stdout, new RegExp(`usage: node \\.\\./bin/${file.replace(".", "\\.")} ${command}`));
+      assert.match(out.stdout, marker);
+      assert.equal(requests.length, 0, `${file} ${args.join(" ")} called the broker`);
+      // The overview's other commands must not be in a single command's help.
+      assert.ok(!/Any one of them in detail/.test(out.stdout), "printed the overview instead");
+    }
+  }
+});
+
+test("help for a command that doesn't exist is an error, not silence", async () => {
+  for (const file of ["gmail.js", "gcal.js"]) {
+    const out = await run(file, ["help", "frobnicate"], cleanEnv());
+    assert.equal(out.code, 1);
+    assert.match(out.stderr, /no such command: frobnicate/);
+    assert.equal(out.stdout, "");
+  }
 });
 
 test("an unrecognised command is an error, unlike --help", async () => {

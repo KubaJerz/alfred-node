@@ -17,6 +17,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
   prints a text one. A forwarded calendar invite looked like it carried no
   calendar data when the `.ics` was sitting right there, unlisted. Parts go
   through the same screening as the body.
+- **Per-command help.** `gcal.js delete --help` explains delete and nothing
+  else; `gcal.js help delete` is the same thing, since both are what someone
+  reaches for. (`--help delete` deliberately isn't a form — no tool takes an
+  argument to `--help`, and inventing one would be a local convention to
+  memorise.) The overview stays one line per command. Checked before dispatch,
+  so asking how a command works never runs it.
 - **`--help` works, on stdout, exiting 0, with no broker running.** The env check
   used to run at import, so asking a CLI what it does failed with a broker error
   and printed nothing. The skills now point at `--help` rather than restating

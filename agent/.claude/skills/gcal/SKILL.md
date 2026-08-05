@@ -12,8 +12,9 @@ description: Kuba's Google Calendar, and the rules for how he wants it kept. Use
     update    <id>, then any create flag; what you omit stays as it was
     delete    <id>
 
-`node ../bin/gcal.js --help` for the flags. The rest of this file is what
-`--help` can't tell you: how Kuba wants his calendar kept.
+`node ../bin/gcal.js <command> --help` for one command in full, or
+`--help` on its own for the list. The rest of this file is what `--help`
+can't tell you: how Kuba wants his calendar kept.
 
 ## Times are Eastern
 
