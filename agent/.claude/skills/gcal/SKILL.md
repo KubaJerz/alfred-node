@@ -5,7 +5,14 @@ description: Kuba's Google Calendar, and the rules for how he wants it kept. Use
 
 # Calendar
 
-`node ../bin/gcal.js --help` has the commands and flags. This file is the part
+    events    a window: --from --to, plus --query to search text
+    create    --summary --start --end, plus --location --description --color
+              repeating: --repeat weekly --days MO,WE,FR --until 2026-11-24
+              or --rrule 'FREQ=MONTHLY;BYDAY=3TH' for anything odder
+    update    <id>, then any create flag; what you omit stays as it was
+    delete    <id>
+
+`node ../bin/gcal.js --help` for the flags. The rest of this file is what
 `--help` can't tell you: how Kuba wants his calendar kept.
 
 ## Times are Eastern

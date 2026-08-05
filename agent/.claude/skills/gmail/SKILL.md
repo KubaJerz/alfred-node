@@ -5,7 +5,16 @@ description: Kuba's email, and the rules for handling it. Use whenever a message
 
 # Mail
 
-`node ../bin/gmail.js --help` has the commands and flags. This file is the part
+    search <query>   Gmail syntax (from: is:unread newer_than:2d); metadata only
+    read <id>        one body; lists attachments, --part fetches a text one
+    reply <id>       draft an in-thread answer; use this, not draft, to reply
+    draft            a new message: --to --subject --text, plus --cc/--bcc
+    archive <id>     out of the inbox, also marks read
+    mark-read <id>   leaves it in the inbox
+    label <id>       --add a,b --remove c,d
+    labels           every label's id and name
+
+`node ../bin/gmail.js --help` for the flags. The rest of this file is what
 `--help` can't tell you.
 
 ## Read narrowly
