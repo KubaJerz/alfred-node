@@ -213,6 +213,12 @@ than what's missing.
 
 ## Next
 
+- [ ] **Read inbound attachments.** `bot.js:467` takes `msg.content` and nothing
+      else — `msg.attachments` is never touched, so every file sent to Alfred is
+      silently dropped. Outbound already works (`extractAttachments`, the
+      `{img:}` tokens); this is the missing direction. Download to `agent/var/`,
+      hand the path to the turn. Pays off well beyond voice — whiteboard photos,
+      PDFs, a forwarded `.ics`. **Prerequisite for voice messages below.**
 - [ ] **Tiered memory (L1/L2).** `agent/var/memories/MEMORY.md` is injected into
       every new session; it's empty today, but the split plan is already noted in
       that file's header (issue #8). Do it when size actually becomes a problem.
@@ -221,11 +227,27 @@ than what's missing.
 
 ### Later integrations (Kuba, 2026-08-02 — explicitly "for later")
 
-- [ ] **Voice messages.** Discord voice notes arrive as `audio/ogg` attachments.
-      `bot.js` currently reads `msg.content` only and ignores attachments
-      entirely, so this is two pieces: notice inbound attachments at all, then
-      transcribe (local Whisper keeps audio off third-party services, which
-      matters more here than for text).
+- [ ] **Voice messages → text.** Discord voice notes are Ogg/Opus attachments,
+      so this is blocked on inbound attachments (**Next**). Transcribe locally:
+      audio is a different privacy category than text.
+
+      **Model: NVIDIA Parakeet-TDT-0.6B, via ONNX rather than NeMo.** NeMo's
+      dependency tree is built for GPU training; the int8 ONNX export is ~1 GB
+      on `onnxruntime`. Picked over Whisper because `faster-whisper` invents
+      fluent sentences over silence, and this transcript *takes actions*.
+
+      **This box is CPU-only** — no GPU, i7-8700 (6c/12t, AVX2, no VNNI), so
+      int8 buys ~1.5–2× not 4×: quantize for footprint, not speed. Estimated
+      RTF ~0.1 — 10 s note ≈ 1–2 s, 30 s ≈ 3–5 s, plus 1–2 s model load once
+      the file is in page cache. Unmeasured, and estimates on 2017 silicon run
+      optimistic; time it before designing around it. Either way it's small
+      next to a 10–30 s `claude -p` turn, so don't build streaming up front.
+
+      Needs `ffmpeg` (not installed) to decode Opus → 16 kHz mono PCM.
+
+      The transcript becomes the user message; Alfred never learns it was
+      spoken. One guard: echo what was heard when the turn takes an action — a
+      misheard "cancel Thursday's meeting" otherwise acts on the mishearing.
 - [ ] **Proactive auth health check.** Auth lapses are now caught on the turn
       they happen (#20), but not before. A probe on boot was deliberately
       skipped: it would run inside the launcher's restart loop. A once-daily
