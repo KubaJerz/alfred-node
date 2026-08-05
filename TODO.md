@@ -90,6 +90,82 @@ than what's missing.
       makes `users.history.list` 404 (needs full-resync fallback); a mailing-list
       burst or a bulk "mark read" from a phone floods the buffer without
       coalescing.
+- [ ] **Forwarded calendar invites add themselves.** Kuba gets invites at other
+      addresses; he forwards one here and it lands on the calendar. Rides on the
+      Pub/Sub path above — same trigger, different handler.
+
+      **Why this doesn't already happen.** Gmail auto-adds an invite when you are
+      in the `.ics` `ATTENDEE` list. Forwarding doesn't rewrite that list, so the
+      forwarded copy names the original invitees and Gmail correctly ignores it.
+      The gap is real, not a setting someone forgot to tick.
+
+      **⚠️ Tested 2026-08-04, and it changes the design: an inline forward from
+      Outlook has no `.ics` at all.** Kuba forwarded a real one; the message came
+      through as plain `multipart/alternative` — `text/plain` + `text/html`,
+      nothing else. Five *natively received* invitations in the same mailbox all
+      carry `text/calendar; name=invite.ics`, so the part exists right up until
+      the forward drops it. Everything below about `events.import` is correct and
+      applies to nothing, unless one of these holds:
+
+      - **Forward as attachment** (Outlook: Forward as Attachment; Gmail: Forward
+        as attachment) wraps the original as `message/rfc822`, `.ics` intact.
+        Parser has to descend into the nested message. This is the good path and
+        it costs Kuba one different menu item — establish whether it survives
+        before building anything else.
+      - **Parse the human-readable body.** The forwarded text *did* carry
+        everything needed: `When: Occurs every Tuesday from 10:30 AM to 12:30 PM
+        effective 6/30/2026 until 11/24/2026. There are 16 more occurrences.
+        America/New_York`. That is a sentence, not a data format — regexes will
+        pass the demo and fail on the next locale, so this is the one branch
+        where a model belongs, and it must propose rather than write.
+
+      So the handler is two-path: `.ics` present → deterministic import; no
+      `.ics` → Alfred reads the text, proposes an event, Kuba confirms. Don't
+      auto-write from prose.
+
+      Also worth noting from the same test: the message forwarded was an
+      `Accepted:` reply (`METHOD:REPLY`), not an invitation (`METHOD:REQUEST`).
+      Check `METHOD` before importing, or an acceptance notice becomes an event.
+
+      **Use `events.import`, not `events.insert`.** It takes the `.ics` file's
+      own `iCalUID`, and re-importing the same UID updates the existing event
+      instead of making a second one. That is duplicate protection and reschedule
+      handling for free — forward the same invite twice, or forward the "updated
+      invitation" a week later, and the calendar stays right. Doing this with
+      `insert` means hand-rolling a UID→eventId map, which is the same job done
+      worse. Needs a new broker route; `POST /calendar/events` can't set a UID.
+
+      **Only act on mail Kuba forwarded himself.** Otherwise anyone who knows the
+      address can write to the calendar by emailing an attachment, and a
+      malicious `.ics` is a plausible thing to send. Gate on the sender being one
+      of his own addresses, or require a Gmail label he applies. This is the one
+      decision here with a security consequence.
+
+      Traps, most of which are the six-hours-off bug wearing a different hat:
+      - `DTSTART` comes in three shapes — UTC (`...Z`), a `TZID=` parameter, or
+        *floating* with no zone at all. Floating means wall-clock time and has to
+        be read as Eastern; treating it as UTC lands the event four hours out.
+      - `DTSTART;VALUE=DATE` is all-day and must not carry a `timeZone`.
+      - `RRULE` is on most real invites, since recurring meetings are the common
+        case. **The recurring-events item above is a blocker for this one**, not
+        a nice-to-have — without it a weekly standup imports as a single event.
+      - `METHOD:CANCEL` is a forwarded cancellation. With the UID in hand the
+        event is findable, and deleting it is allowed because an imported event
+        carries no attendees.
+      - Colour can't be inferred — nothing in an `.ics` maps to Kuba's six
+        categories. Open question: a dedicated "imported, not yet filed" colour
+        makes the backlog visible and reviewable, but it isn't one of the six.
+
+      Attendees need no special handling: the broker has no path to that field,
+      so the invitees land in `--description` as text, which is already the
+      convention. The guarantee holds without anyone remembering it.
+
+      **No model in the loop — on the `.ics` path.** Parsing an `.ics` is
+      deterministic, so that branch belongs in `bot.js` on the Pub/Sub path, not
+      in a turn, which also means it works while Kuba is asleep. The prose branch
+      is the opposite: it needs Alfred, and it proposes rather than writes. Post
+      what was added to Discord either way, so a bad parse is visible the same
+      day rather than at the meeting.
 - [ ] **Google Calendar — read on demand, no subscription.** Pub/Sub is for mail
       only. Calendar entries are expected to change *through Alfred*, so there's
       no external stream to keep up with and nothing to subscribe to: he reads
@@ -111,11 +187,17 @@ than what's missing.
       lines, split it into `agent/.claude/skills/gcal/rules.md` referenced from
       the body — not back out to `agent/`, so everything the skill owns stays
       under the skill's own directory.
-- [ ] **Notion.** No official Notion CLI exists, so this is a build-or-adopt
-      call: a small CLI wrapper over the Notion API that Alfred drives via Bash
-      (fits his existing tools, no new runtime), or the Notion MCP server (less
-      code, needs MCP wiring that doesn't exist yet). The MCP route pairs well
-      with doing Google over MCP too.
+- [ ] **Notion.** The build-or-adopt question is settled by #25: Google went the
+      broker route, so the shape already exists and Notion should follow it —
+      a token held by `bot.js`, a narrow set of loopback operations, `bin/notion.js`
+      holding no credentials, and a `notion` skill that loads on description
+      match. The MCP server is the alternative and now the worse fit: it needs
+      MCP wiring that still doesn't exist, and it would put a second, differently
+      shaped integration next to a working one. The argument for MCP was that it
+      paired with doing Google over MCP too — that didn't happen, so the argument
+      is gone. Decide the operations first; the interesting question is which
+      Notion writes are reversible, since that is the line the calendar delete
+      route turned out to hinge on.
 
 - [ ] **Keep mail digests out of long-term memory.** Mostly free already:
       `logTurn` records `userMessage` before `handleTurn` builds `finalMessage`,
