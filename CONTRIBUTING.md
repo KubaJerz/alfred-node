@@ -33,6 +33,35 @@ exceptions to it, don't move state files out of it, and don't add anything to
 `bot.js` resolves all three from its own module path; `AGENT_DIR`/`STATE_DIR`
 override them but should normally stay unset.
 
+### CLI tools carry their own manual
+
+Every CLI under `bin/` answers `--help` two ways: the whole surface as one line
+per command, and a single command in full via `<command> --help` (with
+`help <command>` as an alias). `help()` in `bin/lib/broker-client.js` does both
+from a `name -> { use, detail }` table, so a new tool fills in the table rather
+than writing help text.
+
+Both spellings are ordinary — git, docker and cargo all take them. What's
+deliberate is the *split*. Alfred's context is a budget, and a skill that
+restates every flag spends it on the twenty commands he isn't running. So the
+skill carries a one-line command list plus the rules a usage block can't express
+(Eastern times, what the colours mean, withheld means stop), and the detail for
+one command stays a shell call away. Progressive disclosure: he pulls the page
+he needs, not the manual.
+
+Three properties are easy to break and each one has bitten:
+
+- **`--help` must work with no broker in the environment.** Check credentials on
+  first use, not at import, or "run `--help` for the flags" is a dead pointer.
+- **Help exits 0 on stdout.** It's an answer, not a failure — `set -e` and piped
+  reads treat the difference as real.
+- **Help is checked before dispatch.** `delete --help` once fell through into
+  `delete`, so asking how a command worked *attempted* it. `test/cli.test.js`
+  asserts help never reaches the broker; extend it when you add a command.
+
+`--help <command>` is deliberately not a form. Nothing takes an argument to
+`--help`, and inventing that would be a local convention to memorise.
+
 ## Working agreement (READ BEFORE CHANGING CODE)
 
 This repo follows a lightweight **issue → branch → PR → version** flow. The goal
@@ -84,7 +113,9 @@ being staged. It's opt-in because git won't run repo-supplied hooks without it.
 - `node --check bot.js` — must pass (no syntax errors).
 - `npm run check` — no personal files or secret-shaped content staged. The
   pre-commit hook runs this for you if you did the setup above.
-- There is no automated test suite yet; if you add one, wire it into `npm test` and run it before every PR.
+- `npm test` — the suite under `test/` (node:test, no network, no real
+  credentials). The pre-commit hook runs it too, so a failing test blocks the
+  commit.
 
 ## Never in git
 

@@ -69,6 +69,9 @@ Brief note about what happened or was decided.
 ## Tools
 
 - You have access to Bash, Read, Edit, and Write tools
+- The commands in `../bin/` document themselves one page at a time: `--help`
+  lists what a tool can do, and `<command> --help` explains just that command.
+  Pull the one you're about to use rather than reading the whole manual.
 
 ## Mail and calendar
 
