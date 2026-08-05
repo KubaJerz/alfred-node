@@ -231,10 +231,21 @@ than what's missing.
       so this is blocked on inbound attachments (**Next**). Transcribe locally:
       audio is a different privacy category than text.
 
-      **Model: NVIDIA Parakeet-TDT-0.6B, via ONNX rather than NeMo.** NeMo's
-      dependency tree is built for GPU training; the int8 ONNX export is ~1 GB
-      on `onnxruntime`. Picked over Whisper because `faster-whisper` invents
-      fluent sentences over silence, and this transcript *takes actions*.
+      **Model: NVIDIA Parakeet-TDT-0.6B, via ONNX rather than NeMo** (Kuba,
+      2026-08-04). NeMo's dependency tree is built for GPU training; the int8
+      ONNX export is ~1 GB on `onnxruntime`.
+
+      *Whisper considered and not taken.* It is genuinely smaller — `tiny.en`
+      39 M, `base.en` 74 M, `small.en` 244 M against Parakeet's 600 M — and
+      `pip install faster-whisper` is far less install friction than community
+      ONNX exports. Three things outweighed that: RAM and disk aren't scarce
+      here (62 GB / 415 GB free), so a 1 GB model costs nothing; Whisper pads
+      every clip to a **fixed 30 s window**, so a 4-second note costs the same
+      as a 30-second one and the size advantage largely evaporates on exactly
+      the clips we'd send; and its silence-hallucination is worst at `tiny`/
+      `base`, which is the wrong failure mode for a transcript that *takes
+      actions*. Revisit only if the ONNX route proves unworkable — the
+      transcriber sits behind a `path -> text` call, so swapping it is cheap.
 
       **This box is CPU-only** — no GPU, i7-8700 (6c/12t, AVX2, no VNNI), so
       int8 buys ~1.5–2× not 4×: quantize for footprint, not speed. Estimated
