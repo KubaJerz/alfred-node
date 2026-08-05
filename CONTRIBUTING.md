@@ -98,6 +98,38 @@ is that every meaningful change is traceable and `main` always works.
 Use Conventional Commits: `type: summary` (e.g. `fix: catch sendTyping rejection`).
 Keep the summary imperative and under ~72 chars.
 
+### One commit per change, not one per thought
+
+A commit should be the smallest thing someone might want to revert or find with
+`git log`. `fix: --count 0 is falsy` earns its own line because a future reader
+searching for that bug will find it. Four separate edits to `TODO.md` in one
+afternoon do not — that's the same change, committed four times.
+
+The rule that follows: **notes are one commit, amended.** Backlog and doc edits
+ride with the work they describe, or accumulate on one branch via
+`git commit --amend`. Reach for a second docs commit when the first has already
+been pushed and reviewed, not because a new thought arrived.
+
+Same for PRs. One PR per *concern*, which is not the same as one per commit —
+a notes-only change doesn't need its own PR when an open branch already covers
+that ground. What must not happen is a commit straight to `main`; that one is
+enforced, not requested.
+
+`scripts/check-commit-hygiene.sh` enforces the two failures that have actually
+happened here, and deliberately not the judgement call above:
+
+1. **Commits on `main`/`master` are blocked.** This was a sentence in this file
+   for months and got broken anyway.
+2. **A duplicate subject is blocked.** `docs: forwarded invites on the
+   backlog...` exists twice in this history — same message, same minute,
+   different hashes — because a commit landed on the wrong branch and was
+   re-applied. The scan covers `--all`, not just the current branch's ancestry,
+   since that's precisely the case that produced it. `HEAD` is excluded so
+   `git commit --amend` never collides with the commit it replaces.
+3. **Docs churn warns and never blocks.** A second docs-only commit on a branch
+   suggests `--amend`, then continues. How much to split a change is judgement,
+   and a hook guessing at it would be wrong more often than you are.
+
 ## First-time setup
 
 Install the pre-commit hook — one line, once per clone:
@@ -106,8 +138,11 @@ Install the pre-commit hook — one line, once per clone:
 git config core.hooksPath .githooks
 ```
 
-This runs `npm run check` before every commit and blocks anything personal from
-being staged. It's opt-in because git won't run repo-supplied hooks without it.
+That one line installs both hooks: `pre-commit` (branch check, then secrets,
+then the suite) and `commit-msg` (duplicate-subject check, which needs the
+message and so can't run any earlier). It's opt-in because git won't run
+repo-supplied hooks without it — and note that hooks live in the *working tree*,
+so checking out an older branch checks out that branch's hooks too.
 
 ## Sanity checks before opening a PR
 - `node --check bot.js` — must pass (no syntax errors).

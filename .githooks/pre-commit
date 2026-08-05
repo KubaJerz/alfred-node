@@ -4,7 +4,13 @@
 set -euo pipefail
 ROOT="$(git rev-parse --show-toplevel)"
 
-# Secrets first — it's the cheaper check and the one whose failure matters most.
+# Branch first — it costs nothing and it's pointless to run a suite for a commit
+# that shouldn't be made here at all. (Subject checks need the message, so they
+# live in commit-msg.)
+"$ROOT/scripts/check-commit-hygiene.sh"
+
+# Then secrets — the cheaper of the remaining checks, and the one whose failure
+# matters most.
 "$ROOT/scripts/check-no-secrets.sh"
 
 # Then the suite. This is here because a commit already slipped through with a

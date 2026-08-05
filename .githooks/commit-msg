@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Installed by: git config core.hooksPath .githooks
+# Runs after the message is written, which is the only point the subject exists.
+set -euo pipefail
+ROOT="$(git rev-parse --show-toplevel)"
+"$ROOT/scripts/check-commit-hygiene.sh" "$1"
