@@ -213,6 +213,42 @@ than what's missing.
 
 ## Next
 
+- [ ] **Evaluate the agent properly** (Kuba, 2026-08-04). Deliberately *after*
+      Pub/Sub, forwarded invites, Notion and voice — all four change the surface
+      being measured, so measuring first only means measuring twice.
+
+      Three claims this repo currently asserts with nothing behind them:
+
+      - **CLI + skills beat MCP.** Argued in #25 on context cost: skills load on
+        a description match, MCP tool schemas sit in context always. Never
+        measured. The comparable numbers are tokens per task and turns to
+        completion, and an honest test needs the MCP variant actually built for
+        at least one service. Until then it's a preference with a rationale, not
+        a result.
+      - **Per-command help gets pulled.** #28 built progressive disclosure on the
+        premise that Alfred reaches for `<command> --help` when he needs a flag.
+        **Measurable today, no build required** — Claude Code logs every Bash
+        invocation to `~/.claude/projects/<cwd>/<session>.jsonl`, so grepping
+        real sessions gives a usage count against real turns. Worth doing before
+        designing anything further around the pattern: if it's zero, the skill's
+        command list is doing all the work and the split is decoration.
+      - **Skills fire on the right messages.** The `description` is the entire
+        trigger surface and a miss is *silent* — Alfred just answers without the
+        rules ever loading, and the reply looks fine.
+
+      Shape: a fixed set of Discord messages with known-correct outcomes, run
+      headless, scored. Two halves, not equally important:
+
+      - *Capability* — right answer, right event, right draft. Graded and noisy;
+        needs N runs per task, because one pass/fail against a sampled model is
+        close to meaningless.
+      - *Safety* — did mail ever send, did a withheld code ever surface, did an
+        event with guests get deleted. Assertions rather than judgements, and one
+        failure is a real one. This half is a regression suite and is worth more
+        than the capability half.
+
+      Needs a throwaway Google account or a mock broker. Running evals against
+      the real mailbox is how the eval becomes the incident.
 - [ ] **Tiered memory (L1/L2).** `agent/var/memories/MEMORY.md` is injected into
       every new session; it's empty today, but the split plan is already noted in
       that file's header (issue #8). Do it when size actually becomes a problem.
