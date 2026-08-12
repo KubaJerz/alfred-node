@@ -62,6 +62,48 @@ Three properties are easy to break and each one has bitten:
 `--help <command>` is deliberately not a form. Nothing takes an argument to
 `--help`, and inventing that would be a local convention to memorise.
 
+### The system map is part of the change
+
+`SYSTEM-MAP.md` is what the current system actually looks like — a set of Mermaid
+diagrams (a turn end to end, the trust boundary, how memory moves, the layers,
+the cron jobs) with the grammar for reading them stated at the top. It exists
+because most of the work here starts with *"where would that change go?"*, and
+answering that from a fresh read of `bot.js` every time is slow and gets it
+subtly wrong.
+
+**It is a living contract, so treat it three ways:**
+
+- **Design against it.** When weighing how to build something, point at where on
+  the map it lands and which boxes or arrows it adds, moves, or deletes. That is
+  the fastest way to see what a change actually touches, and to disagree about it
+  before writing code.
+- **Update it in the same PR as the change it describes.** A map that lags is
+  worse than no map, because it gets believed. Its visual grammar — the colour and
+  arrow keys, structure-not-colour for the trust boundary, one-box-per-gateway,
+  guarantee-vs-request — is documented in the map's own "Reading this map"
+  section; keep new diagrams inside it.
+- **Let the check catch drift.** `npm run map:check` flags the ways it rots on its
+  own — something added and never drawn, something drawn and since deleted, a
+  wrong broker route count (per service), and a `.claude/skills/` at the repo
+  root (which would load into Alfred). It is **not** in the pre-commit hook: a
+  diagram lagging one commit isn't worth blocking work, but it's worth noticing
+  before a PR.
+
+It's hand-written, deliberately. A generated map draws every arrow and so says
+nothing about which ones matter; the useful content is which boundaries are
+guarantees and which are requests. The checker verifies the map is *accurate*,
+not *complete* — judgement about what's worth drawing stays with whoever writes
+it. If something genuinely isn't worth a box, say so in the map and the check
+passes (see `bin/google.js`).
+
+**It is a convention, not a Claude Code skill — on purpose.** A skill can't live
+anywhere the dev side sees it without Alfred seeing it too: discovery walks *up*
+from `agent/`, so a repo-root `.claude/skills/` loads into Alfred, and
+`~/.claude/skills/` is shared by the same Unix user. So map maintenance stays a
+documented rule plus `map:check`. Revisit making it a real skill only after "run
+the agent as a separate Unix user" (`TODO.md`) gives the dev side its own skill
+space.
+
 ## Working agreement (READ BEFORE CHANGING CODE)
 
 This repo follows a lightweight **issue → branch → PR → version** flow. The goal
@@ -151,6 +193,8 @@ so checking out an older branch checks out that branch's hooks too.
 - `npm test` — the suite under `test/` (node:test, no network, no real
   credentials). The pre-commit hook runs it too, so a failing test blocks the
   commit.
+- `npm run map:check` — `SYSTEM-MAP.md` still matches the tree. Not in the hook;
+  run it before opening the PR.
 
 ## Never in git
 
