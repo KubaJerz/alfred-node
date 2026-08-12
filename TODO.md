@@ -191,17 +191,15 @@ than what's missing.
       lines, split it into `agent/.claude/skills/gcal/rules.md` referenced from
       the body — not back out to `agent/`, so everything the skill owns stays
       under the skill's own directory.
-- [ ] **Notion.** The build-or-adopt question is settled by #25: Google went the
-      broker route, so the shape already exists and Notion should follow it —
-      a token held by `bot.js`, a narrow set of loopback operations, `bin/notion.js`
-      holding no credentials, and a `notion` skill that loads on description
-      match. The MCP server is the alternative and now the worse fit: it needs
-      MCP wiring that still doesn't exist, and it would put a second, differently
-      shaped integration next to a working one. The argument for MCP was that it
-      paired with doing Google over MCP too — that didn't happen, so the argument
-      is gone. Decide the operations first; the interesting question is which
-      Notion writes are reversible, since that is the line the calendar delete
-      route turned out to hinge on.
+- [x] ~~**Notion.**~~ Built the broker route, as #25 pointed to: token in
+      `bot.js`, six loopback operations, `bin/notion.js` holding nothing, a
+      `notion` skill on description match — mounted on the same server as Google.
+      The reversibility question resolved the surface: `set` (a property
+      overwrite) is the one irreversible write and Notion keeps no API-reachable
+      history, so it reads-before-writes and reports `from → to`; comment/delete/
+      archive are absent (comment reaches people and can't be unsent; page
+      removal and body edits are a later, larger surface). Access is bounded by
+      per-page sharing, not a scope. (feat/notion — PR pending)
 
 - [ ] **Keep mail digests out of long-term memory.** Mostly free already:
       `logTurn` records `userMessage` before `handleTurn` builds `finalMessage`,
