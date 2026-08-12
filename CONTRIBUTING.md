@@ -77,8 +77,12 @@ subtly wrong.
   the map it lands and which boxes or arrows it adds, moves, or deletes. That is
   the fastest way to see what a change actually touches, and to disagree about it
   before writing code.
-- **Update it in the same PR as the change it describes.** A map that lags is
-  worse than no map, because it gets believed. Its visual grammar — the colour and
+- **Update it in the same PR as the change it describes — and only then.** Most
+  changes describe nothing on it: a dev-side one (this worktree helper, a
+  `TODO.md` note, a tweak to these contributing docs) adds no box or arrow, and
+  `map:check` won't ask you to touch the map. It's the *system* — the app Alfred
+  runs — that the map tracks; when that moves, a map that lags is worse than no
+  map, because it gets believed. Its visual grammar — the colour and
   arrow keys, structure-not-colour for the trust boundary, one-box-per-gateway,
   guarantee-vs-request — is documented in the map's own "Reading this map"
   section; keep new diagrams inside it.
@@ -135,6 +139,46 @@ is that every meaningful change is traceable and `main` always works.
   2. Bumps the version in `package.json` to match.
 - On release, move `[Unreleased]` entries under a new `## [x.y.z] - YYYY-MM-DD` heading and tag the commit: `git tag vx.y.z && git push --tags`.
 - `chore`/`docs` PRs that don't change runtime behavior don't need a version bump.
+
+### Worktrees — a checkout per parallel branch
+
+Running more than one branch at once — several agents, or a long change parked
+next to a quick fix — is what worktrees are for. `git worktree` gives each branch
+its own working directory backed by the one shared `.git`, so two checkouts never
+fight over the index or a half-staged file. This is a **dev-side** tool; the live
+bot is unaffected and keeps running from its own checkout.
+
+Use the helper — it does the two steps this repo's layout makes non-obvious
+(place the tree, install deps):
+
+```sh
+scripts/worktree.sh feat/slash-status      # cut the branch + worktree + npm install
+scripts/worktree.sh ls                     # list them
+scripts/worktree.sh rm feat/slash-status   # remove when merged (branch is kept)
+```
+
+Three rules, each with a reason that bites if you skip it:
+
+- **A worktree is a clean checkout — treat it as dev-only.** `.env`,
+  `node_modules/` and `agent/var/` are all gitignored, so none of them exist in a
+  fresh tree. So: run `npm install` before the tests (the helper does it), and
+  don't run the live bot from a worktree — it has neither credentials nor state.
+  Don't "fix" that by copying `.env` or `agent/var/` in. The test suite is
+  hermetic and needs neither, and a second live checkout of personal state is
+  exactly what the three-layer split exists to prevent.
+- **Worktrees live as siblings, never nested inside the repo.** The helper puts
+  them under `../alfred-node.worktrees/<branch>`. A checkout placed *inside* the
+  repo shows up as an untracked directory in the parent's `git status` and carries
+  its own `agent/` and `.claude/` tree a directory walk can stumble into. Kept
+  outside, each tree's status stays about that tree.
+- **The hooks come for free; `map:check` still doesn't run itself.**
+  `core.hooksPath` lives in shared git config, so a new worktree runs the
+  pre-commit and commit-msg hooks with no per-worktree setup. As everywhere,
+  `npm run map:check` isn't in the hook (by design) — run it before the PR, from
+  whichever worktree holds the change.
+
+Clean up merged worktrees with `scripts/worktree.sh rm ...` (or `git worktree
+remove`); a stale worktree keeps its branch checked out and blocks deleting it.
 
 ## Commit messages
 Use Conventional Commits: `type: summary` (e.g. `fix: catch sendTyping rejection`).

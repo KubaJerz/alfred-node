@@ -1,8 +1,9 @@
 # System map
 
 What Alfred is today — the reference for *"where would that change go?"* Plans
-live in `TODO.md`. Update this in the same PR as the change; `npm run map:check`
-catches it drifting. Diagrams are Mermaid, so they diff as text.
+live in `TODO.md`. Update this in the same PR as a change *to the system it
+draws* — dev-side work like tooling or these docs touches nothing here;
+`npm run map:check` catches real drifting. Diagrams are Mermaid, so they diff as text.
 
 This is the thing to point at when weighing how to build something: name where
 on the map a change lands, and which boxes or arrows it adds, moves, or deletes.
