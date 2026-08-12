@@ -5,6 +5,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
 
 ## [Unreleased]
 ### Added
+- **Alfred can read and write Notion.** A `notion` skill and `bin/notion.js` over
+  the same credential broker Google uses: `search` and `read` and `query` to find
+  and render pages and database rows as markdown, `create` and `append` to
+  capture, and `set` to change a row's typed columns. The integration secret
+  (`NOTION_TOKEN`) lives in `bot.js`; the CLI holds nothing. Six loopback routes,
+  mounted alongside Google's on the one server. Three things are deliberately
+  absent — no comment (it reaches people and can't be unsent, the `send` of
+  Notion), no delete, no archive (page removal and body edits are a later, larger
+  surface). The one irreversible write is `set`: a property overwrite Notion keeps
+  no API-reachable history of, so that route reads the old value first and reports
+  the `from → to`, which is the only undo there is. The access boundary isn't a
+  scope but **per-page sharing** — the integration sees only pages connected to it
+  in Notion, so an unshared page is absent, not merely restricted.
 - **The CLIs stopped being narrower than the services behind them.** A class
   meeting Monday/Wednesday/Friday is one series (`--days MO,WE,FR`), not three;
   `--rrule` takes raw iCalendar for shapes nobody enumerated in advance ("third

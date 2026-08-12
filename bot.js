@@ -6,6 +6,7 @@ import { existsSync, openSync, statSync } from "fs";
 import { fileURLToPath } from "url";
 import path from "path";
 import { startBroker } from "./google/broker.js";
+import { NOTION_ROUTES } from "./notion/broker.js";
 
 // ── Config ──────────────────────────────────────────────────────────────────
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
@@ -698,11 +699,13 @@ async function sendReply(msg, text, files) {
 // ── Launch ──────────────────────────────────────────────────────────────────
 await bootstrap();
 
-// The broker holds the Google credentials so the agent doesn't have to. It
-// starts even when Google isn't configured yet — the routes then fail with a
-// message naming the missing setup step, which is more useful than the whole
-// bot refusing to boot over an integration that's still optional.
-const broker = await startBroker();
+// The broker holds the Google and Notion credentials so the agent doesn't have
+// to. It starts even when a service isn't configured yet — the routes then fail
+// with a message naming the missing setup step, which is more useful than the
+// whole bot refusing to boot over an integration that's still optional. Notion
+// routes mount alongside Google's on the one loopback server, reached with the
+// same token.
+const broker = await startBroker({ extraRoutes: NOTION_ROUTES });
 
 // An unreachable network rejects here. Left unhandled it becomes an uncaught
 // exception and a full stack dump — which, at one restart every 5s, is how a

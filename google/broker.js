@@ -467,8 +467,14 @@ function extractBody(payload, depth = 0) {
  * Start the broker. Returns { url, token, close } — the caller hands url/token
  * to the spawned agent via env, so the shared secret never touches disk.
  */
-export async function startBroker({ port = 0, log = console.log } = {}) {
+export async function startBroker({ port = 0, log = console.log, extraRoutes = {} } = {}) {
   const token = randomBytes(24).toString("hex");
+  // Routes from other services (Notion) mount here rather than in their own
+  // server, so the agent reaches everything with one loopback URL and one token.
+  // The security plumbing below — the bearer check, the 127.0.0.1 bind, the body
+  // cap — is written once and covers every mounted route, which is the whole
+  // reason not to stand up a second server per service.
+  const routes = { ...ROUTES, ...extraRoutes };
 
   const server = http.createServer(async (req, res) => {
     try {
@@ -476,11 +482,11 @@ export async function startBroker({ port = 0, log = console.log } = {}) {
 
       const url = new URL(req.url, "http://127.0.0.1");
       const key = `${req.method} ${url.pathname}`;
-      const route = ROUTES[key];
+      const route = routes[key];
       if (!route) {
         return json(res, 404, {
           error: `no such operation: ${key}`,
-          available: Object.keys(ROUTES),
+          available: Object.keys(routes),
         });
       }
 
@@ -515,7 +521,7 @@ export async function startBroker({ port = 0, log = console.log } = {}) {
   // 127.0.0.1 only. Binding 0.0.0.0 would expose the mailbox to the network.
   await new Promise((resolve) => server.listen(port, "127.0.0.1", resolve));
   const url = `http://127.0.0.1:${server.address().port}`;
-  log(`🔐 Credential broker on ${url} (${Object.keys(ROUTES).length} operations, no send route)`);
+  log(`🔐 Credential broker on ${url} (${Object.keys(routes).length} operations, no send route)`);
 
   return { url, token, close: () => new Promise((r) => server.close(r)) };
 }

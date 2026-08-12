@@ -62,6 +62,8 @@ secrets=$(git diff --cached -U0 --diff-filter=d -- . \
             -e '"refresh_token"[[:space:]]*:[[:space:]]*"1//' \
             -e 'gh[pousr]_[A-Za-z0-9]{30,}' \
             -e 'sk-[A-Za-z0-9]{20,}' \
+            -e 'ntn_[A-Za-z0-9]{40,}' \
+            -e 'secret_[A-Za-z0-9]{43}' \
             -e '[MNO][A-Za-z0-9_-]{23,}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,}' \
           | head -5)
 if [ -n "$secrets" ]; then
