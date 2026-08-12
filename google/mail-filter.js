@@ -38,7 +38,10 @@ const SENSITIVE_TEXT = [
   /\bconfirm(ation)? code\b/i,
   /\byour (login|sign[- ]?in|pin) code\b/i,
   /\bpassword reset\b|\breset your password\b/i,
-  /\bsign[- ]?in attempt\b|\bnew sign[- ]?in\b/i,
+  // Note what is deliberately absent: a bare sign-in *alert* ("new sign-in",
+  // "signed in from a new device"). Those carry no secret — nothing leaks by
+  // letting Alfred see one — and suppressing them only cost the notifications
+  // Kuba wants. A sign-in *code* is still caught: "your sign-in code" below.
   /\bmagic link\b/i,
   /\bis your .{0,20}\bcode\b/i, // "123456 is your Uber code"
   /\bcode to (log|sign) in\b/i,

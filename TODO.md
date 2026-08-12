@@ -10,6 +10,17 @@ and move to **Done** with the PR number. Anything with a GitHub issue links to i
 
 ## Now
 
+- [ ] **Personal memory state is loose at the repo root.** A daily note —
+      `memories/dailies/2026-08-11.md` — is sitting at the repo root instead of
+      under `agent/var/memories/dailies/`, which puts it *outside* the single
+      `.gitignore` rule that guards Alfred's state. So it's one `git add -A` from
+      being committed — it was, and had to be unstaged out of commit `ded43ef`.
+      Two parts, and the second matters more: move the stray note into
+      `agent/var/` where it belongs and is ignored, then find what wrote it
+      there — most likely a run with the wrong cwd, or a path that resolved
+      against `REPO_DIR` instead of `STATE_DIR`. The split only holds if nothing
+      writes across it; one loose file is a symptom, not the bug.
+
 ### Integrations — give Alfred hands
 
 Google access is live as of #25: OAuth consented, credentials held by a broker in
@@ -17,34 +28,6 @@ Google access is live as of #25: OAuth consented, credentials held by a broker i
 with a skill under `agent/.claude/skills/`. What follows is what's left rather
 than what's missing.
 
-- [ ] **A non-ASCII display name in `--to` is still mangled.** The subject is
-      RFC 2047 encoded now, but `To:` is written raw, so `"Café Owner"
-      <a@b.com>` breaks the same way subjects used to. Bare addresses — what
-      Alfred actually passes — are unaffected, which is why this is a note and
-      not a fix: encoding only the display-name phrase means parsing the header,
-      and the bug has no reachable trigger today.
-- [ ] **Two known gaps in the credential filter**, both found auditing the real
-      mailbox in #25, neither a leak:
-      - Sign-in alerts are treated arbitrarily. Firefox's "New sign-in to
-        Firefox" is withheld; TaxAct's and Slack's "sign in from a new device"
-        pass, because only the former matches `new sign-in`. Same category,
-        opposite outcomes — decide whether the category is sensitive and apply
-        it consistently.
-      - `ghr@otp.workday.com` passes: sender rules match `otp@` as a local part,
-        not `otp.` as a subdomain.
-- [ ] **Delete the `bin/google.js` shim.** It exists only so a session resumed
-      across the split gets "this is now `bin/gmail.js`" instead of a stack
-      trace. Safe to remove once no live session predates the split — in
-      practice a week, or straight after the next `dream.sh` cycle in which Kuba
-      confirms a fresh session id in `agent/var/state.json`.
-- [ ] **Recurrence beyond a plain interval.** `--repeat` covers daily, weekly,
-      biweekly, monthly and yearly. Not covered: several days a week
-      (`BYDAY=MO,WE,FR`), "the third Thursday", and `EXDATE` — the skipped weeks
-      for a holiday or a cancelled session. `EXDATE` is the one that matters for
-      forwarded invites, since a `.ics` carries exceptions that prose cannot.
-      Editing one occurrence of a series already works: `events.list` returns
-      instance ids, and updating or deleting one of those touches only that
-      occurrence.
 - [ ] **Run the agent as a separate Unix user.** This is what turns the broker
       from a strong default into a guarantee. Alfred currently runs as the same
       user as `bot.js`, so he can read `agent/var/google/token.json` and call
@@ -82,7 +65,9 @@ than what's missing.
       what's urgent with no redeploy.
 
       **Never buffer sensitive mail** (verification codes, OTPs, password
-      resets, sign-in alerts). Injecting one writes it to
+      resets) — the same `classify()` chokepoint the read path uses, so sign-in
+      *alerts* buffer normally now while a code never does. Injecting one writes
+      it to
       `~/.claude/projects/<cwd>/<session>.jsonl`, which is outside the repo and
       therefore outside `agent/var/`, `.gitignore` and the memory funnel alike.
       Match on subject/snippet and drop the content entirely — record only that
@@ -151,8 +136,13 @@ than what's missing.
         be read as Eastern; treating it as UTC lands the event four hours out.
       - `DTSTART;VALUE=DATE` is all-day and must not carry a `timeZone`.
       - `RRULE` is on most real invites, since recurring meetings are the common
-        case. **The recurring-events item above is a blocker for this one**, not
-        a nice-to-have — without it a weekly standup imports as a single event.
+        case. The recurrence builder that was a blocker here has shipped
+        (`toRecurrence`, `--days`/`--rrule`), so a weekly standup no longer
+        imports as a single event. **The one recurrence piece still missing is
+        `EXDATE`** — the skipped weeks a `.ics` carries for a holiday or a
+        cancelled session, which prose can't express. It's only reachable
+        through a forwarded invite, so it belongs to *this* feature, not a
+        standalone recurrence item.
       - `METHOD:CANCEL` is a forwarded cancellation. With the UID in hand the
         event is findable, and deleting it is allowed because an imported event
         carries no attendees.
@@ -170,44 +160,6 @@ than what's missing.
       is the opposite: it needs Alfred, and it proposes rather than writes. Post
       what was added to Discord either way, so a bad parse is visible the same
       day rather than at the meeting.
-- [ ] **Google Calendar — read on demand, no subscription.** Pub/Sub is for mail
-      only. Calendar entries are expected to change *through Alfred*, so there's
-      no external stream to keep up with and nothing to subscribe to: he reads
-      the window he needs when he needs it (`events.list` over a date range) and
-      writes when asked. No watch channel, no polling loop, no background state
-      to keep in sync — which also sidesteps the fact that `events.watch()` only
-      delivers to an HTTPS webhook on a verified domain this host can't offer.
-      If noticing edits made elsewhere (phone, web UI) ever matters, an
-      incremental `syncToken` poll is the additive way in — deliberately not
-      part of v1.
-- [ ] **Calendar write access, governed by the rules Kuba is providing.**
-      Read+write so Alfred can refactor the calendar, constrained by a ruleset
-      from another repo. **Blocked:** need the repo/path. Open questions once it
-      lands: do the rules live in `agent/` (Alfred reads them at runtime) or are
-      they enforced in `bot.js`? Rules a model is asked to follow are guidance;
-      rules in code are guarantees — destructive calendar edits probably want
-      the latter. Whatever is guidance goes in the `gcal` skill body, which
-      absorbed `agent/calendar-rules.md`. If that pushes the body past ~200
-      lines, split it into `agent/.claude/skills/gcal/rules.md` referenced from
-      the body — not back out to `agent/`, so everything the skill owns stays
-      under the skill's own directory.
-- [x] ~~**Notion.**~~ Built the broker route, as #25 pointed to: token in
-      `bot.js`, six loopback operations, `bin/notion.js` holding nothing, a
-      `notion` skill on description match — mounted on the same server as Google.
-      The reversibility question resolved the surface: `set` (a property
-      overwrite) is the one irreversible write and Notion keeps no API-reachable
-      history, so it reads-before-writes and reports `from → to`; comment/delete/
-      archive are absent (comment reaches people and can't be unsent; page
-      removal and body edits are a later, larger surface). Access is bounded by
-      per-page sharing, not a scope. (feat/notion — PR pending)
-
-- [ ] **Keep mail digests out of long-term memory.** Mostly free already:
-      `logTurn` records `userMessage` before `handleTurn` builds `finalMessage`,
-      so the digest never reaches `messages.jsonl` and the funnel can't see it.
-      A conversation *about* an email is the user's own words and is logged
-      normally — which is the wanted split. The hole is Alfred's *reply*: if he
-      restates the digest, that's logged `dir:"out"` and can reach the daily
-      note. Fix in `memory-prompt.md`, where filtering decisions already live.
 
 ## Next
 
@@ -222,6 +174,31 @@ than what's missing.
       that file's header (issue #8). Do it when size actually becomes a problem.
 
 ## Someday / Maybe
+
+### New integration ideas (Kuba, 2026-08-12 — unscoped, capture-only)
+
+- [ ] **Give Alfred a phone number.** A number he can text — and be texted at —
+      so he reaches Kuba outside Discord: reminders and nudges over a channel
+      that's open even when Discord isn't. Settle the provider first, because it
+      sets the whole surface: **Google Voice has no official API**, so "a Google
+      number" specifically means either a supported path (Workspace telephony) or
+      an unofficial route that can break; Twilio is the friction-free alternative
+      if "Google" isn't load-bearing. Inbound texts would ride the same
+      buffer-vs-turn tiering as the Pub/Sub mail path.
+- [ ] **Garmin connection + a workout database.** Pull activities (runs, lifts,
+      HR, sleep) from Garmin into a store under `agent/var/` that Alfred can
+      query — "how far did I run this week", "am I recovered enough to train".
+      Open first: **Garmin has no official consumer API** (the Health/Activity
+      APIs are a partner program), so the practical route is an unofficial client
+      against Garmin Connect, which breaks when they change the site. Then the
+      schema — what one workout row is — and nightly pull vs. on-demand. ("galin"
+      in the ask; read as Garmin — correct if wrong.)
+- [ ] **Food logging + a database.** Let Kuba log meals to Alfred (a Discord line
+      first, a photo later) and keep them queryable — what and when, ideally
+      calories/macros. Two open questions: the schema, and whether Alfred
+      *estimates* nutrition from a description (a model in the loop, proposing
+      rather than recording as fact) or looks it up against a food database. Photo
+      input rides on **Read inbound attachments** (Next).
 
 ### Later integrations (Kuba, 2026-08-02 — explicitly "for later")
 
@@ -267,9 +244,10 @@ than what's missing.
 - [ ] **A task/todo store for Alfred himself** — a persistent list he can read
       and append to across sessions, plus rules in `agent/SOUL.md` for when to
       add and complete items. (Distinct from *this* file, which is for the repo.)
-- [ ] **Sanity-check script.** `CONTRIBUTING.md` describes pre-PR checks but
-      there's no test or lint entrypoint in `package.json`. The fresh-clone
-      bootstrap path is the obvious first thing worth a real test.
+- [ ] **A fresh-clone bootstrap test.** `package.json` now carries `test`,
+      `check` and `map:check`, so the pre-PR checks `CONTRIBUTING.md` describes
+      are runnable entrypoints. What's still missing is a test of the fresh-clone
+      bootstrap path itself — the obvious first thing worth asserting.
 - [ ] **Attachment tokens with no file extension** get named `attachment_0` with
       no suffix; Discord may not preview them.
 
@@ -284,6 +262,63 @@ than what's missing.
   for a single figure. Don't re-propose unprompted.
 
 ## Done
+
+- [x] ~~**Mail digests stay out of long-term memory — by construction.**~~ No
+      code needed: the digest lives inside `finalMessage` (context + the raw
+      `userMessage`), which goes to `runClaude` and is *never* logged.
+      `messages.jsonl` only ever receives the raw `userMessage` and Alfred's
+      reply, so `archiveConversation` → `consolidateMemory` → dailies can never
+      see a digest — it's invisible to the memory funnel structurally, not by a
+      filter that could be forgotten. The one residual is narrow and accepted: if
+      Alfred *restates* a digest in his reply, that reply is logged — but it's his
+      own words about mail, logged like any conversation about an email, not the
+      digest itself. Nothing to build; the property already holds and will still
+      hold once Pub/Sub prepends the digest to the context.
+- [x] ~~**Calendar write access, governed.**~~ Read+write ships over the broker
+      (`create`/`update`/`delete`), and the "guidance vs. guarantee" question the
+      item posed is settled: what reaches real people if wrong is enforced in
+      code (`calendar-rules.js` — the invitation-by-mistake guard, colour
+      validation, the all-day/`timeZone` combination, timezone stamping), and the
+      rest is guidance in the `gcal` skill body (colours as categories, never
+      invent a time, guest-delete refusal, the 30-day Trash window, one event per
+      series, not one per occurrence). No separate ruleset repo was needed — the
+      rules live with the skill and the code, not in `agent/`. (#25)
+- [x] ~~**Credential filter: narrowed to actual login codes.**~~ The rule is now
+      simply "withhold mail that carries a login code," and sign-in *alerts* are
+      explicitly not that — "New sign-in to Firefox", "signed in from a new
+      device" all pass, because nothing leaks by letting Alfred see one and they
+      were notifications Kuba wanted. Dropped the lone `sign-in attempt`/`new
+      sign-in` wording rule that used to suppress them arbitrarily (Firefox
+      withheld, TaxAct/Slack not — same category, opposite outcomes). A sign-in
+      *code* is still caught. The `ghr@otp.workday.com` subdomain gap was left as
+      a low-value backstop only: a real code from that sender is already caught
+      by the wording/bare-digit rules on the content, independent of who sent it.
+      Test moved the alert from `MUST_SUPPRESS` to `MUST_PASS` and added a
+      code-bearing sign-in to hold the line. (PR pending)
+- [x] ~~**Deleted the `bin/google.js` shim.**~~ The removal gate — no live
+      session predating the CLI split — is met now that a fresh session is up.
+      Took its dedicated `cli.test.js` block with it and dropped the two doc
+      references (`CONTRIBUTING.md`, `SYSTEM-MAP.md`); `map:check` still passes.
+      (PR pending)
+- [x] ~~**Recurrence beyond a plain interval.**~~ `--days MO,WE,FR` builds
+      `BYDAY=MO,WE,FR`, and the `--rrule 'FREQ=...'` escape hatch covers "third
+      Thursday" and anything else nobody enumerated. Editing one occurrence of a
+      series already worked. The one uncovered piece, `EXDATE`, is only reachable
+      via a forwarded `.ics`, so it moved to the forwarded-invites item. (#25)
+- [x] ~~**Google Calendar — read on demand.**~~ `GET /calendar/events`
+      (`events.list` over a `--from`/`--to` window, with `--query` text search)
+      via `gcal.js events`. No watch channel, no polling loop — he reads the
+      window when asked. (#25)
+
+- [x] ~~**Notion.**~~ Built the broker route, as #25 pointed to: token in
+      `bot.js`, six loopback operations, `bin/notion.js` holding nothing, a
+      `notion` skill on description match — mounted on the same server as Google.
+      The reversibility question resolved the surface: `set` (a property
+      overwrite) is the one irreversible write and Notion keeps no API-reachable
+      history, so it reads-before-writes and reports `from → to`; comment/delete/
+      archive are absent (comment reaches people and can't be unsent; page
+      removal and body edits are a later, larger surface). Access is bounded by
+      per-page sharing, not a scope. (#31)
 
 - [x] ~~**Email replies.**~~ `gmail.js reply <id>` builds the draft from the
       original — `Reply-To` over `From`, a `Re:` that doesn't stack, and the

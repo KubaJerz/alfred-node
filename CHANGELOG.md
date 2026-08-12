@@ -62,11 +62,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
   21st" when the 21st is a Friday gets the conflict caught and a question
   asked, from a file that is never read up front.
 - **Credential screening at a single chokepoint.** Verification codes, OTPs,
-  password resets and sign-in alerts are classified and stripped inside the
+  password resets and magic links are classified and stripped inside the
   broker — on search, on read, and on any path added later — because anything
   reaching the prompt is written to `~/.claude/projects/`, which sits outside
-  `agent/var/`, `.gitignore` and the memory funnel at once. It fails closed.
-  Audited against the real mailbox: 10 of 25 messages withheld, no code passed.
+  `agent/var/`, `.gitignore` and the memory funnel at once. It fails closed. A
+  sign-in *alert* ("new sign-in", "signed in from a new device") is deliberately
+  not in that set — it carries no secret, so it passes rather than being withheld
+  arbitrarily; a sign-in *code* is still caught. Audited against the real
+  mailbox: no code passed.
 - **A pre-commit hook that blocks personal files.** Path checks, force-added
   ignored files, secret-shaped content, and the test suite. Verified against
   three deliberate leak attempts and a planted failing test.
