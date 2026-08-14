@@ -26,6 +26,8 @@ const CANNED = {
   "POST /notion/page": { id: "p9", url: "https://n.so/p9", title: "Ship it" },
   "POST /notion/append": { id: "p1", appended: 2 },
   "PATCH /notion/page": { id: "r1", url: "", changes: [{ property: "Status", from: "Todo", to: "Done" }] },
+  "PATCH /notion/block": { id: "b1", from: "- [ ] buy milk", to: "- [x] buy milk" },
+  "DELETE /notion/block": { id: "b1", removed: "- an old line", hasChildren: false },
 };
 
 let server, stubUrl, requests = [], override = null;
@@ -84,6 +86,10 @@ const SURFACE = [
   ["create", ["create", "--db", "d1", "--title", "Ship it", "Status=Todo", "Priority=High", "--body", "- one"]],
   ["append", ["append", "p1", "--body", "- more"]],
   ["set", ["set", "r1", "Status=Done"]],
+  ["check", ["check", "b1"]],
+  ["uncheck", ["uncheck", "b1"]],
+  ["edit", ["edit", "b1", "--body", "- [x] buy milk"]],
+  ["remove", ["remove", "b1"]],
 ];
 
 const calls = new Map();
@@ -135,6 +141,10 @@ test("write commands send exactly the body the broker route unpacks", () => {
     },
     append: { route: "POST /notion/append", body: { markdown: "- more" } },
     set: { route: "PATCH /notion/page", body: { properties: { Status: "Done" } } },
+    // check/uncheck send only a boolean; edit sends the new line's markdown.
+    check: { route: "PATCH /notion/block", body: { checked: true } },
+    uncheck: { route: "PATCH /notion/block", body: { checked: false } },
+    edit: { route: "PATCH /notion/block", body: { markdown: "- [x] buy milk" } },
   };
   for (const [name, want] of Object.entries(expected)) {
     const { request } = calls.get(name);
@@ -150,6 +160,17 @@ test("write commands send exactly the body the broker route unpacks", () => {
   assert.deepEqual(calls.get("set").request.query, { id: "r1" });
   assert.deepEqual(calls.get("append").request.query, { id: "p1" });
   assert.equal(calls.get("set").request.body.id, undefined, "set put the id in the body too");
+  // A block edit/tick names its block on the query string too.
+  for (const name of ["check", "uncheck", "edit"]) {
+    assert.deepEqual(calls.get(name).request.query, { id: "b1" }, `${name} did not carry the block id on the query`);
+  }
+});
+
+test("remove deletes a block by id, with no body", () => {
+  const { request } = calls.get("remove");
+  assert.equal(`${request.method} ${request.pathname}`, "DELETE /notion/block");
+  assert.deepEqual(request.query, { id: "b1" });
+  assert.equal(request.body, null, "remove sent a body it shouldn't have");
 });
 
 test("read commands ask on the query string and print what came back", () => {
@@ -163,9 +184,24 @@ test("read commands ask on the query string and print what came back", () => {
   assert.match(calls.get("create").result.stdout, /Created "Ship it"/);
   assert.match(calls.get("set").result.stdout, /Status: Todo → Done/);
   assert.match(calls.get("append").result.stdout, /Appended 2 block/);
+  assert.match(calls.get("check").result.stdout, /- \[ \] buy milk → - \[x\] buy milk/);
+  assert.match(calls.get("edit").result.stdout, /- \[ \] buy milk → - \[x\] buy milk/);
+  assert.match(calls.get("remove").result.stdout, /Removed: - an old line/);
+  assert.match(calls.get("remove").result.stdout, /Trash/);
   for (const [name, { result }] of calls) {
     assert.equal(result.code, 0, `${name} exited ${result.code}: ${result.stderr}`);
   }
+});
+
+test("read --ids asks for the ids on the query string", async () => {
+  requests = [];
+  const out = await run(["read", "p1", "--ids"]);
+  assert.equal(out.code, 0, out.stderr);
+  assert.deepEqual(requests[0].query, { id: "p1", ids: "1" });
+  // A plain read doesn't ask for them.
+  requests = [];
+  await run(["read", "p1"]);
+  assert.equal(requests[0].query.ids, undefined, "a plain read asked for ids");
 });
 
 test("an id may be positional or --id on read and set", async () => {
@@ -200,11 +236,18 @@ test("--help prints usage on stdout and exits 0 with no broker needed", async ()
     assert.equal(requests.length, 0);
   }
   // The absences are stated in the overview, readable without attempting anything.
-  assert.match((await run(["--help"], cleanEnv())).stdout, /No delete, no archive, no/);
+  assert.match((await run(["--help"], cleanEnv())).stdout, /No page delete, no archive/);
 });
 
 test("per-command help works and never performs the command", async () => {
-  for (const [command, marker] of [["set", /only record/], ["create", /subpage/], ["search", /shared with the integration/]]) {
+  for (const [command, marker] of [
+    ["set", /only record/],
+    ["create", /subpage/],
+    ["search", /shared with the integration/],
+    ["check", /Ticks a to-do line off/],
+    ["edit", /keeps the line's/],
+    ["remove", /Trash/],
+  ]) {
     for (const args of [[command, "--help"], ["help", command]]) {
       requests = [];
       const out = await run(args, cleanEnv());

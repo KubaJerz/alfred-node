@@ -29,15 +29,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
   the same credential broker Google uses: `search` and `read` and `query` to find
   and render pages and database rows as markdown, `create` and `append` to
   capture, and `set` to change a row's typed columns. The integration secret
-  (`NOTION_TOKEN`) lives in `bot.js`; the CLI holds nothing. Six loopback routes,
+  (`NOTION_TOKEN`) lives in `bot.js`; the CLI holds nothing. Eight loopback routes,
   mounted alongside Google's on the one server. Three things are deliberately
   absent — no comment (it reaches people and can't be unsent, the `send` of
-  Notion), no delete, no archive (page removal and body edits are a later, larger
+  Notion), no whole-page delete, no archive (removing a page is a later, larger
   surface). The one irreversible write is `set`: a property overwrite Notion keeps
   no API-reachable history of, so that route reads the old value first and reports
   the `from → to`, which is the only undo there is. The access boundary isn't a
   scope but **per-page sharing** — the integration sees only pages connected to it
   in Notion, so an unshared page is absent, not merely restricted.
+- **Notion body edits, not just append.** Alfred was append-only on a page body;
+  now he can change existing lines. `read <page> --ids` surfaces each line's block
+  id, and `check`/`uncheck <blockId>` tick a to-do line off, `edit <blockId>`
+  replaces a line's text, and `remove <blockId>` deletes one line. Two new loopback
+  routes (`PATCH`/`DELETE /notion/block`). The line held for `set` holds here too:
+  `edit` overwrites in place and reports the `from → to`, the only undo. `remove`
+  is the opposite — the block lands in Notion's Trash and is restorable, the same
+  reversible footing as a calendar delete. `edit` keeps a line's kind (Notion
+  can't recast a bullet as a heading in place, so a mismatch is refused, not
+  forced), and checking a to-do *line* is distinct from `set Done=true` on a
+  row's *column*.
 - **The CLIs stopped being narrower than the services behind them.** A class
   meeting Monday/Wednesday/Friday is one series (`--days MO,WE,FR`), not three;
   `--rrule` takes raw iCalendar for shapes nobody enumerated in advance ("third
@@ -82,11 +93,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
   21st" when the 21st is a Friday gets the conflict caught and a question
   asked, from a file that is never read up front.
 - **Credential screening at a single chokepoint.** Verification codes, OTPs,
-  password resets and sign-in alerts are classified and stripped inside the
+  password resets and magic links are classified and stripped inside the
   broker — on search, on read, and on any path added later — because anything
   reaching the prompt is written to `~/.claude/projects/`, which sits outside
-  `agent/var/`, `.gitignore` and the memory funnel at once. It fails closed.
-  Audited against the real mailbox: 10 of 25 messages withheld, no code passed.
+  `agent/var/`, `.gitignore` and the memory funnel at once. It fails closed. A
+  sign-in *alert* ("new sign-in", "signed in from a new device") is deliberately
+  not in that set — it carries no secret, so it passes rather than being withheld
+  arbitrarily; a sign-in *code* is still caught. Audited against the real
+  mailbox: no code passed.
 - **A pre-commit hook that blocks personal files.** Path checks, force-added
   ignored files, secret-shaped content, and the test suite. Verified against
   three deliberate leak attempts and a planted failing test.
@@ -119,6 +133,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
   invite anyone" holds even if Alfred asks for it or never read the rules.
 
 ### Fixed
+- **Personal state at the repo root no longer only warns — it blocks the commit.**
+  The pre-commit guard recognized Alfred's state names (`memories/`, `logs/`,
+  `state.json`, …) appearing at the repo root, outside the one `.gitignore` rule
+  that guards `agent/var/`, but check #4 was advisory. So when a memory pass wrote
+  a daily note to `memories/` at the root (a model with `Write` +
+  `--skip-permissions`, run from the wrong cwd) it got staged into a commit and
+  only a manual unstage kept it out of git. Those names are Alfred's state, never
+  this app's code, so the check now fails the commit instead of shrugging. The
+  stray note was moved back under `agent/var/`; the production writers
+  (`consolidateMemory`, `dream.sh`) were already correct.
 - **Calendar update never worked.** The broker read request bodies for `POST`
   but not `PATCH`, so every update arrived empty and came back "nothing to
   change" — indistinguishable from asking for nothing. Found by an audit, not

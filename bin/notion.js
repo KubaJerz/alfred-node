@@ -10,11 +10,16 @@
 //   node ../bin/notion.js create --db <dbId> --title "Ship it" Status=Todo
 //   node ../bin/notion.js append <pageId> --body "- one more thing"
 //   node ../bin/notion.js set <pageId> Status=Done
+//   node ../bin/notion.js read <pageId> --ids     (show each line's block id)
+//   node ../bin/notion.js check <blockId>          (tick a to-do line off)
+//   node ../bin/notion.js edit <blockId> --body "- fixed line"
+//   node ../bin/notion.js remove <blockId>
 //
-// `--help` is the full surface. There is no delete, no archive and no comment:
-// v1 is capture, read and row edits. A `set` overwrites in place and Notion
-// keeps no history you can reach through the API, so `set` reports the previous
-// value — that line is the only undo there is.
+// `--help` is the full surface. No page delete, no archive, no comment — but a
+// body line can be edited, ticked, or removed by its block id (from `read
+// --ids`). Removing a block is reversible (Notion Trash); `set` is not (Notion
+// keeps no API-reachable history), so `set` and `edit` report the previous
+// value — that `from → to` is the only undo there is.
 
 import { call, parseFlags, requireId, fail, help, wantsHelp, flaggedHelp } from "./lib/broker-client.js";
 
@@ -59,11 +64,15 @@ const HELP = {
     ],
   },
   read: {
-    use: "read <id>",
+    use: "read <id> [--ids]",
     detail: [
       "A page's properties (if it's a database row) and its body as markdown.",
       "The body is walked recursively, so nested lists and toggles come through;",
       "very deep or very large pages are bounded and may be truncated.",
+      "",
+      "--ids prefixes every line with its block id — the handle edit, check and",
+      "remove take. Leave it off for an ordinary read; the ids are noise until a",
+      "specific line is about to change.",
     ],
   },
   query: {
@@ -108,12 +117,53 @@ const HELP = {
       "printed from→to is the only record of what it was — relay it.",
     ],
   },
+  check: {
+    use: "check <blockId>",
+    detail: [
+      "Ticks a to-do line off (uncheck clears it). The <blockId> comes from",
+      "`read <page> --ids`. Reports the line's before → after.",
+      "",
+      "This is for a to-do *in a page body*. A task that's a database row with a",
+      "checkbox or status column is `set Done=true` instead — a column, not a line.",
+    ],
+  },
+  uncheck: {
+    use: "uncheck <blockId>",
+    detail: [
+      "Clears a ticked to-do line — `check` the other way. The <blockId> comes",
+      "from `read <page> --ids`. Reports the line's before → after.",
+    ],
+  },
+  edit: {
+    use: "edit <blockId> --body <markdown>",
+    detail: [
+      "Replaces one body line's text with new markdown. The <blockId> comes from",
+      "`read <page> --ids`. Reports the old line → the new one.",
+      "",
+      "Give the whole line in the same markdown as append: `- a bullet`, `# a",
+      "heading`, `- [x] a done to-do`. It keeps the line's *kind* — Notion can't",
+      "turn a bullet into a heading in place, so a line that reads as a different",
+      "kind is refused. To change kind, remove the line and add the new one.",
+    ],
+  },
+  remove: {
+    use: "remove <blockId>",
+    detail: [
+      "Removes one body line, addressed by its id from `read <page> --ids`. Prints",
+      "the line it removed. Any lines nested under it go too.",
+      "",
+      "Unlike `set`, this is reversible: the block lands in Notion's Trash and can",
+      "be restored there. It's the safe kind of delete — but the printed line is",
+      "what to relay so a wrong removal is caught the same turn.",
+    ],
+  },
 };
 
 const NOTES = [
-  "Only pages shared with the integration exist here. No delete, no archive, no",
-  "comment — v1 is capture, read and row edits. `set` can't be undone through the",
-  "API, so it reports what each value was before.",
+  "Only pages shared with the integration exist here. No page delete, no archive,",
+  "no comment — but a body line can be edited, checked or removed by its block id",
+  "(from `read --ids`). `remove` is reversible via Trash; `set` and `edit` aren't,",
+  "so they report what each value was before.",
 ];
 
 async function main() {
@@ -138,8 +188,10 @@ async function main() {
     }
 
     case "read": {
-      const id = requireId(rest, flags, "notion.js read <id>");
-      const { page } = await call("GET", "/notion/page", { query: { id } });
+      const id = requireId(rest, flags, "notion.js read <id> [--ids]");
+      const { page } = await call("GET", "/notion/page", {
+        query: { id, ids: "ids" in flags ? "1" : undefined },
+      });
       printPage(page);
       break;
     }
@@ -203,6 +255,37 @@ async function main() {
       });
       for (const c of out.changes) console.log(`${c.property}: ${c.from || "(empty)"} → ${c.to}`);
       if (out.url) console.log(out.url);
+      break;
+    }
+
+    case "check":
+    case "uncheck": {
+      const id = requireId(rest, flags, `notion.js ${action} <blockId>`);
+      const out = await call("PATCH", "/notion/block", {
+        query: { id },
+        body: { checked: action === "check" },
+      });
+      console.log(`${out.from} → ${out.to}`);
+      break;
+    }
+
+    case "edit": {
+      const id = requireId(rest, flags, "notion.js edit <blockId> --body <markdown>");
+      if (!flags.body) fail("nothing to edit — give the new line with --body");
+      const out = await call("PATCH", "/notion/block", {
+        query: { id },
+        body: { markdown: flags.body },
+      });
+      console.log(`${out.from} → ${out.to}`);
+      break;
+    }
+
+    case "remove": {
+      const id = requireId(rest, flags, "notion.js remove <blockId>");
+      const out = await call("DELETE", "/notion/block", { query: { id } });
+      console.log(`Removed: ${out.removed}`);
+      if (out.hasChildren) console.log("(its nested lines went with it)");
+      console.log("It's in Notion's Trash — restorable there.");
       break;
     }
 
