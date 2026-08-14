@@ -9,15 +9,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
   the same credential broker Google uses: `search` and `read` and `query` to find
   and render pages and database rows as markdown, `create` and `append` to
   capture, and `set` to change a row's typed columns. The integration secret
-  (`NOTION_TOKEN`) lives in `bot.js`; the CLI holds nothing. Six loopback routes,
+  (`NOTION_TOKEN`) lives in `bot.js`; the CLI holds nothing. Eight loopback routes,
   mounted alongside Google's on the one server. Three things are deliberately
   absent — no comment (it reaches people and can't be unsent, the `send` of
-  Notion), no delete, no archive (page removal and body edits are a later, larger
+  Notion), no whole-page delete, no archive (removing a page is a later, larger
   surface). The one irreversible write is `set`: a property overwrite Notion keeps
   no API-reachable history of, so that route reads the old value first and reports
   the `from → to`, which is the only undo there is. The access boundary isn't a
   scope but **per-page sharing** — the integration sees only pages connected to it
   in Notion, so an unshared page is absent, not merely restricted.
+- **Notion body edits, not just append.** Alfred was append-only on a page body;
+  now he can change existing lines. `read <page> --ids` surfaces each line's block
+  id, and `check`/`uncheck <blockId>` tick a to-do line off, `edit <blockId>`
+  replaces a line's text, and `remove <blockId>` deletes one line. Two new loopback
+  routes (`PATCH`/`DELETE /notion/block`). The line held for `set` holds here too:
+  `edit` overwrites in place and reports the `from → to`, the only undo. `remove`
+  is the opposite — the block lands in Notion's Trash and is restorable, the same
+  reversible footing as a calendar delete. `edit` keeps a line's kind (Notion
+  can't recast a bullet as a heading in place, so a mismatch is refused, not
+  forced), and checking a to-do *line* is distinct from `set Done=true` on a
+  row's *column*.
 - **The CLIs stopped being narrower than the services behind them.** A class
   meeting Monday/Wednesday/Friday is one series (`--days MO,WE,FR`), not three;
   `--rrule` takes raw iCalendar for shapes nobody enumerated in advance ("third

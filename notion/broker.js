@@ -10,19 +10,23 @@
 //                         way to delete one — it's the `send` of Notion. Same
 //                         reasoning that keeps mail send unreachable.
 //
-//   no delete/archive     Archiving a page is reversible (it lands in Trash),
-//                         so this isn't a reversibility call like mail — it's
-//                         scope. Editing page *bodies* and removing pages is a
-//                         later, larger surface; v1 is capture + read + row
-//                         edits. Archive is the natural first add when it comes.
+//   no page delete/archive  Removing a *body block* is here (see below), but
+//                         removing or archiving a whole *page* is not. Scope, not
+//                         reversibility: a page is a bigger, rarer thing to take
+//                         out, and the block routes cover the "check that off,
+//                         fix that line, drop that line" the append-only surface
+//                         couldn't. Page archive is the natural next add.
 //
-// The sharp edge here is the opposite of the intuition: `set` (a property
-// overwrite) is irreversible and unlogged by Notion, while a delete would be
-// recoverable. So the update route reads before it writes and reports the old
-// value — that echoed line is the only undo the API offers.
+// The block edits (`PATCH`/`DELETE /notion/block`) address one body line by its
+// own id, which `read`'s `ids` option surfaces. The sharp edge is the opposite
+// of the intuition: `set` (a property overwrite) is irreversible and unlogged by
+// Notion, while a block `DELETE` lands in Trash and is recoverable. So every
+// in-place write here reads before it writes and reports the old value — the
+// `from → to` a `set`/`edit` prints and the line a `remove` names are the undo
+// the API otherwise doesn't give.
 
 import { notion, fetchBlockChildren, appendBlocks, objectTitle } from "./client.js";
-import { markdownToBlocks, blocksToMarkdown } from "./blocks.js";
+import { markdownToBlocks, blocksToMarkdown, blockUpdate, blockLine } from "./blocks.js";
 import {
   readProperties,
   readProperty,
@@ -83,13 +87,16 @@ export const NOTION_ROUTES = {
     if (!id) return { error: "id required", status: 400 };
     const page = await notion("GET", `/pages/${id}`);
     const blocks = await fetchBlockChildren(id);
+    // `ids` prefixes each line with its block id, the handle edit/check/remove
+    // need. Off by default: the uuids are noise until a line is being changed.
+    const withIds = Boolean(params.get("ids"));
     return {
       page: {
         id: page.id,
         title: objectTitle(page) || "(untitled)",
         url: page.url || "",
         properties: readProperties(page.properties),
-        markdown: blocksToMarkdown(blocks),
+        markdown: blocksToMarkdown(blocks, { ids: withIds }),
       },
     };
   }),
@@ -213,6 +220,64 @@ export const NOTION_ROUTES = {
 
     const updated = await notion("PATCH", `/pages/${id}`, { properties: write });
     return { id: updated.id, url: updated.url || "", changes };
+  }),
+
+  // Edit or tick one body block, addressed by its own id (from `read`'s `ids`
+  // option). Read-before-write, like `set`: the block is fetched so its current
+  // line can be echoed and — for an edit — so a line that would change the
+  // block's *type* is refused rather than silently ignored by the API. `checked`
+  // toggles a to-do; `markdown` replaces the line's text (and, if the line
+  // carries [ ]/[x], its checked state too). Both may be given; the explicit
+  // `checked` wins.
+  "PATCH /notion/block": asRoute(async ({ params, body }) => {
+    const id = params.get("id");
+    if (!id) return { error: "id required", status: 400 };
+    const { markdown, checked } = body || {};
+    const hasMarkdown = markdown !== undefined && markdown !== null && markdown !== "";
+    if (!hasMarkdown && checked === undefined) {
+      return { error: "nothing to change — give markdown to edit, or checked to tick", status: 400 };
+    }
+
+    const current = await notion("GET", `/blocks/${id}`);
+    const from = blockLine(current);
+
+    let patch, after;
+    if (hasMarkdown) {
+      let parsed;
+      try {
+        parsed = blockUpdate(current.type, markdown);
+      } catch (err) {
+        return { error: err.message, status: 400 };
+      }
+      if (checked !== undefined && parsed.type === "to_do") parsed.to_do.checked = Boolean(checked);
+      patch = { [parsed.type]: parsed[parsed.type] };
+      after = parsed;
+    } else {
+      if (current.type !== "to_do") {
+        return { error: `checking applies to a to-do; that block is a ${current.type}`, status: 400 };
+      }
+      patch = { to_do: { checked: Boolean(checked) } };
+      after = { type: "to_do", to_do: { ...current.to_do, checked: Boolean(checked) } };
+    }
+
+    const updated = await notion("PATCH", `/blocks/${id}`, patch);
+    return { id: updated.id, from, to: blockLine(after) };
+  }),
+
+  // Remove one body block, addressed by its id. Unlike `set`, this is
+  // reversible — Notion archives the block to the workspace Trash — so it's the
+  // safe kind of destructive, the same call as calendar delete. Still
+  // read-before-write: the removed line is echoed so a wrong removal is visible
+  // and restorable the same turn. A block with children takes them with it, so
+  // that's flagged.
+  "DELETE /notion/block": asRoute(async ({ params }) => {
+    const id = params.get("id");
+    if (!id) return { error: "id required", status: 400 };
+    const current = await notion("GET", `/blocks/${id}`);
+    const removed = blockLine(current);
+    const hasChildren = Boolean(current.has_children);
+    await notion("DELETE", `/blocks/${id}`);
+    return { id, removed, hasChildren };
   }),
 };
 
