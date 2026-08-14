@@ -73,11 +73,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
   21st" when the 21st is a Friday gets the conflict caught and a question
   asked, from a file that is never read up front.
 - **Credential screening at a single chokepoint.** Verification codes, OTPs,
-  password resets and sign-in alerts are classified and stripped inside the
+  password resets and magic links are classified and stripped inside the
   broker — on search, on read, and on any path added later — because anything
   reaching the prompt is written to `~/.claude/projects/`, which sits outside
-  `agent/var/`, `.gitignore` and the memory funnel at once. It fails closed.
-  Audited against the real mailbox: 10 of 25 messages withheld, no code passed.
+  `agent/var/`, `.gitignore` and the memory funnel at once. It fails closed. A
+  sign-in *alert* ("new sign-in", "signed in from a new device") is deliberately
+  not in that set — it carries no secret, so it passes rather than being withheld
+  arbitrarily; a sign-in *code* is still caught. Audited against the real
+  mailbox: no code passed.
 - **A pre-commit hook that blocks personal files.** Path checks, force-added
   ignored files, secret-shaped content, and the test suite. Verified against
   three deliberate leak attempts and a planted failing test.
@@ -110,6 +113,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
   invite anyone" holds even if Alfred asks for it or never read the rules.
 
 ### Fixed
+- **Personal state at the repo root no longer only warns — it blocks the commit.**
+  The pre-commit guard recognized Alfred's state names (`memories/`, `logs/`,
+  `state.json`, …) appearing at the repo root, outside the one `.gitignore` rule
+  that guards `agent/var/`, but check #4 was advisory. So when a memory pass wrote
+  a daily note to `memories/` at the root (a model with `Write` +
+  `--skip-permissions`, run from the wrong cwd) it got staged into a commit and
+  only a manual unstage kept it out of git. Those names are Alfred's state, never
+  this app's code, so the check now fails the commit instead of shrugging. The
+  stray note was moved back under `agent/var/`; the production writers
+  (`consolidateMemory`, `dream.sh`) were already correct.
 - **Calendar update never worked.** The broker read request bodies for `POST`
   but not `PATCH`, so every update arrived empty and came back "nothing to
   change" — indistinguishable from asking for nothing. Found by an audit, not

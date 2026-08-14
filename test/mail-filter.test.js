@@ -12,8 +12,9 @@ const MUST_SUPPRESS = [
   { subject: "Your one-time passcode" },
   { subject: "Security code for your account" },
   { subject: "Reset your password" },
-  { subject: "New sign-in attempt on your account" },
   { subject: "Sign in with this magic link" },
+  // A sign-in *code* is still a code, even though a sign-in *alert* is not.
+  { subject: "Your sign-in code is 448201" },
   { subject: "Your 2FA code" },
   { from: "no-reply@accounts.google.com", subject: "Security alert" },
   { from: "security@chase.com", subject: "Account notice" },
@@ -31,6 +32,11 @@ const MUST_PASS = [
   { from: "news@substack.com", subject: "The week in review" },
   { subject: "Your order #12345 has shipped" },
   { subject: "Lunch?" },
+  // Sign-in alerts carry no secret and are wanted, not withheld — the category
+  // the filter used to treat arbitrarily. All three phrasings must pass.
+  { from: "accounts@firefox.com", subject: "New sign-in to Firefox" },
+  { from: "no-reply@taxact.com", subject: "You signed in from a new device" },
+  { subject: "New sign-in attempt on your account" },
 ];
 
 test("suppresses credential mail", () => {

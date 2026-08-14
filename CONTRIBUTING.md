@@ -98,7 +98,7 @@ nothing about which ones matter; the useful content is which boundaries are
 guarantees and which are requests. The checker verifies the map is *accurate*,
 not *complete* — judgement about what's worth drawing stays with whoever writes
 it. If something genuinely isn't worth a box, say so in the map and the check
-passes (see `bin/google.js`).
+passes.
 
 **It is a convention, not a Claude Code skill — on purpose.** A skill can't live
 anywhere the dev side sees it without Alfred seeing it too: discovery walks *up*
