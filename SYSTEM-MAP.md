@@ -140,7 +140,7 @@ broker reads a token and makes the authenticated call. The broker's rules run in
 `Bash` in the agent can read the tokens directly — around the broker, not
 through it. Giving each box its own user splits the dashed box in two, and the
 crossing becomes the only way across; "run the agent as a separate user" in
-`TODO.md` is that change. (`bin/google.js` is a deprecated shim, not drawn.)
+`TODO.md` is that change.
 
 Notion follows the same shape as Google, one service over: `notion/client.js`
 holds the one API call and the pinned API version, `notion/broker.js` the routes,

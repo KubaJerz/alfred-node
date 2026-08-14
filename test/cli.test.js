@@ -542,42 +542,6 @@ test("a broker error is relayed, not swallowed or reworded", async () => {
   assert.match(missing.stderr, /Available: POST \/mail\/draft/);
 });
 
-test("the old google.js names its replacement instead of exploding", async () => {
-  // A resumed session carries the old path in its context. What matters is that
-  // the failure reads as "wrong file name" rather than "the tool is broken" —
-  // the second is what sends a turn looking for another route to the mailbox.
-  // It has to say so with no environment at all, since it is also what gets run
-  // outside a turn; and it must reach nothing, since it holds nothing.
-  for (const [args, expected] of [
-    [["mail", "search", "from:sarah"], /node \.\.\/bin\/gmail\.js/],
-    [["cal", "events"], /node \.\.\/bin\/gcal\.js/],
-    [["labels"], /gmail\.js/],
-  ]) {
-    requests = [];
-    const out = await run("google.js", args, cleanEnv());
-    assert.equal(out.code, 1, `google.js ${args.join(" ")} exited ${out.code}`);
-    assert.match(out.stderr, expected);
-    assert.match(out.stderr, /split/, "the message should say what happened");
-    assert.equal(requests.length, 0, "the shim reached the broker");
-  }
-
-  // No arguments at all still names both, because the shim can't know which was
-  // meant and a guess would send the turn to the wrong file.
-  const bare = (await run("google.js", [], cleanEnv())).stderr;
-  assert.match(bare, /gmail\.js/);
-  assert.match(bare, /gcal\.js/);
-
-  // And it echoes nothing back: re-joining argv loses the quoting on
-  // --text "two words", so a pasted, mis-quoted draft would save a wrong email.
-  const draft = await run(
-    "google.js",
-    ["mail", "draft", "--to", "a@b.com", "--text", "two words"],
-    cleanEnv()
-  );
-  assert.ok(!draft.stderr.includes("a@b.com"), "the shim echoed arguments back");
-  assert.ok(!draft.stderr.includes("two words"), "the shim echoed arguments back");
-});
-
 test("without the broker env, both CLIs explain themselves and reach nothing", async () => {
   // This is the standalone-invocation case: someone (or Alfred, in a turn where
   // bot.js did not inject the env) running the CLI directly. It has to fail in a
