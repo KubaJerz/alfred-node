@@ -26,7 +26,12 @@ than what's missing.
       a NOPASSWD sudoers rule, `chmod 700` on the credentials dir, and group
       sharing so memories stay writable.
 
-- [ ] **Gmail → Alfred via Pub/Sub.** `users.watch()` publishes change
+- [ ] **Gmail → Alfred via Pub/Sub.** _Tier 1 is built (branch
+      `feat/gmail-pubsub`, PR pending) — see the Done entry for what shipped.
+      What's left in this item: the cloud go-live (topic + pull subscription +
+      service-account key), then tiers 2–3, then forwarded invites, which ride
+      the same path. The notes below stay the reference for all of that._
+      `users.watch()` publishes change
       notifications to a Cloud Pub/Sub topic. Use a **pull** subscription: this
       box is a laptop behind NAT, and pull needs no public endpoint or domain
       verification. Auth is OAuth as the user (done, `google/auth.js`) — a
