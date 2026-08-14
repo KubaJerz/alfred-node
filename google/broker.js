@@ -467,14 +467,23 @@ function extractBody(payload, depth = 0) {
  * Start the broker. Returns { url, token, close } — the caller hands url/token
  * to the spawned agent via env, so the shared secret never touches disk.
  */
-export async function startBroker({ port = 0, log = console.log, extraRoutes = {} } = {}) {
+export async function startBroker({ port = 0, log = console.log, extraRoutes = {}, baseRoutes = ROUTES } = {}) {
   const token = randomBytes(24).toString("hex");
   // Routes from other services (Notion) mount here rather than in their own
   // server, so the agent reaches everything with one loopback URL and one token.
   // The security plumbing below — the bearer check, the 127.0.0.1 bind, the body
   // cap — is written once and covers every mounted route, which is the whole
   // reason not to stand up a second server per service.
-  const routes = { ...ROUTES, ...extraRoutes };
+  //
+  // baseRoutes lets a *second* broker instance mount a different, narrower set
+  // instead of ROUTES — this is how Ronnie gets a broker exposing only label +
+  // calendar-import and literally nothing else (its own token, its own port).
+  // A different tenant, not just a different service, is what justifies the
+  // separate instance the "one server" rule otherwise argues against: Ronnie
+  // must not be able to reach mail read/draft/reply even by guessing a path,
+  // and the cleanest guarantee of that is a route table that never contained
+  // them. The plumbing is still written once and reused here.
+  const routes = { ...baseRoutes, ...extraRoutes };
 
   const server = http.createServer(async (req, res) => {
     try {
