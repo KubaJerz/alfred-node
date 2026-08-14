@@ -54,7 +54,12 @@ than what's missing.
       a NOPASSWD sudoers rule, `chmod 700` on the credentials dir, and group
       sharing so memories stay writable.
 
-- [ ] **Gmail → Alfred via Pub/Sub.** `users.watch()` publishes change
+- [ ] **Gmail → Alfred via Pub/Sub.** _Tier 1 is built (branch
+      `feat/gmail-pubsub`, PR pending) — see the Done entry for what shipped.
+      What's left in this item: the cloud go-live (topic + pull subscription +
+      service-account key), then tiers 2–3, then forwarded invites, which ride
+      the same path. The notes below stay the reference for all of that._
+      `users.watch()` publishes change
       notifications to a Cloud Pub/Sub topic. Use a **pull** subscription: this
       box is a laptop behind NAT, and pull needs no public endpoint or domain
       verification. Auth is OAuth as the user (done, `google/auth.js`) — a
@@ -285,6 +290,25 @@ than what's missing.
 
 ## Done
 
+- [x] ~~**Gmail → Alfred via Pub/Sub — tier 1 (buffer silently).**~~ `bot.js`
+      registers a `users.watch()` on the INBOX and drains a **pull** subscription
+      (`google/gmail-push.js`); each notification is a trigger, not data, so it
+      re-reads `users.history.list` from a local cursor
+      (`agent/var/google/gmail-sync.json`), filtered to `messageAdded` so a
+      phone-side "mark all read" can't flood it. New mail lands in
+      `agent/var/pending-mail.jsonl` (`google/gmail-buffer.js`, capped) and is
+      prepended as a digest to the next new session, then cleared — no Discord
+      post, no model call, and never logged (rides in `finalMessage`, which
+      `runClaude` doesn't write to `messages.jsonl`). Every message passes the
+      shared `classify()` chokepoint before it can be buffered, and the path
+      fetches metadata only (never the body), so only sender + subject can rest
+      on disk and a code is reduced to a "withheld" marker. Sender/subject are
+      sanitized against digest-delimiter forgery. Draining uses a service-account
+      key (`agent/var/google/pubsub-sa.json`) that can't read the mailbox. Off
+      until `GMAIL_PUBSUB_TOPIC`/`GMAIL_PUBSUB_SUBSCRIPTION` and the key exist.
+      Stale cursor → resync; expired watch → daily renew. Hermetic tests cover
+      the buffer, the chokepoint on the push shape, the cap, and injection.
+      Cloud go-live and tiers 2–3 stay open above. (PR pending)
 - [x] ~~**Email replies.**~~ `gmail.js reply <id>` builds the draft from the
       original — `Reply-To` over `From`, a `Re:` that doesn't stack, and the
       `In-Reply-To`/`References` headers that actually thread it. The old

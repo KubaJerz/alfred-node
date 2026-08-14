@@ -1,12 +1,13 @@
 {
   "name": "alfred-node",
-  "version": "2.5.0",
+  "version": "2.6.0",
   "description": "",
   "main": "bot.js",
   "type": "module",
   "scripts": {
     "start": "node bot.js",
     "google:auth": "node google/authorize.js",
+    "gmail:watch": "node google/gmail-push.js",
     "test": "node --test test/*.test.js",
     "check": "bash scripts/check-no-secrets.sh",
     "map:check": "bash scripts/check-system-map.sh"

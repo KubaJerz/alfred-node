@@ -94,6 +94,60 @@ claude -p "<user message>" \
 # cwd = agent/    env: ALFRED_BROKER=<loopback url>  ALFRED_BROKER_TOKEN=<per-boot secret>
 ```
 
+## Inbound mail (Pub/Sub)
+
+The second way something enters the system — and unlike a turn, no agent runs.
+Gmail publishes a change notification, `bot.js` pulls it, and the result is only
+a line in a buffer that the *next* new session reads. Mail arriving decides what
+a turn already knows; it never causes a turn. This is "tier 1" in `TODO.md`.
+
+```mermaid
+flowchart TD
+    G["Gmail · INBOX"] -->|"users.watch() · 7-day expiry, renewed daily"| T["Pub/Sub topic<br/>gmail-push"]
+    T -->|"notification — a trigger, not data"| L["gmail-push.js<br/>pull subscriber in bot.js"]
+    L -.->|"re-fetch from own cursor<br/>history.list · messageAdded only"| G
+    L -->|"every message"| C{"classify()<br/>mail-filter.js"}
+    C -->|"safe → sender + subject"| BUF["pending-mail.jsonl<br/>gmail-buffer.js · capped"]
+    C -->|"login code → marker only"| BUF
+    BUF -.->|"next new session · drained + cleared"| CTX["loadContext digest<br/>before the User Message trailer"]
+    KEY["pubsub-sa.json<br/>drains the subscription · can't read mail"] -->|"auth"| L
+    classDef external fill:#d6e2f2,stroke:#1f5fb8,color:#123f7d
+    classDef gateway fill:#d8ebe2,stroke:#1b6b52,color:#12503c
+    classDef secret fill:#ece0f5,stroke:#7a4fb0,color:#4a2d70
+    class G,T external
+    class C gateway
+    class KEY secret
+```
+
+Four properties this path is built to hold, each matching a way it fails silently
+if you get it wrong (`TODO.md` spells out the failure modes):
+
+- **The notification is a trigger, not data.** Its payload is never trusted; on
+  each nudge we re-read `users.history.list` from *our own* stored cursor
+  (`agent/var/google/gmail-sync.json`, its own writer — never `state.json`). A
+  lost or duplicated notification costs nothing, because the next drain still
+  sees everything since the cursor.
+- **`classify()` is the same chokepoint the read path uses** (green — a
+  guarantee, in `mail-filter.js`, run here via `screen()`). A login code is
+  reduced to a "withheld" marker *before* it ever reaches the buffer — the whole
+  reason the push path exists is that a buffered code would land in a Claude
+  session `.jsonl`, outside `agent/var/`, `.gitignore` and the memory funnel at
+  once. Safe mail keeps only sender + subject; the snippet is dropped before it
+  rests on disk.
+- **`messageAdded`-only history** is what stops a phone-side "mark all read" from
+  flooding the buffer with mail that isn't new — label churn is filtered out at
+  the source, not coalesced after.
+- **Two credentials, two jobs** (see below). Reaching the *mailbox* is OAuth as
+  the user; draining the *subscription* — our own cloud resource — is a service
+  account (`agent/var/google/pubsub-sa.json`), which by construction cannot read
+  mail. A stale cursor 404s → resync to the current historyId with a gap marker;
+  an expired watch just goes quiet → the daily renewal is what keeps it alive.
+
+The buffer surfaces **only on a new session** — a resumed conversation re-injects
+nothing (see Memory), so mail waits for the next `/clear`, dream, or first
+message of the day. The digest rides inside `finalMessage`, which `runClaude`
+never logs, so it can't reach `messages.jsonl` or anything downstream of it.
+
 ## Credentials
 
 Two boxes because there are two processes. `bot.js` runs continuously and holds

@@ -7,6 +7,8 @@ import { fileURLToPath } from "url";
 import path from "path";
 import { startBroker } from "./google/broker.js";
 import { NOTION_ROUTES } from "./notion/broker.js";
+import { startMailListener } from "./google/gmail-push.js";
+import { drainMailDigest } from "./google/gmail-buffer.js";
 
 // ── Config ──────────────────────────────────────────────────────────────────
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
@@ -539,7 +541,14 @@ async function handleTurn(msg, userMessage) {
     } else {
       if (dreamed) console.log("🌙 A dream pass ran since the last turn — starting fresh to load new memory");
       console.log(`🆕 Starting new session - loading context...`);
-      const context = await loadContext();
+      // Tier-1 mail: drain the buffer (reads + clears it) and fold it into the
+      // context of this fresh session. Only new sessions surface it — a resumed
+      // conversation re-injects nothing, so buffered mail waits for the next
+      // fresh start (a /clear, a dream, or a first message of the day). The
+      // digest goes into finalMessage, which runClaude never logs, so it can't
+      // reach messages.jsonl or the memory funnel downstream of it.
+      const digest = await drainMailDigest();
+      const context = await loadContext(digest);
       finalMessage = context + userMessage;
     }
 
@@ -602,7 +611,7 @@ async function handleTurn(msg, userMessage) {
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
-async function loadContext() {
+async function loadContext(digest = "") {
   const today = new Date().toISOString().split("T")[0];
 
   // SOUL lives with the agent's tracked config; the rest is personal state.
@@ -628,7 +637,11 @@ async function loadContext() {
       }
     }
   }
-  context += "\n=== SYSTEM CONTEXT END ===\n\nUser Message: ";
+  context += "\n=== SYSTEM CONTEXT END ===\n";
+  // Buffered mail rides between the system context and the user's message — a
+  // delimited block the turn can read but that is clearly not the user talking.
+  if (digest) context += `\n${digest}\n`;
+  context += "\nUser Message: ";
   return context;
 }
 
@@ -706,6 +719,15 @@ await bootstrap();
 // routes mount alongside Google's on the one loopback server, reached with the
 // same token.
 const broker = await startBroker({ extraRoutes: NOTION_ROUTES });
+
+// The inbound-mail listener. Like the broker, it's optional: with no topic /
+// subscription / service-account key it logs that it's off and returns null,
+// so a box without the cloud setup runs exactly as before. A failure to start
+// (bad key, unreachable Pub/Sub) is logged and swallowed — mail is an add-on,
+// not a reason to take the whole bot down.
+startMailListener().catch((err) =>
+  console.error(`⚠️  Gmail push listener failed to start: ${err.message}`)
+);
 
 // An unreachable network rejects here. Left unhandled it becomes an uncaught
 // exception and a full stack dump — which, at one restart every 5s, is how a

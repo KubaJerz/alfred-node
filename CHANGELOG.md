@@ -5,6 +5,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
 
 ## [Unreleased]
 ### Added
+- **Inbound mail reaches Alfred over Pub/Sub (tier 1 — buffer silently).**
+  `bot.js` registers a Gmail `users.watch()` on the INBOX and drains change
+  notifications from a **pull** subscription (`google/gmail-push.js`), so no
+  public endpoint is needed on a NAT'd laptop. A notification is treated as a
+  trigger, not data: each one re-reads `users.history.list` from a local cursor
+  (`agent/var/google/gmail-sync.json`), filtered to `messageAdded` so a phone's
+  "mark all read" can't flood it. New mail is buffered to
+  `agent/var/pending-mail.jsonl` (`google/gmail-buffer.js`, capped) and prepended
+  as a digest to the **next new session's** context, then cleared — no Discord
+  post, no model call, nothing logged (the digest rides inside `finalMessage`,
+  which `runClaude` never writes to `messages.jsonl`). Every message passes the
+  same `classify()` chokepoint the read path uses, so a login code becomes a
+  "withheld" marker before it can reach the buffer; the path fetches metadata
+  only, never the body, so nothing but sender + subject can rest on disk.
+  Sender/subject are sanitized against digest-delimiter forgery. Draining the
+  subscription uses a service-account key (`agent/var/google/pubsub-sa.json`)
+  that by construction cannot read the mailbox. Off unless
+  `GMAIL_PUBSUB_TOPIC` / `GMAIL_PUBSUB_SUBSCRIPTION` and the key are present, so
+  a box without the cloud setup runs exactly as before. `npm run gmail:watch`
+  registers/renews the watch by hand.
 - **Alfred can read and write Notion.** A `notion` skill and `bin/notion.js` over
   the same credential broker Google uses: `search` and `read` and `query` to find
   and render pages and database rows as markdown, `create` and `append` to
