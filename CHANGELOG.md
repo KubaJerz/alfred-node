@@ -102,6 +102,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
   invite anyone" holds even if Alfred asks for it or never read the rules.
 
 ### Fixed
+- **Personal state at the repo root no longer only warns — it blocks the commit.**
+  The pre-commit guard recognized Alfred's state names (`memories/`, `logs/`,
+  `state.json`, …) appearing at the repo root, outside the one `.gitignore` rule
+  that guards `agent/var/`, but check #4 was advisory. So when a memory pass wrote
+  a daily note to `memories/` at the root (a model with `Write` +
+  `--skip-permissions`, run from the wrong cwd) it got staged into a commit and
+  only a manual unstage kept it out of git. Those names are Alfred's state, never
+  this app's code, so the check now fails the commit instead of shrugging. The
+  stray note was moved back under `agent/var/`; the production writers
+  (`consolidateMemory`, `dream.sh`) were already correct.
 - **Calendar update never worked.** The broker read request bodies for `POST`
   but not `PATCH`, so every update arrived empty and came back "nothing to
   change" — indistinguishable from asking for nothing. Found by an audit, not

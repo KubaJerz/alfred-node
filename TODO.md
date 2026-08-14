@@ -10,17 +10,6 @@ and move to **Done** with the PR number. Anything with a GitHub issue links to i
 
 ## Now
 
-- [ ] **Personal memory state is loose at the repo root.** A daily note —
-      `memories/dailies/2026-08-11.md` — is sitting at the repo root instead of
-      under `agent/var/memories/dailies/`, which puts it *outside* the single
-      `.gitignore` rule that guards Alfred's state. So it's one `git add -A` from
-      being committed — it was, and had to be unstaged out of commit `ded43ef`.
-      Two parts, and the second matters more: move the stray note into
-      `agent/var/` where it belongs and is ignored, then find what wrote it
-      there — most likely a run with the wrong cwd, or a path that resolved
-      against `REPO_DIR` instead of `STATE_DIR`. The split only holds if nothing
-      writes across it; one loose file is a symptom, not the bug.
-
 ### Integrations — give Alfred hands
 
 Google access is live as of #25: OAuth consented, credentials held by a broker in
@@ -263,6 +252,17 @@ than what's missing.
 
 ## Done
 
+- [x] ~~**Personal memory state was loose at the repo root.**~~ A daily note
+      (`memories/dailies/2026-08-11.md`) sat at the repo root, outside the one
+      `.gitignore` rule that guards `agent/var/`. Moved it back under
+      `agent/var/memories/dailies/`. The writer wasn't the production code —
+      `consolidateMemory` and `dream.sh` both scope to `var/` with `cwd=AGENT_DIR`,
+      and the consolidation log has no entry for that date; it was a stray
+      dev-time/manual `claude -p` write from the wrong cwd. The split now holds
+      structurally: the pre-commit guard's check #4 recognized repo-root state
+      names (`memories/`, `logs/`, `state.json`, …) but only *warned*, which is
+      how the note reached a staged commit before a manual unstage caught it — it
+      now **blocks**. (PR pending)
 - [x] ~~**Mail digests stay out of long-term memory — by construction.**~~ No
       code needed: the digest lives inside `finalMessage` (context + the raw
       `userMessage`), which goes to `runClaude` and is *never* logged.

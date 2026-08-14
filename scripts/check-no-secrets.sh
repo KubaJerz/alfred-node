@@ -71,13 +71,19 @@ if [ -n "$secrets" ]; then
   echo "$secrets" | sed 's/^/    /' >&2
 fi
 
-# 4. A new top-level directory that looks like runtime state. Advisory only —
-#    this one guesses, and a wrong guess shouldn't block a legitimate commit.
+# 4. Alfred's state names appearing at the repo root — outside agent/var/ and so
+#    outside the .gitignore rule that guards it. This blocks, it doesn't warn: a
+#    memory pass once wrote a daily note to memories/ at the root (wrong cwd, a
+#    model with Write + --skip-permissions), it got staged, and only a manual
+#    unstage kept it out of git. The names below are Alfred's state, never this
+#    app's code — the real top-level dirs are bin/ google/ notion/ test/ scripts/
+#    agent/ — so a match here is a leak escaping the split, not a false guess.
 for f in "${staged[@]}"; do
   case "$f" in
     var/*|logs/*|memories/*|state.json|messages.jsonl)
-      echo "⚠️  $f looks like runtime state at the repo root." >&2
-      note "State belongs under agent/var/. Check this is really execution code."
+      block "Runtime state staged at the repo root: $f"
+      note "This is Alfred's state escaping agent/var/, where .gitignore can't see it."
+      note "Move it under agent/var/ and find what wrote it there."
       ;;
   esac
 done
