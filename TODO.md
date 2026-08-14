@@ -320,6 +320,15 @@ than what's missing.
       removal and body edits are a later, larger surface). Access is bounded by
       per-page sharing, not a scope. (#31)
 
+- [x] ~~**Notion body edits.**~~ The "later, larger surface" above, the body half
+      of it: Alfred was append-only on a page; now `read --ids` surfaces each
+      line's block id and `check`/`uncheck`, `edit`, `remove` change one line by
+      it. Two routes (`PATCH`/`DELETE /notion/block`), eight Notion routes total.
+      Same reversibility logic sorted the surface: `edit` overwrites in place and
+      reports `from → to` like `set`; `remove` lands in Notion's Trash and is
+      recoverable, so it's allowed where a comment isn't. Still no whole-page
+      delete or archive — that's the other, rarer half. (#35)
+
 - [x] ~~**Email replies.**~~ `gmail.js reply <id>` builds the draft from the
       original — `Reply-To` over `From`, a `Re:` that doesn't stack, and the
       `In-Reply-To`/`References` headers that actually thread it. The old

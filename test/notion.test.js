@@ -21,6 +21,8 @@ import {
   blocksToMarkdown,
   markdownToRichText,
   richTextToMarkdown,
+  blockUpdate,
+  blockLine,
 } from "../notion/blocks.js";
 import {
   readProperty,
@@ -135,6 +137,41 @@ test("fetched children render indented under their parent", () => {
   assert.ok(md.includes("  - child"), `child not indented:\n${md}`);
 });
 
+test("read --ids prefixes each line with its block id, on the first line only", () => {
+  const md = blocksToMarkdown(
+    [
+      {
+        id: "parent-id",
+        type: "bulleted_list_item",
+        bulleted_list_item: { rich_text: [{ plain_text: "parent" }] },
+        children: [
+          { id: "child-id", type: "bulleted_list_item", bulleted_list_item: { rich_text: [{ plain_text: "child" }] } },
+        ],
+      },
+    ],
+    { ids: true }
+  );
+  assert.ok(md.includes("[parent-id] - parent"), `parent id missing:\n${md}`);
+  assert.ok(md.includes("[child-id] - child"), `child id missing:\n${md}`);
+  // And without the option, no ids leak into an ordinary read.
+  assert.ok(!blocksToMarkdown([{ id: "x", type: "paragraph", paragraph: { rich_text: [{ plain_text: "p" }] } }]).includes("[x]"));
+});
+
+test("blockLine renders one block to its line, and blockUpdate guards the block's kind", () => {
+  assert.equal(blockLine({ type: "to_do", to_do: { checked: false, rich_text: [{ plain_text: "milk" }] } }), "- [ ] milk");
+  assert.equal(blockLine({ type: "heading_2", heading_2: { rich_text: [{ plain_text: "Groceries" }] } }), "## Groceries");
+
+  // A matching kind parses through, carrying the [x] as checked.
+  const edited = blockUpdate("to_do", "- [x] buy oat milk");
+  assert.equal(edited.type, "to_do");
+  assert.equal(edited.to_do.checked, true);
+  assert.equal(richTextToMarkdown(edited.to_do.rich_text.map((n) => ({ plain_text: n.text.content }))), "buy oat milk");
+
+  // A line that reads as a different kind is refused, not silently applied.
+  assert.throws(() => blockUpdate("bulleted_list_item", "# now a heading"), /heading_1.*bulleted_list_item/);
+  assert.throws(() => blockUpdate("paragraph", "   "), /empty/);
+});
+
 // ── Properties ───────────────────────────────────────────────────────────────
 
 test("buildProperty shapes a bare string by the column's type", () => {
@@ -203,14 +240,17 @@ after(async () => {
   await broker.close();
 });
 
-test("no comment, delete or archive route exists — the capability is absent", async () => {
-  for (const forbidden of [/comment/i, /delete/i, /archive/i]) {
-    assert.ok(
-      !NOTION_OPERATIONS.some((op) => forbidden.test(op)),
-      `a ${forbidden} operation exists: ${NOTION_OPERATIONS.filter((o) => forbidden.test(o))}`
-    );
+test("a body block can be removed, but a page and a comment cannot", async () => {
+  // The line moved with the block routes: removing one body *block* is intended
+  // and reversible (Notion Trash). What stays absent is removing or archiving a
+  // whole *page*, and comments (a comment reaches people and can't be unsent).
+  assert.ok(NOTION_OPERATIONS.includes("DELETE /notion/block"), "block removal should exist");
+  for (const op of NOTION_OPERATIONS) {
+    assert.ok(!/comment/i.test(op), `a comment operation exists: ${op}`);
+    assert.ok(!/page/i.test(op) || !/(delete|archive)/i.test(op), `a page delete/archive exists: ${op}`);
+    assert.ok(!/archive/i.test(op), `an archive operation exists: ${op}`);
   }
-  // And they 404 rather than being quietly served by something.
+  // And the page-level and comment routes 404 rather than being quietly served.
   for (const [method, p] of [["POST", "/notion/comment"], ["DELETE", "/notion/page"], ["POST", "/notion/archive"]]) {
     const res = await hit(p, { method });
     assert.equal(res.status, 404, `${method} ${p} was reachable`);
@@ -232,6 +272,9 @@ test("every write validates locally before any API call", async () => {
     ["POST", "/notion/page", { db: "d" }, /title required/],     // no title
     ["PATCH", "/notion/page?id=x", {}, /nothing to change/],     // empty patch
     ["POST", "/notion/append?id=x", {}, /markdown required/],    // nothing to append
+    ["PATCH", "/notion/block", { checked: true }, /id required/], // block edit, no id
+    ["PATCH", "/notion/block?id=x", {}, /nothing to change/],     // neither edit nor tick
+    ["DELETE", "/notion/block", {}, /id required/],              // block remove, no id
   ];
   for (const [method, p, body, re] of cases) {
     const res = await hit(p, { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });

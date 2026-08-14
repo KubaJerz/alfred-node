@@ -106,7 +106,7 @@ flowchart TD
         subgraph BOT["bot.js · long-running · holds the tokens"]
             direction TB
             TOK["tokens<br/>google/token.json · auth.js · authorize.js<br/>NOTION_TOKEN (.env) · notion/client.js"]
-            BR["broker · one server · 10 Google routes + 6 Notion routes · no send<br/>withholds codes (mail-filter.js)<br/>no delete-with-guests (calendar-rules.js)<br/>notion rules (notion/broker.js)"]
+            BR["broker · one server · 10 Google routes + 8 Notion routes · no send<br/>withholds codes (mail-filter.js)<br/>no delete-with-guests (calendar-rules.js)<br/>notion rules (notion/broker.js)"]
             TOK -->|"reads"| BR
         end
         subgraph AG["the agent · claude -p, per turn · no secret"]
@@ -148,9 +148,12 @@ and `notion/blocks.js` / `notion/props.js` the markdown↔block and typed-proper
 conversions every read and write passes through. Its boundary is enforced
 differently, though — not by a withheld OAuth scope but by **per-page sharing**
 on Notion's side: the integration sees only pages explicitly connected to it, so
-an unshared page isn't restricted, it's absent. `set` (a property overwrite) is
-the one irreversible write and Notion keeps no API-reachable history, so that
-route reads the old value first and reports it — the only undo there is.
+an unshared page isn't restricted, it's absent. `set` (a property overwrite) and
+`edit` (a body-line overwrite) are the irreversible writes — Notion keeps no
+API-reachable history — so those routes read the old value first and report the
+`from → to`, the only undo there is. A block `remove` is the opposite: it lands
+in Notion's Trash and is recoverable, so it's the safe kind of delete. Whole-page
+delete and comments stay unwired.
 
 ## Memory
 

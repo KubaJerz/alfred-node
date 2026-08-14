@@ -174,8 +174,14 @@ function indentLines(md, pad) {
  * An array of Notion block objects → markdown. Children (attached as `.children`
  * by the caller that fetched them) render indented under their parent. Numbered
  * lists count within a contiguous run and reset when the run breaks.
+ *
+ * With `{ ids: true }` each block's line is prefixed `[<block id>] ` so a caller
+ * can name a specific line for `edit`/`check`/`remove`. It's opt-in because the
+ * id is a 36-char uuid — noise on an ordinary read, needed only when about to
+ * change one line. The prefix lands on the block's first line only; children,
+ * rendered recursively, carry their own ids already.
  */
-export function blocksToMarkdown(blocks) {
+export function blocksToMarkdown(blocks, opts = {}) {
   const parts = [];
   let n = 0;
   (blocks || []).forEach((b, i) => {
@@ -183,7 +189,8 @@ export function blocksToMarkdown(blocks) {
       n = blocks[i - 1]?.type === "numbered_list_item" ? n + 1 : 1;
     }
     let md = renderBlock(b, n);
-    if (b.children?.length) md += "\n" + indentLines(blocksToMarkdown(b.children), "  ");
+    if (opts.ids && b.id) md = `[${b.id}] ${md}`;
+    if (b.children?.length) md += "\n" + indentLines(blocksToMarkdown(b.children, opts), "  ");
     parts.push({ type: b.type, md });
   });
 
@@ -196,4 +203,37 @@ export function blocksToMarkdown(blocks) {
     out += p.md;
   });
   return out;
+}
+
+/**
+ * One block → its single markdown line, for echoing what a targeted edit or
+ * removal changed (the `from → to` an `edit` reports, the line a `remove`
+ * names). No list numbering: a lone block isn't inside a run to count within, so
+ * a numbered item renders as `1.` — the number isn't the point, the text is.
+ */
+export function blockLine(block) {
+  return renderBlock(block, 1);
+}
+
+/**
+ * The parsed block for editing an existing one from a single line of markdown.
+ * Notion's block update changes a block's *content*, never its *type*, so the
+ * line is parsed exactly as a write is and its kind must match the block being
+ * edited. Turning a bullet into a heading is a clear error rather than a silent
+ * no-op — the API would ignore the type change and keep the old kind, which
+ * reads as "the edit didn't take". Returns the parsed block `{ type, [type] }`;
+ * the caller sends `{ [type]: block[type] }` as the patch and renders the block
+ * for the `to` it echoes.
+ */
+export function blockUpdate(existingType, markdownLine) {
+  const line = String(markdownLine ?? "").replace(/\r?\n/g, " ").trim();
+  if (!line) throw new Error("the new line is empty");
+  const parsed = lineToBlock(line);
+  if (parsed.type !== existingType) {
+    throw new Error(
+      `that line reads as a ${parsed.type}, but the block is a ${existingType}. ` +
+        "Edit changes a line's text, not its kind — remove it and add the new kind instead."
+    );
+  }
+  return parsed;
 }
