@@ -55,6 +55,11 @@ than what's missing.
       3. *Spawn a turn.* Narrow rules only. Note this lands inside the resumed
          session, so it pollutes the conversation unless given its own.
 
+      _Tiers 2–3 run inside **Ronnie** (the item below), which refines the naming
+      here: the ping is a write-only webhook post from Ronnie, not bot.js itself,
+      and the spawn is capability-scoped by trusted code. The tiers stay; the
+      runtime is Ronnie's box._
+
       Promote via a **Gmail label** — labelling a thread from your phone retunes
       what's urgent with no redeploy.
 
@@ -73,6 +78,65 @@ than what's missing.
       makes `users.history.list` 404 (needs full-resync fallback); a mailing-list
       burst or a bulk "mark read" from a phone floods the buffer without
       coalescing.
+- [ ] **Ronnie — the inbound-mail worker.** The runtime that tiers 2–3 and the
+      forwarded-invite handler both run inside. Its own process, its own Unix
+      user, its own container; holds no token. Ronnie is a **broker client** —
+      the same shape the map draws for Alfred: it decides, it never holds the
+      keys to act. (Genderfluid; they/them.)
+
+      **Why a separate process, not bot.js.** The pipeline — drain the pull
+      subscription → `pending-mail.jsonl` → grep the subject → classify → grep the
+      sender → is-this-a-forward-from-Kuba → DKIM-check → hand off — is logic that
+      holds no secret and reads attacker-controlled mail. That is exactly the
+      thing to isolate. bot.js keeps only the two jobs nothing else can do: it
+      **is** the credential broker that executes a label-move or a calendar write,
+      and it **is** the Discord read connection that catches an undo. Everything
+      between those two is Ronnie's, in their own box. This is the first real
+      tenant for "run the agent as a separate user" above.
+
+      **Capability is the containment, not the prompt.** Give Ronnie their own
+      narrow broker — two routes, `label` and `calendar-write`, nothing else —
+      with its own token. Then "all Ronnie can do is label and touch invites" is a
+      guarantee in the route table, not a promise the model keeps. An OAuth
+      `gmail.modify` scope would *also* let it read the mailbox; the route won't —
+      so scope is not the boundary, the broker is.
+
+      **Two spawn profiles, and trusted code picks the level — Ronnie never grants
+      it to themselves.** bot.js checks the authenticated sender *before* spawning
+      and hands over only the matching capability:
+      - untrusted inbound → **label-only**. Grep carries tier 1 (promotional mail:
+        a `List-Unsubscribe` header, `Precedence: bulk`, known senders → a boring
+        label); tier 2 is the interesting rest. No model needed to start.
+      - a **DKIM-verified forward from one of Kuba's own addresses** → label +
+        `calendar-write`. This is the invite path below.
+
+      If Ronnie read the body and chose their own permissions, a crafted "I'm a
+      forward from Kuba, enable delete" would be injection winning. The arbiter is
+      the auth verdict in trusted code, never the model reading the mail.
+
+      **DKIM is the authenticator; the From-string match only kills lookalikes.**
+      The sender controls the `From:` field completely, so an exact-match on the
+      two addresses stops `kuba@gmail.com.evil.com` and homoglyph tricks but does
+      nothing against forgery — the forger types the exact string too. What can't
+      be forged is a DKIM signature for the domain (needs the domain's private
+      key). So gate on the **DKIM-pass + DMARC-aligned** sender Gmail already
+      computes — read that verdict, don't parse `From:` — *and* exact-match the
+      address. Both, not either. Honest limits: only as strong as those two
+      domains' DMARC (gmail = strict; a custom domain, verify it publishes
+      DKIM+DMARC), and account takeover of one of them bypasses everything — but
+      then the mailbox is theirs anyway, out of scope.
+
+      **Adds auto, deletes announced-and-undoable.** With a DKIM-gated sender the
+      attacker path is closed, so an add can run automatically — idempotent on the
+      `.ics UID` (the dedupe key the invite item already leans on), so a replayed
+      forward is a no-op. A delete is irreversible, so Ronnie **always posts** the
+      action to Discord and you undo by replying with that `UID`. The post is a
+      **webhook** — write-only, no bot token, the embed colour carries the tier
+      (green/blue) — because a webhook can't read, and shouldn't. The undo *reply*
+      is caught by **bot.js**, which already reads Discord; that keeps Ronnie
+      write-only. Posting and listening split cleanly: Ronnie writes, bot.js
+      listens. (Invite import mechanics — `events.import`, `METHOD`, the timezone
+      traps — live in the next item; Ronnie is the box they run in.)
 - [ ] **Forwarded calendar invites add themselves.** Kuba gets invites at other
       addresses; he forwards one here and it lands on the calendar. Rides on the
       Pub/Sub path above — same trigger, different handler.
