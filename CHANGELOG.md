@@ -133,6 +133,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
   invite anyone" holds even if Alfred asks for it or never read the rules.
 
 ### Fixed
+- **The nightly dreaming pass never ran — `MEMORY.md` sat empty for months.**
+  `dream.sh` fires at 03:00 and consolidated *that calendar day's* note, but
+  daily notes are written through the day (afternoon/evening), so at 3am the
+  note keyed on `TODAY` did not exist yet and the guard `exit`ed before `claude`
+  was ever invoked. The log shows 40+ consecutive "No notes for today,
+  skipping"; long-term `MEMORY.md` never left its placeholder line and no
+  `last-dream` stamp was ever written, despite a dozen `<!-- PROMOTE -->` tags
+  waiting. It now targets *yesterday's* note (`date -d yesterday`) — complete
+  and present at 3am. The already-written dailies were never consolidated, so
+  that backlog is handled as a one-off, separate from this fix.
 - **Personal state at the repo root no longer only warns — it blocks the commit.**
   The pre-commit guard recognized Alfred's state names (`memories/`, `logs/`,
   `state.json`, …) appearing at the repo root, outside the one `.gitignore` rule
