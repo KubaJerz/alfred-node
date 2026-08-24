@@ -61,3 +61,36 @@ test("enqueue → drain triages a queued message end to end (free stage, no Haik
   assert.equal(label.body.addLabels[0], "L_BULK");
   assert.deepEqual(label.body.removeLabels, ["INBOX"]); // bulk is archived
 });
+
+test("undo cal:<uid> removes the calendar event", async () => {
+  const calls = [];
+  const fetchImpl = async (url, opts) => {
+    calls.push({ url, body: JSON.parse(opts.body || "{}") });
+    return { ok: true, json: async () => ({}) };
+  };
+  const r = makeRonnie({ brokerUrl: "http://127.0.0.1:1", brokerToken: "T", fetchImpl });
+  const out = await r.undo("cal:inv-9");
+  assert.deepEqual(out, { kind: "calendar", uid: "inv-9" });
+  const call = calls.find((c) => c.url.endsWith("/calendar/remove"));
+  assert.equal(call.body.iCalUID, "inv-9");
+});
+
+test("undo mail:<id> re-files a pinged message as bulk", async () => {
+  const calls = [];
+  const fetchImpl = async (url, opts) => {
+    calls.push({ url, body: JSON.parse(opts.body || "{}") });
+    return { ok: true, json: async () => ({}) };
+  };
+  const r = makeRonnie({
+    brokerUrl: "http://127.0.0.1:1",
+    brokerToken: "T",
+    labels: { bulk: "L_BULK", interesting: "L_INT" },
+    fetchImpl,
+  });
+  const out = await r.undo("mail:m7");
+  assert.deepEqual(out, { kind: "mail", id: "m7" });
+  const call = calls.find((c) => c.url.endsWith("/mail/label"));
+  assert.equal(call.body.id, "m7");
+  assert.deepEqual(call.body.addLabels, ["L_BULK"]);
+  assert.deepEqual(call.body.removeLabels, ["INBOX", "L_INT"]); // archived + un-flagged
+});

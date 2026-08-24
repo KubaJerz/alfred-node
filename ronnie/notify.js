@@ -52,13 +52,16 @@ export function mailEmbed(entry = {}) {
   const from = clean(entry.from) || "unknown sender";
   const subject = clean(entry.subject) || "(no subject)";
   const bulk = entry.category === "bulk";
+  const id = String(entry.id ?? "").slice(0, 200);
   return {
     color: bulk ? COLORS.bulk : COLORS.personal,
     author: { name: from },
     title: subject,
     // The one-liner is the point of the ping — why this matters, in a sentence.
     description: entry.summary ? clean(entry.summary, 500) : undefined,
-    footer: { text: bulk ? "filed — bulk" : "new mail" },
+    // A pinged (personal) message carries its own undo handle: reply to re-file
+    // it as bulk if Ronnie got it wrong. Bulk mail is filed silently, no handle.
+    footer: { text: bulk ? "filed — bulk" : id ? `reply “undo mail:${id}” to file it` : "new mail" },
   };
 }
 
@@ -73,9 +76,10 @@ export function inviteEmbed({ action, summary, uid, when } = {}) {
     color: removed ? COLORS.undo : COLORS.invite,
     title: `Calendar: ${removed ? "removed" : "added"} “${clean(summary) || "an event"}”`,
     description: when ? clean(when) : undefined,
-    // The UID is the undo handle. Kept un-cleaned of case but capped; it's our
-    // own generated/parsed identifier, not free-form attacker prose.
-    footer: { text: `reply “undo ${String(uid ?? "").slice(0, 200)}” to reverse` },
+    // The UID is the undo handle (prefixed cal: so bot.js can tell it from a
+    // mail undo). Kept un-cleaned of case but capped; it's our own generated or
+    // parsed identifier, not free-form attacker prose.
+    footer: { text: `reply “undo cal:${String(uid ?? "").slice(0, 200)}” to reverse` },
   };
 }
 

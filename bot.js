@@ -474,6 +474,23 @@ client.on("messageCreate", async (msg) => {
 
   if (!userMessage) return;
 
+  // Ronnie's undo, handled here and NOT as a turn — it's a direct broker action
+  // and must not spawn claude -p. Only the exact affordance form fires (a cal: or
+  // mail: token from a Ronnie embed footer), so a plain "undo …" to Alfred still
+  // reaches a turn untouched.
+  const undoMatch = /^undo\s+((?:cal|mail):\S+)/i.exec(userMessage);
+  if (undoMatch && ronnie?.undo) {
+    const token = undoMatch[1];
+    try {
+      const r = await ronnie.undo(token);
+      await msg.react("↩️").catch(() => {});
+      console.log(`↩️  Ronnie undo ${token} → ${r.kind}`);
+    } catch (err) {
+      await msg.reply(`Couldn't undo \`${token}\`: ${err.message}`).catch(() => {});
+    }
+    return;
+  }
+
   // Log the inbound turn (user → bot) before anything else, so the transcript
   // reflects arrival order even if the turn then waits its place in the queue.
   await logTurn({

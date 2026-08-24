@@ -20,10 +20,17 @@ test("mailEmbed fills sensible defaults for missing fields", () => {
   assert.equal(e.title, "(no subject)");
 });
 
+test("a personal mailEmbed carries a mail: undo handle; bulk does not", () => {
+  const personal = mailEmbed({ id: "m1", from: "a@x", subject: "hi", category: "personal" });
+  assert.match(personal.footer.text, /undo mail:m1/);
+  const bulk = mailEmbed({ id: "m2", from: "a@x", subject: "sale", category: "bulk" });
+  assert.equal(bulk.footer.text, "filed — bulk"); // no undo handle on silent filing
+});
+
 test("inviteEmbed puts the UID in the footer as the undo handle", () => {
   const e = inviteEmbed({ action: "added", summary: "Standup", uid: "abc-123", when: "Tue 10:30" });
   assert.equal(e.color, COLORS.invite);
-  assert.match(e.footer.text, /undo abc-123/);
+  assert.match(e.footer.text, /undo cal:abc-123/);
   const rm = inviteEmbed({ action: "removed", summary: "Standup", uid: "abc-123" });
   assert.equal(rm.color, COLORS.undo);
   assert.match(rm.title, /removed/);

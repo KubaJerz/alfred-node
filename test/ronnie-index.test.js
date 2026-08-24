@@ -84,7 +84,7 @@ test("an authenticated invite REQUEST is imported and announced", async () => {
   assert.equal(r.action, "invite-added");
   assert.equal(h.calls[0].routeKey, "POST /calendar/import");
   assert.equal(h.calls[0].body.resource.iCalUID, "inv-1");
-  assert.match(h.posts[0][0].footer.text, /undo inv-1/);
+  assert.match(h.posts[0][0].footer.text, /undo cal:inv-1/);
 });
 
 test("an authenticated CANCEL removes the event", async () => {

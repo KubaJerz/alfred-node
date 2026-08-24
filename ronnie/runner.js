@@ -78,10 +78,33 @@ export function makeRonnie({
       ? makeConsumer({ queue, breaker, enrichOne, screen, handle, digest: appendPending, surface, poisonCap, log })
       : null;
 
+  // Reverse an action from a Discord "undo <token>" reply. Two forms, keyed by a
+  // prefix so bot.js needn't know which is which:
+  //   cal:<uid>  — remove the calendar event Ronnie imported from an invite.
+  //   mail:<id>  — re-file a message Ronnie pinged as bulk (archive it), for
+  //                when Ronnie called a message personal and it wasn't.
+  const undo = async (token) => {
+    const i = String(token).indexOf(":");
+    const kind = i === -1 ? "cal" : token.slice(0, i);
+    const arg = i === -1 ? token : token.slice(i + 1);
+    if (kind === "mail") {
+      await broker("POST /mail/label", {
+        id: arg,
+        addLabels: [labels?.bulk].filter(Boolean),
+        removeLabels: ["INBOX", labels?.interesting].filter(Boolean),
+      });
+      return { kind: "mail", id: arg };
+    }
+    // "cal" (and any bare/legacy token): reverse a calendar import by iCalUID.
+    await broker("POST /calendar/remove", { iCalUID: arg });
+    return { kind: "calendar", uid: arg };
+  };
+
   return {
     meter,
     queue,
     breaker,
+    undo,
     enqueue: (ids) => queue.enqueue(ids),
     drain: consumer ? () => consumer.drain() : async () => ({ skipped: "no-enrich" }),
   };
