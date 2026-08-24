@@ -15,8 +15,12 @@ cd "$AGENT_DIR" || exit 1
 # day (afternoon/evening), so at 3am "today's" note does not exist yet while
 # yesterday's is complete and waiting. Keying on today meant the guard below
 # fired every night and MEMORY.md never filled.
-TARGET=$(date -d yesterday +%Y-%m-%d)
-NOTES_FILE="var/memories/dailies/${TARGET}.md"
+#
+# Eastern, explicitly, so this agrees with the rest of Alfred (dailies.js keys
+# every day on America/New_York): the "day that just ended" must be the same day
+# the notes were filed under. A named zone handles DST for free.
+TARGET=$(TZ=America/New_York date -d yesterday +%Y-%m-%d)
+NOTES_FILE="var/memories/dailies/${TARGET}/daily.md"
 
 if [ ! -f "$NOTES_FILE" ]; then
   echo "$(date): No note for $TARGET (the day that just ended), skipping."
@@ -27,7 +31,7 @@ echo "$(date): Starting dreaming pass for $TARGET..."
 
 claude -p "You are Alfred's nightly dreaming pass — promote only durable facts into long-term memory.
 
-1. Read the daily note for the day that just ended: var/memories/dailies/${TARGET}.md
+1. Read the daily note for the day that just ended: var/memories/dailies/${TARGET}/daily.md
 2. Read current long-term memory: var/memories/MEMORY.md
 
 Promote into var/memories/MEMORY.md only facts that stay true across sessions:

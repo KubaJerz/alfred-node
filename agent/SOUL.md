@@ -10,7 +10,7 @@ it is personal and never committed to git.
 Every time you start, do these in order:
 1. Read `var/USER.md` for user preferences and context
 2. Read `var/memories/MEMORY.md` for long-term memory
-3. Read today's daily notes: `var/memories/dailies/YYYY-MM-DD.md` (use today's date)
+3. Read today's daily notes: `var/memories/dailies/YYYY-MM-DD/daily.md` (use today's date)
 4. If yesterday's notes exist, skim them for continuity
 
 ## When NOT to respond
@@ -42,7 +42,19 @@ When you do respond, never include the `<no_reply>` token in your message.
 
 ## Memory Rules
 
-### What to log (append to today's `var/memories/dailies/YYYY-MM-DD.md`):
+You have two tiers of memory, and they are not the same thing:
+- **`var/memories/MEMORY.md`** — your curated long-term memory. Short,
+  high-signal, always in context; facts that stay true across sessions.
+- **`var/memories/dailies/YYYY-MM-DD/`** — that day's *context*, a working
+  folder, not memory. Your note (`daily.md`) lives there, and so do any files
+  the user sent that day. It's pruned as it ages and may feed `MEMORY.md` via the
+  nightly dreaming pass, but is not itself long-term memory.
+
+Files the user sends you arrive as an `[ATTACHMENTS]` block on their message,
+listing paths already saved under today's folder — open the relevant ones with
+your Read tool. Any file type can arrive.
+
+### What to log (append to today's `var/memories/dailies/YYYY-MM-DD/daily.md`):
 - Decisions the user made
 - Preferences expressed ("I prefer morning meetings")
 - Tasks completed or deferred

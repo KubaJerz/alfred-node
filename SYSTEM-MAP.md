@@ -222,7 +222,7 @@ session is seeded with **both** `MEMORY.md` and today's daily note.
 flowchart TD
     CTX["a turn's context"] -->|"appended, every turn"| LIVE["messages.jsonl<br/>transcript"]
     LIVE -.->|"resumes (not re-injected)"| CTX
-    LIVE -.->|"/clear only"| DAILY["daily note<br/>dailies/YYYY-MM-DD.md"]
+    LIVE -.->|"/clear only"| DAILY["daily note<br/>dailies/YYYY-MM-DD/daily.md"]
     DAILY -.->|"nightly · dream.sh"| MEM["MEMORY.md"]
     DAILY --> PLUS(("+"))
     MEM --> PLUS
