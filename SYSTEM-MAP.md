@@ -262,11 +262,19 @@ if you never `/clear`, a conversation never reaches the daily note. On `/clear`,
 3 AM, `dream.sh` promotes durable facts from that note into `MEMORY.md`. A new
 session is seeded with **both** `MEMORY.md` and today's daily note.
 
+`/clear` (and its `/c` alias, parsed in `commands.js`) is a **prefix**, not a
+bare word: alone it clears and waits, but `/c <text>` clears and then runs
+`<text>` as the fresh session's first turn — one message both resets and asks.
+The transcript is archived *before* that message is logged, so the command never
+lands in either the old note or the new one. Day boundaries — the per-day note
+folders drawn below and the 3 AM cron — all key on Eastern through one helper,
+`dailies.js`, so "today" means the same day everywhere.
+
 ```mermaid
 flowchart TD
     CTX["a turn's context"] -->|"appended, every turn"| LIVE["messages.jsonl<br/>transcript"]
     LIVE -.->|"resumes (not re-injected)"| CTX
-    LIVE -.->|"/clear only"| DAILY["daily note<br/>dailies/YYYY-MM-DD.md"]
+    LIVE -.->|"/clear only"| DAILY["daily note<br/>dailies/YYYY-MM-DD/daily.md"]
     DAILY -.->|"nightly · dream.sh"| MEM["MEMORY.md"]
     DAILY --> PLUS(("+"))
     MEM --> PLUS
