@@ -12,6 +12,8 @@ import { gmailClient, PUBSUB_KEY_FILE } from "./google/auth.js";
 import { drainMailDigest } from "./google/gmail-buffer.js";
 import { RONNIE_ROUTES } from "./ronnie/broker-routes.js";
 import { makeRonnie } from "./ronnie/runner.js";
+import { easternDate, dailyDir, dailyNotePath, attachmentName, buildAttachmentBlock } from "./dailies.js";
+import { parseClearCommand } from "./commands.js";
 
 // ── Config ──────────────────────────────────────────────────────────────────
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
@@ -138,9 +140,11 @@ async function logTurn(entry) {
 }
 
 // On /clear: copy the just-ended conversation from messages.jsonl into
-// logs/<firstTs>_to_<lastTs>.jsonl (UTC, filename-safe), excluding the /clear
-// command itself, then reset the live transcript so the next conversation
-// starts clean. Returns the archive path, or null if there was nothing to save.
+// logs/<firstTs>_to_<lastTs>.jsonl (UTC, filename-safe), then reset the live
+// transcript so the next conversation starts clean. The /clear command line
+// never appears here — handleTurn archives *before* it logs the inbound turn,
+// so the transcript holds only the real messages. Returns the archive path, or
+// null if there was nothing to save.
 async function archiveConversation() {
   let raw;
   try {
@@ -153,9 +157,7 @@ async function archiveConversation() {
     .split("\n")
     .filter(Boolean)
     .map((l) => { try { return JSON.parse(l); } catch { return null; } })
-    .filter(Boolean)
-    // drop the /clear command line — we want the messages *before* it
-    .filter((e) => !(e.dir === "in" && /^\/(clear|c)$/i.test((e.text || "").trim())));
+    .filter(Boolean);
 
   if (!entries.length) return null;
 
@@ -191,9 +193,11 @@ async function consolidateMemory(archivePath) {
   // Target today's daily note. Inject its current contents so the pass appends
   // to what's there instead of overwriting. Use {{DAILY}} in the prompt, else
   // it's appended. {{DAILY_PATH}} tells the pass where to write.
-  const today = new Date().toISOString().split("T")[0];
-  const dailyAbs = path.join(MEMORIES_DIR, "dailies", `${today}.md`);
+  const today = easternDate();
+  const dailyAbs = dailyNotePath(MEMORIES_DIR, today);
   const dailyRel = agentRel(dailyAbs);
+  // The note lives in a per-day folder; make sure it exists so the pass can write.
+  await mkdir(dailyDir(MEMORIES_DIR, today), { recursive: true });
   let daily = "";
   try {
     daily = (await readFile(dailyAbs, "utf-8")).trim();
@@ -472,7 +476,11 @@ client.on("messageCreate", async (msg) => {
   // Strip mention and trim whitespace from the message
   const userMessage = msg.content.replace(/<@!?\d+>/g, "").trim();
 
-  if (!userMessage) return;
+  // Download any files first — a file sent with no caption arrives with empty
+  // content and would otherwise be dropped by the guard below before it's seen.
+  const attachments = await saveInboundAttachments(msg);
+
+  if (!userMessage && attachments.length === 0) return;
 
   // Ronnie's undo, handled here and NOT as a turn — it's a direct broker action
   // and must not spawn claude -p. Only the exact affordance form fires (a cal: or
@@ -501,21 +509,15 @@ client.on("messageCreate", async (msg) => {
     return;
   }
 
-  // Log the inbound turn (user → bot) before anything else, so the transcript
-  // reflects arrival order even if the turn then waits its place in the queue.
-  await logTurn({
-    dir: "in",
-    user: msg.author.tag,
-    userId: msg.author.id,
-    channel: msg.channelId,
-    text: userMessage,
-  });
-
+  // The inbound turn is logged inside handleTurn, not here: a "/c <text>"
+  // command clears (and archives) the transcript first, so logging on arrival
+  // would file the new message into the conversation it just ended. The queue
+  // is FIFO, so logging when the turn runs still preserves arrival order.
   if (pendingTurns > 0) {
     console.log(`⏳ ${pendingTurns} turn(s) already in flight — queuing this one`);
     msg.react("⏳").catch(() => {}); // best-effort; needs the Add Reactions permission
   }
-  await enqueueTurn(() => handleTurn(msg, userMessage));
+  await enqueueTurn(() => handleTurn(msg, userMessage, attachments));
 });
 
 // Build Ronnie's Haiku cost figure and post it. Writes the PNG into today's
@@ -556,10 +558,11 @@ async function runRonnieMetrics(msg) {
 // One turn at a time, in arrival order. Everything below reads and writes the
 // single global state.json, so overlapping turns would resume the same session
 // twice and race to write the new session id back.
-async function handleTurn(msg, userMessage) {
-  // Handle /clear or /c command
-  const lowerMsg = userMessage.toLowerCase();
-  if (lowerMsg === "/clear" || lowerMsg === "/c") {
+async function handleTurn(msg, userMessage, attachments = []) {
+  // "/clear" / "/c" as a prefix: bare = clear and wait; "/c <text>" = clear,
+  // then run <text> as the fresh session's first turn (one message does both).
+  const clear = parseClearCommand(userMessage);
+  if (clear) {
     console.log(`🧹 Clearing session for ${msg.author.tag}`);
 
     // Archive the just-ended conversation, then kick off memory consolidation.
@@ -580,10 +583,32 @@ async function handleTurn(msg, userMessage) {
       topic: "session cleared",
       timestamp: new Date().toISOString(),
     });
-    const note = archivePath ? " (archived + consolidating memory)" : "";
-    await msg.reply(`🧹 Session cleared.${note} The next message will start a fresh session with full context.`);
-    return;
+
+    // Nothing after the command → the old behaviour: confirm and wait.
+    if (!clear.remainder && attachments.length === 0) {
+      const note = archivePath ? " (archived + consolidating memory)" : "";
+      await msg.reply(`🧹 Session cleared.${note} The next message will start a fresh session with full context.`);
+      return;
+    }
+
+    // There's a message (and/or files) riding with the command. Signal the
+    // clear with a reaction instead of a second message, then fall through and
+    // handle the remainder as the fresh session's first turn. State is already
+    // reset above, so `shouldResume` below is false and full context loads.
+    msg.react("🧹").catch(() => {}); // best-effort; needs the Add Reactions permission
+    userMessage = clear.remainder;
   }
+
+  // Log the inbound turn now — after any /clear reset above — so it lands in the
+  // fresh transcript rather than the one we just archived.
+  await logTurn({
+    dir: "in",
+    user: msg.author.tag,
+    userId: msg.author.id,
+    channel: msg.channelId,
+    text: userMessage,
+    attachments: attachments.length,
+  });
 
   console.log(`📨 ${msg.author.tag}: ${userMessage.slice(0, 100)}`);
 
@@ -600,7 +625,18 @@ async function handleTurn(msg, userMessage) {
     const shouldResume = state.status === "open" && state.last_session_id && !dreamed;
     const sessionId = shouldResume ? state.last_session_id : null;
 
-    let finalMessage = userMessage;
+    // Files the user sent ride with THIS message, not the session context, so
+    // they reach the turn on a resumed session too (a photo dropped mid-chat is
+    // the common case). Unlike the mail digest below — which is a fresh-session
+    // concern and lives in loadContext — the attachment block attaches to the
+    // message body. When there's no caption, give the turn a short placeholder
+    // so it isn't handed an empty string.
+    const attachBlock = buildAttachmentBlock(attachments);
+    const messageBody = attachBlock
+      ? `${attachBlock}\n\n${userMessage || "(The user sent the file(s) above with no other text.)"}`
+      : userMessage;
+
+    let finalMessage = messageBody;
     if (shouldResume) {
       console.log(`🔄 Resuming session ${sessionId}`);
     } else {
@@ -614,7 +650,7 @@ async function handleTurn(msg, userMessage) {
       // reach messages.jsonl or the memory funnel downstream of it.
       const digest = await drainMailDigest();
       const context = await loadContext(digest);
-      finalMessage = context + userMessage;
+      finalMessage = context + messageBody;
     }
 
     // Run Claude
@@ -677,7 +713,7 @@ async function handleTurn(msg, userMessage) {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 async function loadContext(digest = "") {
-  const today = new Date().toISOString().split("T")[0];
+  const today = easternDate();
 
   // SOUL lives with the agent's tracked config; the rest is personal state.
   // Paths are labelled relative to AGENT_DIR so Alfred can reopen any of these
@@ -686,7 +722,7 @@ async function loadContext(digest = "") {
     { path: path.join(AGENT_DIR, "SOUL.md"), label: "SOUL" },
     { path: path.join(STATE_DIR, "USER.md"), label: "USER" },
     { path: path.join(MEMORIES_DIR, "MEMORY.md"), label: "LONG_TERM_MEMORY" },
-    { path: path.join(MEMORIES_DIR, "dailies", `${today}.md`), label: "DAILY_NOTES" },
+    { path: dailyNotePath(MEMORIES_DIR, today), label: "DAILY_NOTES" },
   ];
 
   let context = "=== SYSTEM CONTEXT START ===\n";
@@ -708,6 +744,37 @@ async function loadContext(digest = "") {
   if (digest) context += `\n${digest}\n`;
   context += "\nUser Message: ";
   return context;
+}
+
+// Download every file attached to an inbound message into that day's folder and
+// return the saved absolute paths, in order. The counterpart to
+// extractAttachments (which sends files out); this is the missing inbound
+// direction. Any type is accepted — this is a single-user, high-trust channel,
+// gated by the ALLOWED_USER_IDS check in messageCreate, so there's no whitelist.
+// A failed download is logged and skipped, never fatal to the turn.
+async function saveInboundAttachments(msg) {
+  if (!msg.attachments || msg.attachments.size === 0) return [];
+
+  const dir = dailyDir(MEMORIES_DIR);
+  await mkdir(dir, { recursive: true });
+
+  const saved = [];
+  let i = 0;
+  for (const att of msg.attachments.values()) {
+    const dest = path.join(dir, attachmentName(msg.id, i, att.name));
+    try {
+      const res = await fetch(att.url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const buf = Buffer.from(await res.arrayBuffer());
+      await writeFile(dest, buf);
+      saved.push(dest);
+      console.log(`📎 Saved inbound attachment → ${agentRel(dest)} (${buf.length} bytes)`);
+    } catch (err) {
+      console.error(`⚠️  Couldn't download attachment ${att.name}: ${err.message}`);
+    }
+    i++;
+  }
+  return saved;
 }
 
 function splitMessage(text, maxLen) {

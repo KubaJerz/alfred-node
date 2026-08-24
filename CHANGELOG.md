@@ -32,6 +32,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
   message, import/remove an invite) and its own token, so it cannot read mail,
   send, or touch Alfred's routes. Off unless a webhook, labels, or owner
   addresses are set; unconfigured, mail buffers for the digest exactly as tier 1.
+- **`/c` (and `/clear`) now takes a message inline.** The command used to be an
+  exact match — you cleared, waited for the "Session cleared" reply, then sent
+  your question as a second message. It's now a **prefix**: `/c` alone still
+  clears and waits, but `/c <text>` clears *and* runs `<text>` as the fresh
+  session's first turn, so one message both resets and asks. The clear is
+  acknowledged with a 🧹 reaction instead of a second message, and a file sent
+  with `/c` (even captionless) rides into the fresh turn too. The parse lives in
+  a small pure module (`commands.js`, unit-tested); a word boundary keeps
+  look-alikes like `/create` from matching. The inbound turn is now logged
+  *after* the clear archives the transcript, so the new message lands in the
+  fresh note rather than the one it just ended.
+- **Alfred can receive files, not just send them.** A message with attachments
+  used to be dropped whenever it had no text (`msg.attachments` was never read);
+  now every attached file — any type — is downloaded into that day's folder and
+  its path is handed to the turn in an `[ATTACHMENTS]` block, which Alfred opens
+  with its Read tool. The block rides on the message, so a file dropped into an
+  ongoing (resumed) conversation reaches that turn too. Single-user, high-trust
+  channel (gated by `ALLOWED_USER_IDS`), so no type whitelist. Voice notes stay a
+  separate future item, sharing only this download path. (#40)
 - **Inbound mail reaches Alfred over Pub/Sub (tier 1 — buffer silently).**
   `bot.js` registers a Gmail `users.watch()` on the INBOX and drains change
   notifications from a **pull** subscription (`google/gmail-push.js`), so no
@@ -147,6 +166,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
   The line is reversibility, not the verb.
 
 ### Changed
+- **Dailies are one folder per day, not one file.** `dailies/YYYY-MM-DD.md`
+  became `dailies/YYYY-MM-DD/daily.md`, and that folder now also holds any files
+  the user sent that day, so pruning a day is one `rm -rf` and a day's note and
+  its attachments age together. This names the tiers explicitly: `MEMORY.md` is
+  curated long-term memory, the dailies are daily *context* — which is why
+  arbitrary files live there and never in `MEMORY.md`.
+  `scripts/migrate-dailies-to-folders.sh` moves existing flat notes over
+  (idempotent). (#40)
 - **Deleting an event that has guests is refused.** Google's documentation says
   of the notification controls that "some emails might still be sent even if you
   set the value to false", so on an event with attendees, cancellation mail
@@ -160,6 +187,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
   invite anyone" holds even if Alfred asks for it or never read the rules.
 
 ### Fixed
+- **The daily note keyed on two different dates.** `loadContext` computed
+  "today" in UTC while `dream.sh` used the box's local time, so near midnight
+  they could pick different notes — a turn seeded with one day's note while the
+  pass consolidated another. Everything now keys on Eastern (`America/New_York`,
+  DST-aware) through one helper, so the note a turn reads and the note the pass
+  writes are always the same day. (#40)
+- **The nightly dreaming pass never ran — `MEMORY.md` sat empty for months.**
+  `dream.sh` fires at 03:00 and consolidated *that calendar day's* note, but
+  daily notes are written through the day (afternoon/evening), so at 3am the
+  note keyed on `TODAY` did not exist yet and the guard `exit`ed before `claude`
+  was ever invoked. The log shows 40+ consecutive "No notes for today,
+  skipping"; long-term `MEMORY.md` never left its placeholder line and no
+  `last-dream` stamp was ever written, despite a dozen `<!-- PROMOTE -->` tags
+  waiting. It now targets *yesterday's* note (`date -d yesterday`) — complete
+  and present at 3am. The already-written dailies were never consolidated, so
+  that backlog is handled as a one-off, separate from this fix.
 - **Personal state at the repo root no longer only warns — it blocks the commit.**
   The pre-commit guard recognized Alfred's state names (`memories/`, `logs/`,
   `state.json`, …) appearing at the repo root, outside the one `.gitignore` rule

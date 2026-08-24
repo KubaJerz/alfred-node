@@ -10,12 +10,62 @@ and move to **Done** with the PR number. Anything with a GitHub issue links to i
 
 ## Now
 
-### Integrations — give Alfred hands
+### Keeping context live
 
-Google access is live as of #25: OAuth consented, credentials held by a broker in
-`bot.js`, and `bin/gmail.js` / `bin/gcal.js` as the agent-facing CLIs, each paired
-with a skill under `agent/.claude/skills/`. What follows is what's left rather
-than what's missing.
+- [ ] **A change bus — everything publishes, Alfred subscribes and drains per
+      turn.** _Top priority._ Alfred's context is a snapshot taken **once**, at
+      fresh-session start: `loadContext` injects `MEMORY.md` + today's daily note
+      (+ mail) only on the new-session branch of `handleTurn`; a **resumed**
+      session re-injects nothing (`finalMessage = messageBody`). So anything that
+      changes on disk *after* the session starts — buffered mail, a file a command
+      just wrote, a freshly-appended memory line, exercise data — is invisible to
+      the live thread until it restarts (`/clear`, a dream, or the day's first
+      message). Throwing away the conversation just to see a new file is the whole
+      annoyance. Proof it already bites: `drainMailDigest()` runs only on the
+      fresh branch, so tier-1 mail waits for a restart even though it was *meant*
+      to surface on the next real turn.
+
+      **The design is an internal pub/sub — the same shape as the Gmail one, one
+      layer in.** Everything that can change *publishes* a small event to one
+      queue: "mail arrived from X", "wrote `var/.../run-2026-08-24.json`",
+      "`MEMORY.md` gained a line", "the metrics command reran". Alfred is the
+      *subscriber*: at the top of **every** turn — resumed or fresh — he drains
+      everything published since the last turn into a delimited context block,
+      then clears it. **Empty queue → nothing injected: no block, no added tokens,
+      no thinking.** The common case costs nothing, which is what makes it safe to
+      run on every turn. Producers don't know or care whether a session is open —
+      they publish and move on.
+
+      **Two refinements worth keeping:**
+      - **Notify by path, not by value.** An event is "`x` changed — read it if
+        this turn needs it," not the file's contents. Small, always-current, and
+        Alfred pulls the live version with his Read tool. Same move as the
+        `[ATTACHMENTS]` block handing a path instead of bytes.
+      - **New vs. rewrite decides the channel.** *Additive* artifacts (new mail, a
+        new data file) inject safely into the live session. *In-place rewrites* of
+        already-loaded context (`MEMORY.md` edited by the dream pass) do **not** —
+        the stale copy is still in his context and may win — so those keep forcing
+        a fresh session (`dreamedSince`), as today. Rule: **new → publish;
+        edited-in-place → restart.**
+
+      **Mechanics.** `claude -p --resume` has no channel but the prompt — there is
+      no system-append mid-session — so a drained event becomes a block prepended
+      to the next message, framed so Alfred reads it as ambient context, not as
+      the user speaking. Drain-and-clear: once injected an event lives in the
+      transcript, so re-injecting only duplicates. On a *fresh* session the queue
+      is drained-and-**discarded** — `loadContext` already reloaded the current
+      files, so the events are redundant there; the queue only ever covers the gap
+      *between* restarts.
+
+      **This subsumes the tier-1 mail buffer:** mail stops being a special case
+      and becomes the first producer on the bus. **Traps:** coalesce bursts (a
+      cron that writes ten files is one event, not ten); never emit an empty block;
+      and keep the payload a delta, never the whole world.
+
+### Security — isolate Alfred, and push risky work onto their own agents
+
+The #2 priority. Two halves of one idea: give Alfred a hard boundary, and hand
+risky jobs to small least-privilege agents instead of widening his reach.
 
 - [ ] **Run the agent as a separate Unix user.** This is what turns the broker
       from a strong default into a guarantee. Alfred currently runs as the same
@@ -25,6 +75,70 @@ than what's missing.
       survive Bash. Needs: a second user with its own authenticated Claude Code,
       a NOPASSWD sudoers rule, `chmod 700` on the credentials dir, and group
       sharing so memories stay writable.
+
+- [ ] **Separate agents for the risky work — Ronnie is the first.** _🚧 In
+      progress on `feat/ronnie-triage`._ Ronnie is a *distinct* agent that triages
+      inbound mail with Haiku over the Pub/Sub subscription — its own narrow
+      broker (label + invite import/remove only), a DKIM-authenticated forward
+      gate, an `.ics` parser, and a cost meter, none of it sharing Alfred's
+      reach. The pattern is the point: when a job needs a model but not Alfred's
+      full toolset, it gets its own bounded agent instead of a new power on his.
+      This is the *separate-agents* half of the security direction; the
+      *separate-user* item above is the isolation half.
+
+### Workout database
+
+- [ ] **Garmin connection + a workout database.** _🚧 In progress — branch
+      `feat/intervals-icu` scaffolded. The route being tried is **intervals.icu**
+      rather than Garmin direct: it exposes an official API and already ingests
+      Garmin/Strava, which sidesteps the no-official-API problem below._ Pull activities (runs, lifts,
+      HR, sleep) from Garmin into a store under `agent/var/` that Alfred can
+      query — "how far did I run this week", "am I recovered enough to train".
+      Open first: **Garmin has no official consumer API** (the Health/Activity
+      APIs are a partner program), so the practical route is an unofficial client
+      against Garmin Connect, which breaks when they change the site. Then the
+      schema — what one workout row is — and nightly pull vs. on-demand. ("galin"
+      in the ask; read as Garmin — correct if wrong.)
+
+### Voice
+
+- [ ] **Voice messages → text.** Discord voice notes are Ogg/Opus attachments.
+      The download primitive now exists (#40), so this reuses it and adds only its
+      own trigger (the `IsVoiceMessage` flag) and transcription. Transcribe
+      locally: audio is a different privacy category than text.
+
+      **Model: NVIDIA Parakeet-TDT-0.6B, via ONNX rather than NeMo** (Kuba,
+      2026-08-04). NeMo's dependency tree is built for GPU training; the int8
+      ONNX export is ~1 GB on `onnxruntime`.
+
+      *Whisper considered and not taken.* It is genuinely smaller — `tiny.en`
+      39 M, `base.en` 74 M, `small.en` 244 M against Parakeet's 600 M — and
+      `pip install faster-whisper` is far less install friction than community
+      ONNX exports. Three things outweighed that: RAM and disk aren't scarce
+      here (62 GB / 415 GB free), so a 1 GB model costs nothing; Whisper pads
+      every clip to a **fixed 30 s window**, so a 4-second note costs the same
+      as a 30-second one and the size advantage largely evaporates on exactly
+      the clips we'd send; and its silence-hallucination is worst at `tiny`/
+      `base`, which is the wrong failure mode for a transcript that *takes
+      actions*. Revisit only if the ONNX route proves unworkable — the
+      transcriber sits behind a `path -> text` call, so swapping it is cheap.
+
+      **This box is CPU-only** — no GPU, i7-8700 (6c/12t, AVX2, no VNNI), so
+      int8 buys ~1.5–2× not 4×: quantize for footprint, not speed. Estimated
+      RTF ~0.1 — 10 s note ≈ 1–2 s, 30 s ≈ 3–5 s, plus 1–2 s model load once
+      the file is in page cache. Unmeasured, and estimates on 2017 silicon run
+      optimistic; time it before designing around it. Either way it's small
+      next to a 10–30 s `claude -p` turn, so don't build streaming up front.
+
+      Needs `ffmpeg` (not installed) to decode Opus → 16 kHz mono PCM.
+
+      The transcript becomes the user message; Alfred never learns it was
+      spoken. One guard: echo what was heard when the turn takes an action — a
+      misheard "cancel Thursday's meeting" otherwise acts on the mishearing.
+
+## Next
+
+### Mail & calendar — the rest of the Pub/Sub arc
 
 - [ ] **Gmail → Alfred via Pub/Sub.** _Tier 1 is built (branch
       `feat/gmail-pubsub`, PR pending) — see the Done entry for what shipped.
@@ -219,22 +333,36 @@ than what's missing.
       what was added to Discord either way, so a bad parse is visible the same
       day rather than at the meeting.
 
-## Next
+### Reliability — nightly jobs that fail at 3am
 
-- [ ] **Read inbound attachments.** `bot.js:467` takes `msg.content` and nothing
-      else — `msg.attachments` is never touched, so every file sent to Alfred is
-      silently dropped. Outbound already works (`extractAttachments`, the
-      `{img:}` tokens); this is the missing direction. Download to `agent/var/`,
-      hand the path to the turn. Pays off well beyond voice — whiteboard photos,
-      PDFs, a forwarded `.ics`. **Prerequisite for voice messages below.**
-- [ ] **Tiered memory (L1/L2).** `agent/var/memories/MEMORY.md` is injected into
-      every new session; it's empty today, but the split plan is already noted in
-      that file's header (issue #8). Do it when size actually becomes a problem.
+- [ ] **Scheduled-job health — flag failures, and recycle where safe.** `bot.js`
+      is supervised (`start-alfred.sh` restarts it on crash with backoff); cron
+      jobs are not. `dream.sh` fires at 3am and fails silently on a bad night —
+      and worse, it stamps `last-dream` **unconditionally**, so a *failed* pass
+      marks itself done and the next session trusts memory that was never
+      written. As nightly jobs multiply (dream, the workout pull, Ronnie, mail
+      sync) the blind spots multiply with them.
+
+      Two wants:
+      - **Report.** A failed job publishes a failure event that `bot.js` surfaces
+        to Discord. This *is* the change bus aimed at failures instead of new
+        files, and the proactive-auth-check item (below) is one instance of it.
+        Cron can't reach Discord — only `bot.js` holds the client — so the job
+        leaves a marker and the bot drains it, same as any other producer.
+      - **Recycle.** Retry with backoff, or catch up a *missed* run (the dream
+        off-by-one fix was a hand-rolled, one-off version of this).
+
+      Do it in one pass, not piecemeal. First casualty to fix: jobs marking
+      themselves done on failure (the `last-dream` stamp). Shape: a thin wrapper
+      every scheduled job runs under — run the job, and on non-zero exit publish
+      the failure and decide retry-vs-defer — rather than each job hand-rolling
+      its own.
 
 ## Someday / Maybe
 
-### New integration ideas (Kuba, 2026-08-12 — unscoped, capture-only)
-
+- [ ] **Tiered memory (L1/L2).** `agent/var/memories/MEMORY.md` is injected into
+      every new session; it's empty today, but the split plan is already noted in
+      that file's header (issue #8). Do it when size actually becomes a problem.
 - [ ] **Give Alfred a phone number.** A number he can text — and be texted at —
       so he reaches Kuba outside Discord: reminders and nudges over a channel
       that's open even when Discord isn't. Settle the provider first, because it
@@ -243,55 +371,12 @@ than what's missing.
       an unofficial route that can break; Twilio is the friction-free alternative
       if "Google" isn't load-bearing. Inbound texts would ride the same
       buffer-vs-turn tiering as the Pub/Sub mail path.
-- [ ] **Garmin connection + a workout database.** Pull activities (runs, lifts,
-      HR, sleep) from Garmin into a store under `agent/var/` that Alfred can
-      query — "how far did I run this week", "am I recovered enough to train".
-      Open first: **Garmin has no official consumer API** (the Health/Activity
-      APIs are a partner program), so the practical route is an unofficial client
-      against Garmin Connect, which breaks when they change the site. Then the
-      schema — what one workout row is — and nightly pull vs. on-demand. ("galin"
-      in the ask; read as Garmin — correct if wrong.)
 - [ ] **Food logging + a database.** Let Kuba log meals to Alfred (a Discord line
       first, a photo later) and keep them queryable — what and when, ideally
       calories/macros. Two open questions: the schema, and whether Alfred
       *estimates* nutrition from a description (a model in the loop, proposing
       rather than recording as fact) or looks it up against a food database. Photo
-      input rides on **Read inbound attachments** (Next).
-
-### Later integrations (Kuba, 2026-08-02 — explicitly "for later")
-
-- [ ] **Voice messages → text.** Discord voice notes are Ogg/Opus attachments,
-      so this is blocked on inbound attachments (**Next**). Transcribe locally:
-      audio is a different privacy category than text.
-
-      **Model: NVIDIA Parakeet-TDT-0.6B, via ONNX rather than NeMo** (Kuba,
-      2026-08-04). NeMo's dependency tree is built for GPU training; the int8
-      ONNX export is ~1 GB on `onnxruntime`.
-
-      *Whisper considered and not taken.* It is genuinely smaller — `tiny.en`
-      39 M, `base.en` 74 M, `small.en` 244 M against Parakeet's 600 M — and
-      `pip install faster-whisper` is far less install friction than community
-      ONNX exports. Three things outweighed that: RAM and disk aren't scarce
-      here (62 GB / 415 GB free), so a 1 GB model costs nothing; Whisper pads
-      every clip to a **fixed 30 s window**, so a 4-second note costs the same
-      as a 30-second one and the size advantage largely evaporates on exactly
-      the clips we'd send; and its silence-hallucination is worst at `tiny`/
-      `base`, which is the wrong failure mode for a transcript that *takes
-      actions*. Revisit only if the ONNX route proves unworkable — the
-      transcriber sits behind a `path -> text` call, so swapping it is cheap.
-
-      **This box is CPU-only** — no GPU, i7-8700 (6c/12t, AVX2, no VNNI), so
-      int8 buys ~1.5–2× not 4×: quantize for footprint, not speed. Estimated
-      RTF ~0.1 — 10 s note ≈ 1–2 s, 30 s ≈ 3–5 s, plus 1–2 s model load once
-      the file is in page cache. Unmeasured, and estimates on 2017 silicon run
-      optimistic; time it before designing around it. Either way it's small
-      next to a 10–30 s `claude -p` turn, so don't build streaming up front.
-
-      Needs `ffmpeg` (not installed) to decode Opus → 16 kHz mono PCM.
-
-      The transcript becomes the user message; Alfred never learns it was
-      spoken. One guard: echo what was heard when the turn takes an action — a
-      misheard "cancel Thursday's meeting" otherwise acts on the mishearing.
+      input rides on **Read inbound attachments** (shipped, #40).
 - [ ] **Proactive auth health check.** Auth lapses are now caught on the turn
       they happen (#20), but not before. A probe on boot was deliberately
       skipped: it would run inside the launcher's restart loop. A once-daily
@@ -321,6 +406,22 @@ than what's missing.
 
 ## Done
 
+- [x] ~~**Read inbound attachments — and the day-folder + Eastern-date arc it
+      pulled in.**~~ Alfred was send-only: a message with files but no caption hit
+      `if (!userMessage) return` and was dropped, `msg.attachments` never read.
+      Now any file (no type whitelist — single-user, high-trust, gated by
+      `ALLOWED_USER_IDS`) downloads into that day's folder and its path reaches
+      the turn in an `[ATTACHMENTS]` block, on the **message body** so it survives
+      a resumed session (a photo mid-chat). Two changes rode along because the
+      storage location forced them: dailies went from `YYYY-MM-DD.md` to
+      **one folder per day** (`YYYY-MM-DD/daily.md` + that day's files, so a prune
+      is one `rm -rf` and the tiers are named — `MEMORY.md` is memory, dailies are
+      *context*, which is why binaries belong there); and every "day" now keys on
+      **Eastern** (`America/New_York`, DST-aware) through one helper (`dailies.js`),
+      which also fixed a latent bug where `loadContext` (UTC) and `dream.sh`
+      (local) disagreed near midnight. `scripts/migrate-dailies-to-folders.sh`
+      moves existing notes over. Pure logic unit-tested; cron unchanged (3am
+      Eastern). Voice stays separate, sharing only the download primitive. (#40)
 - [x] ~~**Personal memory state was loose at the repo root.**~~ A daily note
       (`memories/dailies/2026-08-11.md`) sat at the repo root, outside the one
       `.gitignore` rule that guards `agent/var/`. Moved it back under
