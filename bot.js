@@ -491,6 +491,16 @@ client.on("messageCreate", async (msg) => {
     return;
   }
 
+  // Ronnie metrics: "/ronnie-metrics" renders the Haiku cost figure into today's
+  // daily folder and posts it back. Handled here, not as a turn — it just runs a
+  // script and attaches a PNG.
+  if (/^\/?ronnie-metrics\b/i.test(userMessage)) {
+    await runRonnieMetrics(msg).catch((err) =>
+      msg.reply(`Couldn't build Ronnie metrics: ${err.message}`).catch(() => {})
+    );
+    return;
+  }
+
   // Log the inbound turn (user → bot) before anything else, so the transcript
   // reflects arrival order even if the turn then waits its place in the queue.
   await logTurn({
@@ -507,6 +517,41 @@ client.on("messageCreate", async (msg) => {
   }
   await enqueueTurn(() => handleTurn(msg, userMessage));
 });
+
+// Build Ronnie's Haiku cost figure and post it. Writes the PNG into today's
+// daily folder (so Alfred can surface it) and drops a one-line breadcrumb in the
+// daily note. The matplotlib script lives in scripts/; point RONNIE_PYTHON at an
+// interpreter that has matplotlib, else it falls back to `python3`.
+async function runRonnieMetrics(msg) {
+  const today = new Date().toISOString().split("T")[0];
+  const usageFile = path.join(STATE_DIR, "ronnie-usage.jsonl");
+  const dailyDir = path.join(MEMORIES_DIR, "dailies");
+  const outPng = path.join(dailyDir, `ronnie-metrics-${today}.png`);
+  const script = path.join(REPO_DIR, "scripts", "ronnie-metrics.py");
+  const py = process.env.RONNIE_PYTHON || "python3";
+  await mkdir(dailyDir, { recursive: true });
+
+  const summary = await new Promise((resolve, reject) => {
+    const child = spawn(py, [script, usageFile, outPng], { stdio: ["ignore", "pipe", "pipe"] });
+    let out = "";
+    let err = "";
+    child.stdout.on("data", (d) => (out += d));
+    child.stderr.on("data", (d) => (err += d));
+    child.on("error", reject);
+    child.on("close", (code) =>
+      code === 0 ? resolve(out.trim()) : reject(new Error(err.trim().slice(0, 300) || `exited ${code}`))
+    );
+  });
+
+  if (existsSync(outPng)) {
+    // A breadcrumb in the daily note so Alfred can mention it; best-effort.
+    await appendFile(path.join(dailyDir, `${today}.md`), `\n- 📊 Ronnie Haiku metrics: ${summary}\n`).catch(() => {});
+    await msg.reply({ content: summary, files: [new AttachmentBuilder(outPng)] });
+  } else {
+    // Empty log — the script prints a message and writes no PNG.
+    await msg.reply(summary || "No Ronnie usage recorded yet.");
+  }
+}
 
 // One turn at a time, in arrival order. Everything below reads and writes the
 // single global state.json, so overlapping turns would resume the same session
