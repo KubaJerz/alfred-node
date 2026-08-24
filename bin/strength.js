@@ -9,7 +9,7 @@
 //   node ../bin/strength.js digest [--from DATE] [--to DATE]   pull + interpret new workouts
 //   node ../bin/strength.js load [--muscle M]                  current 7d/28d load + ACWR
 //   node ../bin/strength.js sets <activityId>                  one workout's interpreted sets
-//   node ../bin/strength.js plot [--muscle M] [--days N]       render the rolling-load figure
+//   node ../bin/strength.js plot                               render the strength dashboard PNG
 //
 // `digest` is the slow one (it runs the Haiku interpreter, ~2 min/workout), so it
 // is normally run nightly in the background; the others are instant DB reads.
@@ -65,9 +65,10 @@ const HELP = {
   plot: {
     use: "plot",
     detail: [
-      "Render the rolling-load figure to a PNG and print its path. Two stacked",
-      "panels — last 30 days and last 90 days — each plotting the 7-day acute load",
-      "for all six muscle groups, so one image shows the whole picture.",
+      "Render the strength dashboard to a PNG and print its path. One dark mobile",
+      "card: whole-body ACWR against a detrain→build→spike band, a per-muscle",
+      "breakdown (30-day acute sparkline + ACWR mini-band per muscle), and the",
+      "90-day total-load chart with trend tiles — the whole picture in one image.",
       "",
       "Drawn with matplotlib (needs python + matplotlib on the host). To send it to",
       "Kuba, include {img:<path>} in your Discord reply — bot.js attaches the file",

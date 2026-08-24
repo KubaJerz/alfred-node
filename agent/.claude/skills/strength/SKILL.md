@@ -8,7 +8,7 @@ description: Kuba's lifting — his strength workouts from Garmin, and the rolli
     digest [--from DATE] [--to DATE]   pull + interpret new lifting workouts
     load [--muscle M]                  current 7-day / 28-day load + ACWR
     sets <activityId>                  one workout's interpreted sets
-    plot [--muscle M] [--days N]       render the rolling-load figure (PNG)
+    plot                               render the strength dashboard (PNG)
 
 `node ../bin/strength.js <command> --help` for one command in full. The rest of
 this file is what `--help` can't tell you.

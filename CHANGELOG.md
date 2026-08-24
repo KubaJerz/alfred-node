@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [SemVer](https://semver.org/).
 
 ## [Unreleased]
+
+## [2.9.0] - 2026-08-24
 ### Added
 - **Strength load tracking — Garmin lifting → rolling per-muscle load.** A new
   `strength/` subsystem and `strength` skill turn Garmin strength workouts into
@@ -19,8 +21,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
   the numbers stay exact; load is assist-scaled `Σ factor × reps × lb` (a pulldown
   half-credits biceps), exposed as 7-/28-day ACWR and a 14-day trend per muscle.
   `bin/strength.js` gives Alfred `digest` (pull + interpret, nightly via
-  `dream.sh` and on-command), `load`, `sets`, and `plot` (a two-panel matplotlib
-  figure — 30- and 90-day 7-day-acute load per muscle — Alfred sends via `{img:}`). An optional `STRENGTH_LOG_CHANNEL` captures Discord
+  `dream.sh` and on-command), `load`, `sets`, and `plot` (a dark mobile
+  dashboard PNG — whole-body ACWR against a detrain→build→spike band, a
+  per-muscle breakdown with 30-day acute sparklines, and the 90-day total-load
+  chart — rendered in matplotlib and sent via `{img:}`). An optional
+  `STRENGTH_LOG_CHANNEL` captures Discord
   workout notes immutably to feed the interpreter. Off unless `INTERVALS_API_KEY`
   is set. Design: `docs/strength-load-design.md`.
 - **Alfred can read training and wellness data from Intervals.icu.** An

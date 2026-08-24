@@ -1,8 +1,8 @@
 // The figure Alfred sends. The drawing is matplotlib (strength/plot.py) — this
 // module is the bridge: it makes sure the analytic views exist in the DB file,
-// then spawns Python to render a two-panel PNG (30-day and 90-day acute load per
-// muscle). Python reads the same v_rolling view the CLI reports from, so there is
-// one source of truth for the numbers.
+// then spawns Python to render the strength dashboard PNG (whole-body ACWR, a
+// per-muscle breakdown, and the 90-day total-load chart). Python reads the same
+// v_rolling view the CLI reports from, so there is one source of truth.
 
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
