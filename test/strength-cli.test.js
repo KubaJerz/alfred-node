@@ -9,6 +9,7 @@ import { mkdtempSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { plotAvailable } from "../strength/plot.js";
 
 const BIN = fileURLToPath(new URL("../bin/strength.js", import.meta.url));
 let dir;
@@ -51,11 +52,13 @@ test("sets prints a workout's interpreted sets in pounds", async () => {
   assert.match(r.o, /180 lb/);
 });
 
-test("plot writes a PNG and prints an {img:} hint for Alfred", async () => {
-  const r = await run(["plot", "--muscle", "chest"]);
+test("plot writes a PNG and prints an {img:} hint for Alfred", {
+  skip: plotAvailable() ? false : "python/matplotlib not available here",
+}, async () => {
+  const r = await run(["plot"]);
   assert.equal(r.code, 0, r.e);
-  assert.match(r.o, /\{img:.*strength-chest\.png\}/);
-  assert.ok(existsSync(path.join(dir, "strength-chest.png")), "plot did not write the PNG");
+  assert.match(r.o, /\{img:.*strength-load\.png\}/);
+  assert.ok(existsSync(path.join(dir, "strength-load.png")), "plot did not write the PNG");
 });
 
 test("--help exits 0 and names the tool", async () => {

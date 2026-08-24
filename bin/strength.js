@@ -18,12 +18,14 @@ import { parseFlags, fail, help, wantsHelp, flaggedHelp, call } from "./lib/brok
 import { openDb } from "../strength/db.js";
 import { digest } from "../strength/digest.js";
 import { currentLoad } from "../strength/views.js";
-import { renderLoadPlot, muscleLabel } from "../strength/plot.js";
+import { renderLoadPlot } from "../strength/plot.js";
 
 const [action, ...args] = process.argv.slice(2);
 const { flags, rest } = parseFlags(args);
 
 const n = (v) => (v == null ? "—" : Number(v).toLocaleString());
+const muscleLabel = (m) =>
+  m === "_total" ? "Whole body" : m === "back" ? "Whole back" : m === "legs" ? "Whole legs" : m[0].toUpperCase() + m.slice(1);
 
 const HELP = {
   digest: {
@@ -61,14 +63,15 @@ const HELP = {
     ],
   },
   plot: {
-    use: "plot [--muscle M] [--days N]",
+    use: "plot",
     detail: [
-      "Render the rolling-load figure to a PNG and print its path. Shows the 7-day",
-      "acute line over the 28-day chronic base with the current ACWR. Default is",
-      "whole body over 90 days; --muscle picks one.",
+      "Render the rolling-load figure to a PNG and print its path. Two stacked",
+      "panels — last 30 days and last 90 days — each plotting the 7-day acute load",
+      "for all six muscle groups, so one image shows the whole picture.",
       "",
-      "To send it to Kuba, include {img:<path>} in your Discord reply — bot.js",
-      "attaches the file and strips the token.",
+      "Drawn with matplotlib (needs python + matplotlib on the host). To send it to",
+      "Kuba, include {img:<path>} in your Discord reply — bot.js attaches the file",
+      "and strips the token.",
     ],
   },
 };
@@ -132,11 +135,8 @@ async function main() {
     }
 
     case "plot": {
-      const db = openDb();
-      const muscle = flags.muscle || "_total";
-      const out = renderLoadPlot(db, { muscle, days: Number(flags.days) || 90 });
-      db.close();
-      console.log(`Saved ${muscleLabel(muscle)} rolling-load plot → ${out}`);
+      const out = renderLoadPlot({});
+      console.log(`Saved rolling-load figure → ${out}`);
       console.log(`Send it by putting {img:${out}} in your reply.`);
       break;
     }
