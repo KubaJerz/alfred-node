@@ -161,6 +161,9 @@ async function enrich(gmail, id) {
       subject: h.subject || "",
       snippet: r.data.snippet || "",
       body: extractBody(p),
+      // Gmail's own category labels (CATEGORY_PROMOTIONS/SOCIAL/…) — a free bulk
+      // signal the prefilter reads before spending a Haiku call.
+      labelIds: r.data.labelIds || [],
       headers: {
         "list-id": h["list-id"],
         "list-unsubscribe": h["list-unsubscribe"],

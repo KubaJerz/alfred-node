@@ -19,8 +19,8 @@ const AGENT_DIR = process.env.AGENT_DIR || path.join(REPO_DIR, "agent");
 const STATE_DIR = process.env.STATE_DIR || path.join(AGENT_DIR, "var");
 const USAGE_FILE = path.join(STATE_DIR, "ronnie-usage.jsonl");
 
-// USD per million tokens. Ballpark defaults — set the env vars from current
-// pricing. Kept as separate in/out rates because output is the pricier half.
+// USD per million tokens — the official Haiku 4.5 API rates ($1 in / $5 out),
+// used to estimate an API-equivalent cost. Override via env if the rate changes.
 const IN_RATE = Number(process.env.RONNIE_HAIKU_IN_RATE) || 1.0;
 const OUT_RATE = Number(process.env.RONNIE_HAIKU_OUT_RATE) || 5.0;
 
@@ -57,9 +57,11 @@ export function makeMeter({
       const rows = await readRows(file);
       const inTokens = rows.reduce((s, r) => s + (r.in || 0), 0);
       const outTokens = rows.reduce((s, r) => s + (r.out || 0), 0);
-      // Prefer the CLI's own reported cost when present; else estimate from rates.
-      const reported = rows.reduce((s, r) => s + (r.cost || 0), 0);
-      const estUSD = reported > 0 ? reported : cost(inTokens, outTokens, inRate, outRate);
+      // Always an ESTIMATE at the official Haiku API token rates. There is no real
+      // bill on a subscription, so this answers "what would these tokens cost via
+      // the API" — the honest, comparable number, not claude -p's own figure
+      // (which folds in Claude Code's system-prompt overhead).
+      const estUSD = cost(inTokens, outTokens, inRate, outRate);
       return { calls: rows.length, inTokens, outTokens, estUSD: Number(estUSD.toFixed(4)) };
     },
 

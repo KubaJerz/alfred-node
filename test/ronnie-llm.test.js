@@ -53,15 +53,10 @@ test("haiku fails open to personal when the runner throws", async () => {
 });
 
 // ── Meter ─────────────────────────────────────────────────────────────────
-test("meter prefers the CLI's reported cost, else estimates from rates", async () => {
-  const est = makeMeter({ file: tmpFile(), inRate: 1, outRate: 5 });
-  await est.record({ input_tokens: 1_000_000, output_tokens: 200_000 });
-  assert.equal((await est.summarize()).estUSD, 2.0); // 1M@$1 + 200k@$5
-
-  const rep = makeMeter({ file: tmpFile() });
-  await rep.record({ input_tokens: 10, output_tokens: 2, cost: 0.01 });
-  await rep.record({ input_tokens: 10, output_tokens: 2, cost: 0.02 });
-  assert.equal((await rep.summarize()).estUSD, 0.03); // sum of reported
+test("meter estimates cost at the official token rates ($1 in / $5 out)", async () => {
+  const m = makeMeter({ file: tmpFile(), inRate: 1, outRate: 5 });
+  await m.record({ input_tokens: 1_000_000, output_tokens: 200_000, cost: 99 }); // reported cost ignored
+  assert.equal((await m.summarize()).estUSD, 2.0); // 1M@$1 + 200k@$5, not 99
 });
 
 test("meter callsToday counts only today's calls", async () => {
