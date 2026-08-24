@@ -100,10 +100,86 @@ async function fetchMeta(gmail, id) {
   }
 }
 
+// Every value for a header name. Authentication-Results can appear more than
+// once (one per authserv), and headerMap() would collapse those to the last —
+// so the DKIM gate reads the raw list from here, not the map.
+function headerValues(payload, name) {
+  const lower = name.toLowerCase();
+  return (payload?.headers || []).filter((h) => h.name.toLowerCase() === lower).map((h) => h.value);
+}
+
+// The first text/plain body, for the code screen. Not persisted.
+function extractBody(payload, depth = 0) {
+  if (!payload || depth > 8) return "";
+  if (payload.mimeType === "text/plain" && payload.body?.data) {
+    return Buffer.from(payload.body.data, "base64url").toString("utf8");
+  }
+  for (const part of payload.parts || []) {
+    const found = extractBody(part, depth + 1);
+    if (found) return found;
+  }
+  return "";
+}
+
+// The first text/calendar part as text, fetching the attachment body when it
+// isn't inline. Null if the message carries no invite.
+async function findICS(gmail, messageId, payload, depth = 0) {
+  if (!payload || depth > 8) return null;
+  if (/^text\/calendar/i.test(payload.mimeType || "")) {
+    let data = payload.body?.data;
+    if (!data && payload.body?.attachmentId) {
+      const att = await gmail.users.messages.attachments.get({
+        userId: "me",
+        messageId,
+        id: payload.body.attachmentId,
+      });
+      data = att.data.data;
+    }
+    if (data) return Buffer.from(data, "base64url").toString("utf8");
+  }
+  for (const p of payload.parts || []) {
+    const found = await findICS(gmail, messageId, p, depth + 1);
+    if (found) return found;
+  }
+  return null;
+}
+
+// A richer view of a message, for Ronnie (full fetch, token side only). Adds the
+// grep headers, the DKIM verdict, and the .ics to what fetchMeta returns. The
+// body and snippet ride along for the code screen but are never persisted — the
+// queue keeps only from/subject (see drainHistory). Used only when a processor
+// is wired; otherwise the drain stays on the cheaper metadata fetch.
+async function enrich(gmail, id) {
+  try {
+    const r = await gmail.users.messages.get({ userId: "me", id, format: "full" });
+    const p = r.data.payload;
+    const h = headerMap(p);
+    return {
+      id: r.data.id,
+      ts: r.data.internalDate ? Number(r.data.internalDate) : null,
+      from: h.from || "",
+      subject: h.subject || "",
+      snippet: r.data.snippet || "",
+      body: extractBody(p),
+      headers: {
+        "list-id": h["list-id"],
+        "list-unsubscribe": h["list-unsubscribe"],
+        precedence: h.precedence,
+        "auto-submitted": h["auto-submitted"],
+      },
+      authResults: headerValues(p, "Authentication-Results"),
+      ics: await findICS(gmail, id, p),
+    };
+  } catch (err) {
+    if (err?.code === 404 || err?.response?.status === 404) return null;
+    throw err;
+  }
+}
+
 // Walk history from our stored cursor, buffer safe new mail, advance the cursor.
 // Returns a small summary for logging. Throws only on unexpected errors; a stale
 // cursor (404) is handled here as a resync rather than propagated.
-export async function drainHistory(gmail, { log = console.log } = {}) {
+export async function drainHistory(gmail, { log = console.log, processor = null } = {}) {
   const { historyId: startHistoryId } = await readSync();
   if (!startHistoryId) {
     // No baseline yet (watch never registered) — nothing sane to list from.
@@ -154,23 +230,40 @@ export async function drainHistory(gmail, { log = console.log } = {}) {
   let added = 0;
   let withheld = 0;
   if (ids.size) {
-    const metas = (await Promise.all([...ids].map((id) => fetchMeta(gmail, id)))).filter(Boolean);
+    // With a processor (Ronnie), fetch the richer view it needs; without one,
+    // the cheaper metadata fetch, so the drain is unchanged when Ronnie is off.
+    const fetchOne = processor ? enrich : fetchMeta;
+    const metas = (await Promise.all([...ids].map((id) => fetchOne(gmail, id)))).filter(Boolean);
     // The chokepoint. screen() runs classify() on each and redacts the
     // sensitive ones in place — the exact call the read path uses, so mail can
     // never enter the buffer down a path the read side would have screened.
     const screened = screen(metas);
-    const entries = screened.map((e) => {
+
+    // Ronnie acts on the safe messages (label / import / ping) and returns the
+    // subset to still buffer for the digest — personal mail only; bulk and
+    // invites are handled and dropped. Without a processor, every safe message
+    // is buffered, exactly as before.
+    let keepIds = null;
+    if (processor) {
+      const safe = screened.filter((e) => !e.withheld);
+      const keep = await processor(safe);
+      keepIds = new Set((keep || []).map((m) => m.id));
+    }
+
+    const entries = [];
+    for (const e of screened) {
       if (e.withheld) {
         withheld++;
-        return e; // redact()'s marker: id + withheld note, no content
+        entries.push(e); // redact()'s marker: id + withheld note, no content
+        continue;
       }
+      if (keepIds && !keepIds.has(e.id)) continue; // handled by Ronnie, not buffered
       added++;
-      // Drop the snippet before it rests on disk: the digest needs only sender
-      // and subject, and a snippet is the one field that could still carry a
-      // fragment classify() weighed but that we've no reason to keep.
-      return { id: e.id, ts: e.ts, from: e.from, subject: e.subject };
-    });
-    await appendPending(entries);
+      // Drop everything but sender and subject before it rests on disk — the
+      // digest needs no more, and enrich()'s headers/body/ics never persist.
+      entries.push({ id: e.id, ts: e.ts, from: e.from, subject: e.subject });
+    }
+    if (entries.length) await appendPending(entries);
   }
 
   await writeSync({ historyId: newestHistoryId });
@@ -187,6 +280,7 @@ export async function startMailListener({
   subscription = process.env.GMAIL_PUBSUB_SUBSCRIPTION,
   keyFile = PUBSUB_KEY_FILE,
   log = console.log,
+  processor = null,
 } = {}) {
   if (!topic || !subscription || !existsSync(keyFile)) {
     log(
@@ -206,7 +300,7 @@ export async function startMailListener({
   let chain = Promise.resolve();
   const drainOnce = () => {
     chain = chain.then(() =>
-      drainHistory(gmail, { log }).then(
+      drainHistory(gmail, { log, processor }).then(
         (s) => {
           if (s.added || s.withheld)
             log(`📥 Buffered ${s.added} message(s)${s.withheld ? `, withheld ${s.withheld}` : ""}`);

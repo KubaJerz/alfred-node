@@ -9,6 +9,8 @@ import { startBroker } from "./google/broker.js";
 import { NOTION_ROUTES } from "./notion/broker.js";
 import { startMailListener } from "./google/gmail-push.js";
 import { drainMailDigest } from "./google/gmail-buffer.js";
+import { RONNIE_ROUTES } from "./ronnie/broker-routes.js";
+import { makeRonnie } from "./ronnie/runner.js";
 
 // ── Config ──────────────────────────────────────────────────────────────────
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
@@ -720,12 +722,32 @@ await bootstrap();
 // same token.
 const broker = await startBroker({ extraRoutes: NOTION_ROUTES });
 
+// Ronnie: a second, narrow broker (its own port and token, only the label +
+// calendar-import/remove routes) plus the inbound-mail processor that drains the
+// queue through it. Off unless configured — a webhook, labels, or owner
+// addresses present — so a box without Ronnie config drains mail exactly as
+// before. bot.js holds the token and runs both brokers; Ronnie is a client of
+// its own one.
+const ronnieConfigured = !!(
+  process.env.RONNIE_DISCORD_WEBHOOK ||
+  process.env.RONNIE_LABEL_BULK ||
+  process.env.RONNIE_LABEL_INTERESTING ||
+  process.env.RONNIE_FORWARD_SENDERS
+);
+let ronnie = null;
+if (ronnieConfigured) {
+  const ronnieBroker = await startBroker({ baseRoutes: {}, extraRoutes: RONNIE_ROUTES });
+  ronnie = makeRonnie({ brokerUrl: ronnieBroker.url, brokerToken: ronnieBroker.token });
+  console.log("🧰 Ronnie is on — inbound mail is triaged, labelled, and pinged");
+}
+
 // The inbound-mail listener. Like the broker, it's optional: with no topic /
 // subscription / service-account key it logs that it's off and returns null,
 // so a box without the cloud setup runs exactly as before. A failure to start
 // (bad key, unreachable Pub/Sub) is logged and swallowed — mail is an add-on,
-// not a reason to take the whole bot down.
-startMailListener().catch((err) =>
+// not a reason to take the whole bot down. When Ronnie is on, it processes each
+// message; when off, the drain buffers everything as before.
+startMailListener({ processor: ronnie?.process }).catch((err) =>
   console.error(`⚠️  Gmail push listener failed to start: ${err.message}`)
 );
 
