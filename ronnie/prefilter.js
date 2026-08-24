@@ -2,9 +2,9 @@
 //
 //   1. blocklist  — senders you've decided you never care about -> bulk, filed.
 //   2. allowlist  — senders you always want -> personal, pinged.
-//   3. Gmail box  — Gmail already sorted it into Promotions or Social ->
-//                   bulk, filed. Its own classifier, free, and reliable for the
-//                   obvious promotional wall, so Haiku never pays for it.
+//   3. Gmail box  — Gmail already sorted it into Promotions, Social, or Updates
+//                   -> bulk, filed. Its own classifier, free; only Primary mail
+//                   (and Forums) goes on to Haiku, which is the whole cost story.
 //   4. grep       — a List-Unsubscribe / list header is a machine declaring
 //                   itself bulk -> bulk, filed. (mail-triage.js.)
 //
@@ -30,10 +30,13 @@ const parseList = (v) =>
 const BLOCK = parseList(process.env.RONNIE_BLOCK_SENDERS);
 const ALLOW = parseList(process.env.RONNIE_ALLOW_SENDERS);
 
-// Gmail's own inbox categories that mean "not worth interrupting". Promotions
-// and Social only — deliberately NOT Updates/Forums, where actionable bank and
-// account mail lands, which we want Haiku to actually read.
-const PROMO_CATEGORIES = new Set(["CATEGORY_PROMOTIONS", "CATEGORY_SOCIAL"]);
+// Gmail's own inbox categories Ronnie files without a Haiku call. Promotions and
+// Social are pure noise; Updates is included by choice — it's mostly routine
+// confirmations, and filing it is the accepted trade for not paying Haiku on the
+// whole transactional wall (an action item that lands there is filed too; the
+// allowlist is the rescue). Forums is left out (usually caught by the list-header
+// grep). Primary (CATEGORY_PERSONAL) is never here — that's what Haiku judges.
+const BULK_CATEGORIES = new Set(["CATEGORY_PROMOTIONS", "CATEGORY_SOCIAL", "CATEGORY_UPDATES"]);
 
 // Does this sender match a list entry — as an exact address or a domain?
 function listed(address, list) {
@@ -59,9 +62,9 @@ export function prefilter(msg = {}, opts = {}) {
   if (listed(address, block)) return { decision: "bulk", reason: "blocklist" };
   // 2. allowlist next.
   if (listed(address, allow)) return { decision: "personal", reason: "allowlist" };
-  // 3. Gmail already put it in the Promotions/Social box.
-  if ((msg.labelIds || []).some((l) => PROMO_CATEGORIES.has(l)))
-    return { decision: "bulk", reason: "gmail promotions" };
+  // 3. Gmail already sorted it into a non-Primary box we file.
+  const cat = (msg.labelIds || []).find((l) => BULK_CATEGORIES.has(l));
+  if (cat) return { decision: "bulk", reason: `gmail ${cat.replace("CATEGORY_", "").toLowerCase()}` };
   // 4. the one free header signal.
   if (isBulk(msg)) return { decision: "bulk", reason: "list header" };
   // Nobody decided — this one is worth a Haiku call.

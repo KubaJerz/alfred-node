@@ -67,7 +67,15 @@ test("a bulk message is labelled bulk and NOT pinged", async () => {
   );
   assert.equal(r.action, "filed");
   assert.equal(h.calls[0].body.addLabels[0], "L_BULK");
+  assert.deepEqual(h.calls[0].body.removeLabels, ["INBOX"]); // moved out of the inbox
   assert.equal(h.posts.length, 0); // filed in silence
+});
+
+test("a personal message keeps its inbox spot (not archived)", async () => {
+  const h = harness();
+  await handleMessage({ id: "m3", from: "jane@gmail.com", subject: "coffee?" }, h.deps);
+  assert.equal(h.calls[0].body.addLabels[0], "L_INT");
+  assert.equal(h.calls[0].body.removeLabels, undefined); // stays in the inbox
 });
 
 test("an authenticated invite REQUEST is imported and announced", async () => {

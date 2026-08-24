@@ -101,7 +101,12 @@ export async function handleMessage(msg = {}, deps = {}) {
   const { label, summary, reason, capped } = await classify(msg, { log });
   const labelId = label === "bulk" ? labels.bulk : labels.interesting;
   if (labelId && msg.id) {
-    await broker("POST /mail/label", { id: msg.id, addLabels: [labelId] });
+    // Filed mail is *moved* — the BULK label plus archiving it out of the inbox
+    // (Gmail has no folders; a label + removing INBOX is the move). Interesting
+    // mail keeps its inbox spot and just gets the label + a ping.
+    const body = { id: msg.id, addLabels: [labelId] };
+    if (label === "bulk") body.removeLabels = ["INBOX"];
+    await broker("POST /mail/label", body);
   }
   // Tier 2: a personal message is worth a ping, carrying Haiku's one-liner; bulk
   // is filed in silence.

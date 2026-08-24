@@ -23,13 +23,15 @@ test("blocklist beats the grep and the allowlist beats it too", () => {
   assert.equal(prefilter({ from: "mom@family.com", headers: { "list-unsubscribe": "<u>" } }, opts).decision, "personal");
 });
 
-test("Gmail's Promotions/Social box -> bulk, before spending a Haiku call", () => {
+test("Gmail's Promotions/Social/Updates box -> bulk, before spending a Haiku call", () => {
   assert.equal(prefilter({ from: "x@brand.com", labelIds: ["INBOX", "CATEGORY_PROMOTIONS"] }, opts).reason, "gmail promotions");
-  assert.equal(prefilter({ from: "x@brand.com", labelIds: ["CATEGORY_SOCIAL"] }, opts).decision, "bulk");
-  // Updates is NOT treated as bulk — actionable bank/account mail lands there.
-  assert.equal(prefilter({ from: "x@bank.com", labelIds: ["CATEGORY_UPDATES"] }, opts).decision, "undecided");
+  assert.equal(prefilter({ from: "x@brand.com", labelIds: ["CATEGORY_SOCIAL"] }, opts).reason, "gmail social");
+  // Updates is filed too (by choice) — routine confirmations dominate it.
+  assert.equal(prefilter({ from: "x@bank.com", labelIds: ["CATEGORY_UPDATES"] }, opts).reason, "gmail updates");
+  // Primary/uncategorised still goes to Haiku.
+  assert.equal(prefilter({ from: "x@bank.com", labelIds: ["CATEGORY_PERSONAL"] }, opts).decision, "undecided");
   // But the allowlist still wins over the Gmail box.
-  assert.equal(prefilter({ from: "mom@family.com", labelIds: ["CATEGORY_PROMOTIONS"] }, opts).decision, "personal");
+  assert.equal(prefilter({ from: "mom@family.com", labelIds: ["CATEGORY_UPDATES"] }, opts).decision, "personal");
 });
 
 test("no list match, but a list header -> bulk via grep (no Haiku)", () => {
