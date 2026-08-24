@@ -10,6 +10,58 @@ and move to **Done** with the PR number. Anything with a GitHub issue links to i
 
 ## Now
 
+### Keeping context live
+
+- [ ] **A change bus — everything publishes, Alfred subscribes and drains per
+      turn.** _Top priority._ Alfred's context is a snapshot taken **once**, at
+      fresh-session start: `loadContext` injects `MEMORY.md` + today's daily note
+      (+ mail) only on the new-session branch of `handleTurn`; a **resumed**
+      session re-injects nothing (`finalMessage = messageBody`). So anything that
+      changes on disk *after* the session starts — buffered mail, a file a command
+      just wrote, a freshly-appended memory line, exercise data — is invisible to
+      the live thread until it restarts (`/clear`, a dream, or the day's first
+      message). Throwing away the conversation just to see a new file is the whole
+      annoyance. Proof it already bites: `drainMailDigest()` runs only on the
+      fresh branch, so tier-1 mail waits for a restart even though it was *meant*
+      to surface on the next real turn.
+
+      **The design is an internal pub/sub — the same shape as the Gmail one, one
+      layer in.** Everything that can change *publishes* a small event to one
+      queue: "mail arrived from X", "wrote `var/.../run-2026-08-24.json`",
+      "`MEMORY.md` gained a line", "the metrics command reran". Alfred is the
+      *subscriber*: at the top of **every** turn — resumed or fresh — he drains
+      everything published since the last turn into a delimited context block,
+      then clears it. **Empty queue → nothing injected: no block, no added tokens,
+      no thinking.** The common case costs nothing, which is what makes it safe to
+      run on every turn. Producers don't know or care whether a session is open —
+      they publish and move on.
+
+      **Two refinements worth keeping:**
+      - **Notify by path, not by value.** An event is "`x` changed — read it if
+        this turn needs it," not the file's contents. Small, always-current, and
+        Alfred pulls the live version with his Read tool. Same move as the
+        `[ATTACHMENTS]` block handing a path instead of bytes.
+      - **New vs. rewrite decides the channel.** *Additive* artifacts (new mail, a
+        new data file) inject safely into the live session. *In-place rewrites* of
+        already-loaded context (`MEMORY.md` edited by the dream pass) do **not** —
+        the stale copy is still in his context and may win — so those keep forcing
+        a fresh session (`dreamedSince`), as today. Rule: **new → publish;
+        edited-in-place → restart.**
+
+      **Mechanics.** `claude -p --resume` has no channel but the prompt — there is
+      no system-append mid-session — so a drained event becomes a block prepended
+      to the next message, framed so Alfred reads it as ambient context, not as
+      the user speaking. Drain-and-clear: once injected an event lives in the
+      transcript, so re-injecting only duplicates. On a *fresh* session the queue
+      is drained-and-**discarded** — `loadContext` already reloaded the current
+      files, so the events are redundant there; the queue only ever covers the gap
+      *between* restarts.
+
+      **This subsumes the tier-1 mail buffer:** mail stops being a special case
+      and becomes the first producer on the bus. **Traps:** coalesce bursts (a
+      cron that writes ten files is one event, not ten); never emit an empty block;
+      and keep the payload a delta, never the whole world.
+
 ### Integrations — give Alfred hands
 
 Google access is live as of #25: OAuth consented, credentials held by a broker in
