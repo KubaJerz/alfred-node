@@ -7,16 +7,17 @@
 // when Haiku judged it personal. reason names which stage decided, so a log or a
 // dry-run can show why — and how often the paid stage actually ran.
 //
-// A daily cap guards the paid stage: past the cap, an undecided message is
-// surfaced as personal (never silently dropped) with the reason marked, and no
-// Haiku call is made — so a bad day can't run up a bill.
+// A daily cap guards the paid stage, counted in CALLS (a subscription has no
+// per-call bill): past the cap, an undecided message is surfaced as personal
+// (never silently dropped), flagged `capped` so the runner can post a one-time
+// Discord notice, and no Haiku call is made — so a bad day can't run away.
 
 import { prefilter } from "./prefilter.js";
 import { classifyWithHaiku } from "./haiku.js";
 
 /**
- * @param {object} msg  enriched message: { from, subject, snippet, headers }
- * @param {object} [opts] { block, allow, apiKey, meter, fetchImpl, capUSD, log }
+ * @param {object} msg  enriched message: { from, subject, body, headers }
+ * @param {object} [opts] { block, allow, meter, run, capCalls, log }
  */
 export async function classify(msg = {}, opts = {}) {
   const pre = prefilter(msg, { block: opts.block, allow: opts.allow });
@@ -24,20 +25,15 @@ export async function classify(msg = {}, opts = {}) {
     return { label: pre.decision, summary: "", reason: pre.reason };
   }
 
-  // Undecided -> the paid stage, unless the daily cap says stop.
-  if (opts.capUSD && opts.meter) {
-    const spent = await opts.meter.spentTodayUSD();
-    if (spent >= opts.capUSD) {
-      opts.log?.(`💸 Ronnie hit the daily Haiku cap ($${opts.capUSD}); surfacing without a call`);
-      return { label: "personal", summary: "", reason: "over daily cap" };
+  // Undecided -> the paid stage, unless the daily call cap says stop.
+  if (opts.capCalls && opts.meter) {
+    const calls = await opts.meter.callsToday();
+    if (calls >= opts.capCalls) {
+      return { label: "personal", summary: "", reason: "over daily cap", capped: true };
     }
   }
 
-  const v = await classifyWithHaiku(msg, {
-    apiKey: opts.apiKey,
-    meter: opts.meter,
-    fetchImpl: opts.fetchImpl,
-  });
+  const v = await classifyWithHaiku(msg, { meter: opts.meter, run: opts.run });
   return { label: v.label, summary: v.summary, reason: v.error ? `haiku error: ${v.error}` : "haiku" };
 }
 

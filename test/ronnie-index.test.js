@@ -1,8 +1,13 @@
 // Run with: npm test   (node's built-in runner, no network, no credentials)
 import { test } from "node:test";
 import assert from "node:assert/strict";
-process.env.ANTHROPIC_API_KEY = ""; // never hit the real API from unit tests
 import { handleMessage, makeBrokerClient } from "../ronnie/index.js";
+
+// A deterministic classify stub so unit tests never spawn `claude -p`.
+const stubClassify = async (m) => {
+  const bulk = !!(m.headers?.["list-unsubscribe"] || m.headers?.["list-id"] || /newsletter|news@/i.test(m.from || ""));
+  return { label: bulk ? "bulk" : "personal", summary: bulk ? "" : "why" };
+};
 
 // A fake broker + notify that record what Ronnie tried to do.
 function harness() {
@@ -22,6 +27,7 @@ function harness() {
       },
       labels: { bulk: "L_BULK", interesting: "L_INT" },
       owners: ["kuba@gmail.com"],
+      classify: stubClassify,
     },
   };
 }

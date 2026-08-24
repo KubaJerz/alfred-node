@@ -98,7 +98,7 @@ export async function handleMessage(msg = {}, deps = {}) {
   }
 
   // ── 2. Triage path ────────────────────────────────────────────────────────
-  const { label, summary, reason } = await classify(msg, { log });
+  const { label, summary, reason, capped } = await classify(msg, { log });
   const labelId = label === "bulk" ? labels.bulk : labels.interesting;
   if (labelId && msg.id) {
     await broker("POST /mail/label", { id: msg.id, addLabels: [labelId] });
@@ -109,7 +109,8 @@ export async function handleMessage(msg = {}, deps = {}) {
     await notify([mailEmbed({ ...msg, category: "personal", summary })]);
   }
   log(`✉️  ${label} (${reason}) — ${msg.subject || "(no subject)"}`);
-  return { action: label === "bulk" ? "filed" : "pinged", category: label };
+  // capped is surfaced so the runner can post a one-time "hit the cap" notice.
+  return { action: label === "bulk" ? "filed" : "pinged", category: label, reason, capped };
 }
 
 /**

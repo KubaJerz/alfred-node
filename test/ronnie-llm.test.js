@@ -1,4 +1,4 @@
-// Run with: npm test   (node's built-in runner, no network, no credentials)
+// Run with: npm test   (node's built-in runner, no network, no subprocess)
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
@@ -9,100 +9,99 @@ import { makeMeter } from "../ronnie/meter.js";
 import { classify } from "../ronnie/classify.js";
 
 const tmpFile = () => path.join(mkdtempSync(path.join(tmpdir(), "ronnie-meter-")), "usage.jsonl");
-const apiReply = (obj, usage = { input_tokens: 100, output_tokens: 15 }) => ({
-  ok: true,
-  json: async () => ({ content: [{ type: "text", text: JSON.stringify(obj) }], usage }),
+// A fake `claude -p` runner: returns the JSON verdict as text plus usage/cost.
+const fakeRun = (obj, usage = { input_tokens: 100, output_tokens: 15 }, cost) => async () => ({
+  text: JSON.stringify(obj),
+  usage,
+  cost,
 });
 
-// ── Haiku ───────────────────────────────────────────────────────────────────
-test("haiku parses a verdict and records usage to the meter", async () => {
+// ── Haiku (over an injected runner — never spawns claude) ────────────────────
+test("haiku parses a verdict and records usage + reported cost", async () => {
   const recorded = [];
   const meter = { record: async (u) => recorded.push(u) };
-  const fetchImpl = async () => apiReply({ label: "personal", summary: "Bill due Friday." });
-  const v = await classifyWithHaiku({ from: "a@b", subject: "x" }, { apiKey: "k", fetchImpl, meter });
+  const v = await classifyWithHaiku(
+    { from: "a@b", subject: "x", body: "y" },
+    { run: fakeRun({ label: "personal", summary: "Bill due Friday." }, { input_tokens: 100, output_tokens: 15 }, 0.0003), meter }
+  );
   assert.equal(v.label, "personal");
   assert.equal(v.summary, "Bill due Friday.");
   assert.equal(recorded[0].input_tokens, 100);
+  assert.equal(recorded[0].cost, 0.0003);
 });
 
-test("haiku drops the summary when it judges bulk", async () => {
-  const fetchImpl = async () => apiReply({ label: "bulk", summary: "ignored" });
-  const v = await classifyWithHaiku({ from: "a@b" }, { apiKey: "k", fetchImpl });
+test("haiku drops the summary on a bulk verdict", async () => {
+  const v = await classifyWithHaiku({ from: "a@b" }, { run: fakeRun({ label: "bulk", summary: "ignored" }) });
   assert.equal(v.label, "bulk");
   assert.equal(v.summary, "");
 });
 
-test("haiku fails open to personal on a bad response or missing key", async () => {
-  const bad = await classifyWithHaiku({}, { apiKey: "k", fetchImpl: async () => ({ ok: false, status: 500 }) });
-  assert.equal(bad.label, "personal");
-  assert.ok(bad.error);
-  const noKey = await classifyWithHaiku({}, { apiKey: "" });
-  assert.equal(noKey.label, "personal");
-  assert.match(noKey.error, /API_KEY/);
+test("haiku sends the FULL body to the model", async () => {
+  let prompt;
+  const run = async (p) => {
+    prompt = p;
+    return { text: '{"label":"bulk","summary":""}', usage: {} };
+  };
+  await classifyWithHaiku({ from: "a@b", subject: "hi", body: "THE FULL BODY HERE" }, { run });
+  assert.ok(prompt.includes("THE FULL BODY HERE"));
 });
 
-test("haiku never sends the full body — only from/subject/snippet reach the API", async () => {
-  let sent;
-  const fetchImpl = async (_url, opts) => {
-    sent = JSON.parse(opts.body).messages[0].content;
-    return apiReply({ label: "bulk", summary: "" });
-  };
-  await classifyWithHaiku(
-    { from: "a@b", subject: "hi", snippet: "short preview", body: "SECRET FULL BODY" },
-    { apiKey: "k", fetchImpl }
-  );
-  assert.ok(!sent.includes("SECRET FULL BODY"));
-  assert.ok(sent.includes("short preview"));
+test("haiku fails open to personal when the runner throws", async () => {
+  const v = await classifyWithHaiku({}, { run: async () => { throw new Error("claude down"); } });
+  assert.equal(v.label, "personal");
+  assert.ok(v.error);
 });
 
 // ── Meter ─────────────────────────────────────────────────────────────────
-test("meter totals tokens and estimates cost at the given rates", async () => {
-  const meter = makeMeter({ file: tmpFile(), inRate: 1.0, outRate: 5.0 });
-  await meter.record({ input_tokens: 1_000_000, output_tokens: 200_000, model: "h" });
-  await meter.record({ input_tokens: 0, output_tokens: 0 });
-  const s = await meter.summarize();
-  assert.equal(s.calls, 2);
-  assert.equal(s.inTokens, 1_000_000);
-  assert.equal(s.estUSD, 2.0); // 1M in @ $1 + 200k out @ $5 = $1 + $1
+test("meter prefers the CLI's reported cost, else estimates from rates", async () => {
+  const est = makeMeter({ file: tmpFile(), inRate: 1, outRate: 5 });
+  await est.record({ input_tokens: 1_000_000, output_tokens: 200_000 });
+  assert.equal((await est.summarize()).estUSD, 2.0); // 1M@$1 + 200k@$5
+
+  const rep = makeMeter({ file: tmpFile() });
+  await rep.record({ input_tokens: 10, output_tokens: 2, cost: 0.01 });
+  await rep.record({ input_tokens: 10, output_tokens: 2, cost: 0.02 });
+  assert.equal((await rep.summarize()).estUSD, 0.03); // sum of reported
 });
 
-test("meter spentTodayUSD counts only today's rows", async () => {
+test("meter callsToday counts only today's calls", async () => {
   const file = tmpFile();
   let clock = new Date("2026-08-23T12:00:00").getTime();
-  const meter = makeMeter({ file, inRate: 1.0, outRate: 5.0, now: () => clock });
-  await meter.record({ input_tokens: 1_000_000, output_tokens: 0 }); // today
-  clock = new Date("2026-08-20T12:00:00").getTime(); // rewind
-  const meter2 = makeMeter({ file, inRate: 1.0, outRate: 5.0, now: () => new Date("2026-08-23T13:00:00").getTime() });
-  assert.equal(await meter2.spentTodayUSD(), 1.0); // only the Aug-23 row
+  const m = makeMeter({ file, now: () => clock });
+  await m.record({ input_tokens: 1, output_tokens: 1 });
+  await m.record({ input_tokens: 1, output_tokens: 1 });
+  assert.equal(await m.callsToday(), 2);
 });
 
 // ── classify pipeline ───────────────────────────────────────────────────────
-test("classify: blocklist decides without any Haiku call", async () => {
+test("classify: blocklist decides with no Haiku run", async () => {
   let called = false;
   const r = await classify(
     { from: "deals@krispykreme.com" },
-    { block: ["krispykreme.com"], allow: [], fetchImpl: async () => { called = true; return apiReply({}); } }
+    { block: ["krispykreme.com"], allow: [], run: async () => { called = true; return { text: "{}", usage: {} }; } }
   );
   assert.deepEqual(r, { label: "bulk", summary: "", reason: "blocklist" });
   assert.equal(called, false);
 });
 
 test("classify: an undecided message goes to Haiku", async () => {
-  const fetchImpl = async () => apiReply({ label: "personal", summary: "Transfer needs your OK." });
-  const r = await classify({ from: "x@capitalone.com", subject: "action needed" }, { block: [], allow: [], apiKey: "k", fetchImpl });
+  const r = await classify(
+    { from: "x@capitalone.com", body: "action needed" },
+    { block: [], allow: [], run: fakeRun({ label: "personal", summary: "Approve the transfer." }) }
+  );
   assert.equal(r.label, "personal");
-  assert.equal(r.summary, "Transfer needs your OK.");
+  assert.equal(r.summary, "Approve the transfer.");
   assert.equal(r.reason, "haiku");
 });
 
-test("classify: over the daily cap, surface personal without calling Haiku", async () => {
+test("classify: over the daily call cap, surface personal and flag capped", async () => {
   let called = false;
-  const meter = { spentTodayUSD: async () => 5.0 };
+  const meter = { callsToday: async () => 200 };
   const r = await classify(
     { from: "x@capitalone.com" },
-    { block: [], allow: [], apiKey: "k", meter, capUSD: 1.0, fetchImpl: async () => { called = true; return apiReply({}); } }
+    { block: [], allow: [], meter, capCalls: 200, run: async () => { called = true; return { text: "{}", usage: {} }; } }
   );
   assert.equal(r.label, "personal");
-  assert.match(r.reason, /cap/);
+  assert.equal(r.capped, true);
   assert.equal(called, false);
 });

@@ -40,10 +40,12 @@ export function makeMeter({
   return {
     // Fire-and-forget: a metering failure must never break triage. Awaitable if
     // the caller wants, but callers don't have to.
-    async record({ input_tokens = 0, output_tokens = 0, model = "" } = {}) {
+    async record({ input_tokens = 0, output_tokens = 0, model = "", cost: costUSD } = {}) {
       try {
         await mkdir(path.dirname(file), { recursive: true });
-        const line = JSON.stringify({ ts: now(), in: input_tokens, out: output_tokens, model });
+        // cost is what `claude -p` reported for this call (its own estimate);
+        // stored so summarize can prefer the real number over the rate estimate.
+        const line = JSON.stringify({ ts: now(), in: input_tokens, out: output_tokens, model, cost: costUSD });
         await appendFile(file, line + "\n");
       } catch {
         /* metering is best-effort */
@@ -55,12 +57,17 @@ export function makeMeter({
       const rows = await readRows(file);
       const inTokens = rows.reduce((s, r) => s + (r.in || 0), 0);
       const outTokens = rows.reduce((s, r) => s + (r.out || 0), 0);
-      return {
-        calls: rows.length,
-        inTokens,
-        outTokens,
-        estUSD: Number(cost(inTokens, outTokens, inRate, outRate).toFixed(4)),
-      };
+      // Prefer the CLI's own reported cost when present; else estimate from rates.
+      const reported = rows.reduce((s, r) => s + (r.cost || 0), 0);
+      const estUSD = reported > 0 ? reported : cost(inTokens, outTokens, inRate, outRate);
+      return { calls: rows.length, inTokens, outTokens, estUSD: Number(estUSD.toFixed(4)) };
+    },
+
+    /** How many Haiku calls have been made since local midnight — the cap unit. */
+    async callsToday() {
+      const rows = await readRows(file);
+      const midnight = new Date(now()).setHours(0, 0, 0, 0);
+      return rows.filter((r) => r.ts >= midnight).length;
     },
 
     /** Estimated USD spent since local midnight — for a daily cap. */

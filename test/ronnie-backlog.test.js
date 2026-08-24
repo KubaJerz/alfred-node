@@ -1,7 +1,6 @@
 // Run with: npm test   (node's built-in runner, no network, no credentials)
 import { test } from "node:test";
 import assert from "node:assert/strict";
-process.env.ANTHROPIC_API_KEY = ""; // never hit the real API from unit tests
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { mkdtempSync } from "node:fs";
@@ -50,6 +49,11 @@ function harness() {
     notify: async (embeds) => posts.push(embeds),
     labels: { bulk: "L_BULK", interesting: "L_INT" },
     owners: ["kuba@gmail.com"],
+    // Deterministic stub so the backlog pass never spawns `claude -p`.
+    classify: async (m) => {
+      const bulk = !!(m.headers?.["list-unsubscribe"] || m.headers?.["list-id"] || /newsletter|news@/i.test(m.from || ""));
+      return { label: bulk ? "bulk" : "personal", summary: bulk ? "" : "why" };
+    },
   });
   return { calls, posts, processor };
 }

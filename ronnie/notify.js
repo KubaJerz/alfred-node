@@ -80,6 +80,19 @@ export function inviteEmbed({ action, summary, uid, when } = {}) {
 }
 
 /**
+ * A one-time notice that Ronnie hit its daily Haiku call cap and is triaging on
+ * the free stages (blocklist/allowlist/grep) for the rest of the day.
+ */
+export function capEmbed({ cap } = {}) {
+  return {
+    color: COLORS.undo,
+    title: "Ronnie hit today's Haiku cap",
+    description: `Reached ${cap ?? "the"} calls — triaging on grep only until midnight. Nothing is lost; undecided mail is surfaced.`,
+    footer: { text: "raise RONNIE_HAIKU_DAILY_CAP to change" },
+  };
+}
+
+/**
  * Post embeds to the webhook. No-op (returns {posted:false}) when unconfigured,
  * so callers never have to guard. fetchImpl is injectable for tests. Failures
  * are surfaced as a thrown error the caller logs-and-swallows — a missed ping is
