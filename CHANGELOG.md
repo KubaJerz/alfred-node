@@ -5,6 +5,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
 
 ## [Unreleased]
 ### Added
+- **`/c` (and `/clear`) now takes a message inline.** The command used to be an
+  exact match — you cleared, waited for the "Session cleared" reply, then sent
+  your question as a second message. It's now a **prefix**: `/c` alone still
+  clears and waits, but `/c <text>` clears *and* runs `<text>` as the fresh
+  session's first turn, so one message both resets and asks. The clear is
+  acknowledged with a 🧹 reaction instead of a second message, and a file sent
+  with `/c` (even captionless) rides into the fresh turn too. The parse lives in
+  a small pure module (`commands.js`, unit-tested); a word boundary keeps
+  look-alikes like `/create` from matching. The inbound turn is now logged
+  *after* the clear archives the transcript, so the new message lands in the
+  fresh note rather than the one it just ended.
 - **Alfred can receive files, not just send them.** A message with attachments
   used to be dropped whenever it had no text (`msg.attachments` was never read);
   now every attached file — any type — is downloaded into that day's folder and
