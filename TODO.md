@@ -157,12 +157,6 @@ than what's missing.
 
 ## Next
 
-- [ ] **Read inbound attachments.** `bot.js:467` takes `msg.content` and nothing
-      else — `msg.attachments` is never touched, so every file sent to Alfred is
-      silently dropped. Outbound already works (`extractAttachments`, the
-      `{img:}` tokens); this is the missing direction. Download to `agent/var/`,
-      hand the path to the turn. Pays off well beyond voice — whiteboard photos,
-      PDFs, a forwarded `.ics`. **Prerequisite for voice messages below.**
 - [ ] **Tiered memory (L1/L2).** `agent/var/memories/MEMORY.md` is injected into
       every new session; it's empty today, but the split plan is already noted in
       that file's header (issue #8). Do it when size actually becomes a problem.
@@ -192,13 +186,14 @@ than what's missing.
       calories/macros. Two open questions: the schema, and whether Alfred
       *estimates* nutrition from a description (a model in the loop, proposing
       rather than recording as fact) or looks it up against a food database. Photo
-      input rides on **Read inbound attachments** (Next).
+      input rides on **Read inbound attachments** (shipped, #40).
 
 ### Later integrations (Kuba, 2026-08-02 — explicitly "for later")
 
-- [ ] **Voice messages → text.** Discord voice notes are Ogg/Opus attachments,
-      so this is blocked on inbound attachments (**Next**). Transcribe locally:
-      audio is a different privacy category than text.
+- [ ] **Voice messages → text.** Discord voice notes are Ogg/Opus attachments.
+      The download primitive now exists (#40), so this reuses it and adds only its
+      own trigger (the `IsVoiceMessage` flag) and transcription. Transcribe
+      locally: audio is a different privacy category than text.
 
       **Model: NVIDIA Parakeet-TDT-0.6B, via ONNX rather than NeMo** (Kuba,
       2026-08-04). NeMo's dependency tree is built for GPU training; the int8
@@ -257,6 +252,22 @@ than what's missing.
 
 ## Done
 
+- [x] ~~**Read inbound attachments — and the day-folder + Eastern-date arc it
+      pulled in.**~~ Alfred was send-only: a message with files but no caption hit
+      `if (!userMessage) return` and was dropped, `msg.attachments` never read.
+      Now any file (no type whitelist — single-user, high-trust, gated by
+      `ALLOWED_USER_IDS`) downloads into that day's folder and its path reaches
+      the turn in an `[ATTACHMENTS]` block, on the **message body** so it survives
+      a resumed session (a photo mid-chat). Two changes rode along because the
+      storage location forced them: dailies went from `YYYY-MM-DD.md` to
+      **one folder per day** (`YYYY-MM-DD/daily.md` + that day's files, so a prune
+      is one `rm -rf` and the tiers are named — `MEMORY.md` is memory, dailies are
+      *context*, which is why binaries belong there); and every "day" now keys on
+      **Eastern** (`America/New_York`, DST-aware) through one helper (`dailies.js`),
+      which also fixed a latent bug where `loadContext` (UTC) and `dream.sh`
+      (local) disagreed near midnight. `scripts/migrate-dailies-to-folders.sh`
+      moves existing notes over. Pure logic unit-tested; cron unchanged (3am
+      Eastern). Voice stays separate, sharing only the download primitive. (#40)
 - [x] ~~**Personal memory state was loose at the repo root.**~~ A daily note
       (`memories/dailies/2026-08-11.md`) sat at the repo root, outside the one
       `.gitignore` rule that guards `agent/var/`. Moved it back under
