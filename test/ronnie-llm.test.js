@@ -75,7 +75,7 @@ test("classify: blocklist decides with no Haiku run", async () => {
     { from: "deals@krispykreme.com" },
     { block: ["krispykreme.com"], allow: [], run: async () => { called = true; return { text: "{}", usage: {} }; } }
   );
-  assert.deepEqual(r, { label: "bulk", summary: "", reason: "blocklist" });
+  assert.deepEqual(r, { label: "bulk", summary: "", reason: "blocklist", usedHaiku: false });
   assert.equal(called, false);
 });
 

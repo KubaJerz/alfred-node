@@ -146,10 +146,10 @@ async function findICS(gmail, messageId, payload, depth = 0) {
 
 // A richer view of a message, for Ronnie (full fetch, token side only). Adds the
 // grep headers, the DKIM verdict, and the .ics to what fetchMeta returns. The
-// body and snippet ride along for the code screen but are never persisted — the
-// queue keeps only from/subject (see drainHistory). Used only when a processor
-// is wired; otherwise the drain stays on the cheaper metadata fetch.
-async function enrich(gmail, id) {
+// body and snippet ride along for the code screen but are never persisted. The
+// consumer calls this by id when it pops a message off the queue; exported so
+// bot.js can build the consumer's `enrichOne` around the shared OAuth client.
+export async function enrich(gmail, id) {
   try {
     const r = await gmail.users.messages.get({ userId: "me", id, format: "full" });
     const p = r.data.payload;
@@ -182,7 +182,7 @@ async function enrich(gmail, id) {
 // Walk history from our stored cursor, buffer safe new mail, advance the cursor.
 // Returns a small summary for logging. Throws only on unexpected errors; a stale
 // cursor (404) is handled here as a resync rather than propagated.
-export async function drainHistory(gmail, { log = console.log, processor = null } = {}) {
+export async function drainHistory(gmail, { log = console.log, enqueue = null } = {}) {
   const { historyId: startHistoryId } = await readSync();
   if (!startHistoryId) {
     // No baseline yet (watch never registered) — nothing sane to list from.
@@ -233,44 +233,31 @@ export async function drainHistory(gmail, { log = console.log, processor = null 
   let added = 0;
   let withheld = 0;
   if (ids.size) {
-    // With a processor (Ronnie), fetch the richer view it needs; without one,
-    // the cheaper metadata fetch, so the drain is unchanged when Ronnie is off.
-    const fetchOne = processor ? enrich : fetchMeta;
-    const metas = (await Promise.all([...ids].map((id) => fetchOne(gmail, id)))).filter(Boolean);
-    // The chokepoint. screen() runs classify() on each and redacts the
-    // sensitive ones in place — the exact call the read path uses, so mail can
-    // never enter the buffer down a path the read side would have screened.
-    const screened = screen(metas);
-
-    // Ronnie acts on the safe messages (label / import / ping) and returns the
-    // subset to still buffer for the digest — personal mail only; bulk and
-    // invites are handled and dropped. Without a processor, every safe message
-    // is buffered, exactly as before.
-    let keepIds = null;
-    if (processor) {
-      const safe = screened.filter((e) => !e.withheld);
-      const keep = await processor(safe);
-      keepIds = new Set((keep || []).map((m) => m.id));
-    }
-
-    const entries = [];
-    for (const e of screened) {
-      if (e.withheld) {
-        withheld++;
-        entries.push(e); // redact()'s marker: id + withheld note, no content
-        continue;
+    if (enqueue) {
+      // Ronnie on: the drain's whole job is to hand the new ids to the work
+      // queue. No fetch, no screen, no content on disk here — the consumer pops
+      // each id, fetches the full message, screens it for codes, and triages.
+      // Enqueue dedups, so a re-listed drain after a crash can't double-queue.
+      const r = await enqueue([...ids]);
+      added = r.added;
+    } else {
+      // Ronnie off: the legacy tier-1 buffer. Fetch metadata, run it through the
+      // same screen() chokepoint, and buffer sender + subject (a code becomes a
+      // content-free marker) for the next session's digest — exactly as before.
+      const metas = (await Promise.all([...ids].map((id) => fetchMeta(gmail, id)))).filter(Boolean);
+      const screened = screen(metas);
+      const entries = [];
+      for (const e of screened) {
+        if (e.withheld) {
+          withheld++;
+          entries.push(e); // redact()'s marker: id + withheld note, no content
+          continue;
+        }
+        added++;
+        entries.push({ id: e.id, ts: e.ts, from: e.from, subject: e.subject });
       }
-      if (keepIds && !keepIds.has(e.id)) continue; // handled by Ronnie, not buffered
-      added++;
-      // Drop everything but sender and subject before it rests on disk — the
-      // digest needs no more, and enrich()'s headers/body/ics never persist.
-      // Tag it triaged when Ronnie handled it, so a later backlog pass skips it
-      // and never re-labels or re-pings mail already dealt with.
-      const kept = { id: e.id, ts: e.ts, from: e.from, subject: e.subject };
-      if (keepIds) kept.triaged = true;
-      entries.push(kept);
+      if (entries.length) await appendPending(entries);
     }
-    if (entries.length) await appendPending(entries);
   }
 
   await writeSync({ historyId: newestHistoryId });
@@ -278,55 +265,32 @@ export async function drainHistory(gmail, { log = console.log, processor = null 
 }
 
 /**
- * One-time pass over mail already sitting in the queue — everything buffered
- * before Ronnie was turned on. Live drains only ever see *new* arrivals, so
- * without this the existing backlog would flow into the digest untriaged.
+ * One-time migration for the switch to the work queue. Mail that was buffered in
+ * the digest before this shipped — safe entries with an id, from either the old
+ * inline path or the pre-Ronnie tier-1 buffer — is moved into Ronnie's queue so
+ * the consumer triages it instead of it flowing into the next digest untriaged.
  *
- * It is idempotent, which is the whole trick: an entry Ronnie has handled is
- * tagged `triaged`, and this skips anything tagged (and the withheld/resync
- * markers). So it processes each message once and a restart re-does nothing.
- * Entries carry their message id, so Ronnie re-fetches by id, enriches, screens,
- * and acts — then the queue is rewritten to the markers, any newly-withheld
- * message, and the personal mail Ronnie kept (now tagged).
+ * Markers stay where they belong: withheld and resync entries, and any leftover
+ * `triaged` recaps, are put back in the digest (they're Alfred's, not work). It's
+ * safe to run every boot — enqueue dedups, and once the old buffer is drained of
+ * its id-bearing entries there's nothing left to migrate.
  *
- * Runs only when a processor is supplied (Ronnie on). gmail/file are injectable
- * for tests; by default it opens its own client and the real queue.
+ * `file` is injectable for tests; by default it's the real pending-mail buffer.
  */
-export async function processBacklog({ processor, gmail = null, file, log = console.log } = {}) {
-  if (!processor) return { processed: 0, kept: 0 };
+export async function migrateBacklogToQueue({ queue, file, log = console.log } = {}) {
+  if (!queue) return { enqueued: 0 };
 
-  const entries = await drainPending(file); // reads and clears
-  if (!entries.length) return { processed: 0, kept: 0 };
+  const entries = await drainPending(file); // reads and clears the buffer
+  if (!entries.length) return { enqueued: 0 };
 
-  // Untouched: already-triaged mail, withheld/resync markers, anything with no
-  // id to re-fetch. These go straight back into the queue.
-  const passthrough = entries.filter((e) => e.triaged || e.withheld || e.resync || !e.id);
-  const todo = entries.filter((e) => e.id && !e.triaged && !e.withheld && !e.resync);
+  const isWork = (e) => e.id && !e.triaged && !e.withheld && !e.resync;
+  const toQueue = entries.filter(isWork);
+  const keepInDigest = entries.filter((e) => !isWork(e)); // markers + triaged recaps
 
-  if (!todo.length) {
-    if (passthrough.length) await appendPending(passthrough, file);
-    return { processed: 0, kept: 0 };
-  }
-
-  const client = gmail || (await gmailClient());
-  const enriched = (await Promise.all(todo.map((e) => enrich(client, e.id)))).filter(Boolean);
-  const screened = screen(enriched); // re-screen: a full fetch may catch a code metadata missed
-  const safe = screened.filter((e) => !e.withheld);
-  const nowWithheld = screened.filter((e) => e.withheld);
-
-  const keep = await processor(safe);
-  const kept = (keep || []).map((m) => ({
-    id: m.id,
-    ts: m.ts,
-    from: m.from,
-    subject: m.subject,
-    triaged: true,
-  }));
-
-  const rewrite = [...passthrough, ...nowWithheld, ...kept];
-  if (rewrite.length) await appendPending(rewrite, file);
-  log(`📮 Ronnie backlog: processed ${todo.length}, kept ${kept.length} personal for the digest`);
-  return { processed: todo.length, kept: kept.length };
+  if (toQueue.length) await queue.enqueue(toQueue.map((e) => e.id));
+  if (keepInDigest.length) await appendPending(keepInDigest, file); // put markers back
+  if (toQueue.length) log(`📮 Migrated ${toQueue.length} buffered message(s) into Ronnie's queue`);
+  return { enqueued: toQueue.length };
 }
 
 /**
@@ -339,7 +303,9 @@ export async function startMailListener({
   subscription = process.env.GMAIL_PUBSUB_SUBSCRIPTION,
   keyFile = PUBSUB_KEY_FILE,
   log = console.log,
-  processor = null,
+  gmail = null,
+  enqueue = null,
+  onDrained = null,
 } = {}) {
   if (!topic || !subscription || !existsSync(keyFile)) {
     log(
@@ -349,20 +315,25 @@ export async function startMailListener({
     return null;
   }
 
-  const gmail = await gmailClient();
-  const watch = await registerWatch(gmail, topic);
+  const client = gmail || (await gmailClient());
+  const watch = await registerWatch(client, topic);
   log(`📬 Gmail watch registered (historyId ${watch.historyId}); pulling from ${subscription}`);
 
   // Notifications can arrive concurrently; a drain both reads and advances the
   // one cursor, so two at once would race. Serialize them the way the turn loop
-  // serializes turns.
+  // serializes turns. With Ronnie on, each drain enqueues ids then kicks the
+  // consumer (onDrained); with it off, the drain buffers for the digest.
   let chain = Promise.resolve();
   const drainOnce = () => {
     chain = chain.then(() =>
-      drainHistory(gmail, { log, processor }).then(
-        (s) => {
+      drainHistory(client, { log, enqueue }).then(
+        async (s) => {
           if (s.added || s.withheld)
-            log(`📥 Buffered ${s.added} message(s)${s.withheld ? `, withheld ${s.withheld}` : ""}`);
+            log(
+              `📥 ${enqueue ? "Queued" : "Buffered"} ${s.added} message(s)` +
+                `${s.withheld ? `, withheld ${s.withheld}` : ""}`
+            );
+          if (onDrained) await onDrained().catch((e) => log(`⚠️  Consumer drain failed: ${e.message}`));
         },
         (err) => log(`⚠️  Mail drain failed: ${err.message}`)
       )

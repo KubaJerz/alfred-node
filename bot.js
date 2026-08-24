@@ -7,7 +7,8 @@ import { fileURLToPath } from "url";
 import path from "path";
 import { startBroker } from "./google/broker.js";
 import { NOTION_ROUTES } from "./notion/broker.js";
-import { startMailListener, processBacklog } from "./google/gmail-push.js";
+import { startMailListener, migrateBacklogToQueue, enrich } from "./google/gmail-push.js";
+import { gmailClient, PUBSUB_KEY_FILE } from "./google/auth.js";
 import { drainMailDigest } from "./google/gmail-buffer.js";
 import { RONNIE_ROUTES } from "./ronnie/broker-routes.js";
 import { makeRonnie } from "./ronnie/runner.js";
@@ -723,38 +724,59 @@ await bootstrap();
 const broker = await startBroker({ extraRoutes: NOTION_ROUTES });
 
 // Ronnie: a second, narrow broker (its own port and token, only the label +
-// calendar-import/remove routes) plus the inbound-mail processor that drains the
-// queue through it. Off unless configured — a webhook, labels, or owner
-// addresses present — so a box without Ronnie config drains mail exactly as
-// before. bot.js holds the token and runs both brokers; Ronnie is a client of
-// its own one.
+// calendar-import/remove routes) plus the queue + consumer that triage inbound
+// mail through it. Off unless configured — a webhook, labels, or owner addresses
+// present — so a box without Ronnie config drains mail exactly as before. bot.js
+// holds the token and runs both brokers; Ronnie is a client of its own one.
 const ronnieConfigured = !!(
   process.env.RONNIE_DISCORD_WEBHOOK ||
   process.env.RONNIE_LABEL_BULK ||
   process.env.RONNIE_LABEL_INTERESTING ||
   process.env.RONNIE_FORWARD_SENDERS
 );
+// The consumer fetches full messages, which needs the OAuth client — and that
+// only matters when the push path is actually set up. Build one client and share
+// it between the consumer's enrichOne and the listener, so there's one watch.
+const pushConfigured = !!(
+  process.env.GMAIL_PUBSUB_TOPIC &&
+  process.env.GMAIL_PUBSUB_SUBSCRIPTION &&
+  existsSync(PUBSUB_KEY_FILE)
+);
 let ronnie = null;
+let sharedGmail = null;
 if (ronnieConfigured) {
   const ronnieBroker = await startBroker({ baseRoutes: {}, extraRoutes: RONNIE_ROUTES });
-  ronnie = makeRonnie({ brokerUrl: ronnieBroker.url, brokerToken: ronnieBroker.token });
-  console.log("🧰 Ronnie is on — inbound mail is triaged, labelled, and pinged");
+  sharedGmail = pushConfigured ? await gmailClient() : null;
+  const enrichOne = sharedGmail ? (id) => enrich(sharedGmail, id) : undefined;
+  ronnie = makeRonnie({ brokerUrl: ronnieBroker.url, brokerToken: ronnieBroker.token, enrichOne });
+  console.log("🧰 Ronnie is on — inbound mail is queued, triaged, labelled, and pinged");
 
-  // One-time pass over mail buffered before Ronnie existed. Runs before the
-  // listener so it can't race a live drain, and is idempotent (it skips
-  // already-triaged entries), so a restart with an empty backlog does nothing.
-  await processBacklog({ processor: ronnie.process }).catch((err) =>
-    console.error(`⚠️  Ronnie backlog pass failed: ${err.message}`)
-  );
+  if (ronnie && sharedGmail) {
+    // Load the durable work queue, then migrate anything left in the old digest
+    // buffer into it (one-time, dedup-safe). Runs before the listener so it can't
+    // race a live drain.
+    await ronnie.queue.load();
+    await migrateBacklogToQueue({ queue: ronnie.queue }).catch((err) =>
+      console.error(`⚠️  Ronnie backlog migration failed: ${err.message}`)
+    );
+
+    // A periodic sweep is what re-probes held mail during a Haiku outage — the
+    // breaker's cooldown only matters if something calls drain() again. A no-op
+    // when the queue is empty. Plus one kick at boot to drain what's queued.
+    const sweepMs = Number(process.env.RONNIE_SWEEP_MS) || 60_000;
+    const sweep = setInterval(() => ronnie.drain().catch(() => {}), sweepMs);
+    sweep.unref?.();
+    ronnie.drain().catch((err) => console.error(`⚠️  Ronnie boot drain failed: ${err.message}`));
+  }
 }
 
 // The inbound-mail listener. Like the broker, it's optional: with no topic /
 // subscription / service-account key it logs that it's off and returns null,
 // so a box without the cloud setup runs exactly as before. A failure to start
 // (bad key, unreachable Pub/Sub) is logged and swallowed — mail is an add-on,
-// not a reason to take the whole bot down. When Ronnie is on, it processes each
-// message; when off, the drain buffers everything as before.
-startMailListener({ processor: ronnie?.process }).catch((err) =>
+// not a reason to take the whole bot down. When Ronnie is on, each drain enqueues
+// new ids and kicks the consumer; when off, the drain buffers for the digest.
+startMailListener({ gmail: sharedGmail, enqueue: ronnie?.enqueue, onDrained: ronnie?.drain }).catch((err) =>
   console.error(`⚠️  Gmail push listener failed to start: ${err.message}`)
 );
 

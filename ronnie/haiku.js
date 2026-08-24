@@ -20,6 +20,18 @@
 
 import { spawn } from "child_process";
 
+// Thrown when the `claude -p` call itself fails — spawn error, non-zero exit,
+// non-JSON output. That's the *service* being down, not one bad message, so the
+// consumer routes it to the circuit breaker (back off, hold the queue) instead
+// of blaming the message. A verdict that comes back but is unparseable is NOT
+// this — the service answered, so that stays a fail-open on the one message.
+export class HaikuDownError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "HaikuDownError";
+  }
+}
+
 const MODEL = process.env.RONNIE_HAIKU_MODEL || "claude-haiku-4-5";
 const MAX_BODY = 6000; // cap the body fed to Haiku — enough to judge, not unbounded
 
@@ -102,17 +114,30 @@ function runClaude(prompt, { model }) {
  *
  * @param {{from?: string, subject?: string, body?: string}} msg
  */
-export async function classifyWithHaiku(msg = {}, { model = MODEL, run = null, meter = null } = {}) {
+export async function classifyWithHaiku(
+  msg = {},
+  { model = MODEL, run = null, meter = null, strict = false } = {}
+) {
   const runner = run || ((p) => runClaude(p, { model }));
+
+  // The service call. A rejection here is the service being down.
+  let result;
   try {
-    const { text, usage, cost } = await runner(buildPrompt(msg));
-    if (meter && usage) meter.record({ ...usage, model, cost });
-    const verdict = parseVerdict(text);
-    if (!verdict) throw new Error("unparseable verdict");
-    return { ...verdict, usage };
+    result = await runner(buildPrompt(msg));
   } catch (err) {
-    return { label: "personal", summary: "", error: err.message };
+    // In strict mode (the consumer) let the breaker see it and hold the message.
+    if (strict) throw new HaikuDownError(err.message);
+    // Legacy fail-open: surface the message rather than bury it.
+    return { label: "personal", summary: "", error: err.message, usedHaiku: true, down: true };
   }
+
+  // The service answered. Record usage; a junk verdict is a one-message problem
+  // (fail that one open), never a reason to back off the whole queue.
+  const { text, usage, cost } = result;
+  if (meter && usage) meter.record({ ...usage, model, cost });
+  const verdict = parseVerdict(text);
+  if (!verdict) return { label: "personal", summary: "", error: "unparseable verdict", usedHaiku: true };
+  return { ...verdict, usage, usedHaiku: true };
 }
 
 export { MODEL, buildPrompt };

@@ -98,7 +98,7 @@ export async function handleMessage(msg = {}, deps = {}) {
   }
 
   // ── 2. Triage path ────────────────────────────────────────────────────────
-  const { label, summary, reason, capped } = await classify(msg, { log });
+  const { label, summary, reason, capped, usedHaiku } = await classify(msg, { log });
   const labelId = label === "bulk" ? labels.bulk : labels.interesting;
   if (labelId && msg.id) {
     // Filed mail is *moved* — the BULK label plus archiving it out of the inbox
@@ -114,8 +114,9 @@ export async function handleMessage(msg = {}, deps = {}) {
     await notify([mailEmbed({ ...msg, category: "personal", summary })]);
   }
   log(`✉️  ${label} (${reason}) — ${msg.subject || "(no subject)"}`);
-  // capped is surfaced so the runner can post a one-time "hit the cap" notice.
-  return { action: label === "bulk" ? "filed" : "pinged", category: label, reason, capped };
+  // capped is surfaced so the runner can post a one-time "hit the cap" notice;
+  // usedHaiku tells the consumer whether to credit the breaker with a success.
+  return { action: label === "bulk" ? "filed" : "pinged", category: label, reason, capped, usedHaiku };
 }
 
 /**

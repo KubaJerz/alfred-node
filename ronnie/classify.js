@@ -22,19 +22,26 @@ import { classifyWithHaiku } from "./haiku.js";
 export async function classify(msg = {}, opts = {}) {
   const pre = prefilter(msg, { block: opts.block, allow: opts.allow });
   if (pre.decision !== "undecided") {
-    return { label: pre.decision, summary: "", reason: pre.reason };
+    return { label: pre.decision, summary: "", reason: pre.reason, usedHaiku: false };
   }
 
   // Undecided -> the paid stage, unless the daily call cap says stop.
   if (opts.capCalls && opts.meter) {
     const calls = await opts.meter.callsToday();
     if (calls >= opts.capCalls) {
-      return { label: "personal", summary: "", reason: "over daily cap", capped: true };
+      return { label: "personal", summary: "", reason: "over daily cap", capped: true, usedHaiku: false };
     }
   }
 
-  const v = await classifyWithHaiku(msg, { meter: opts.meter, run: opts.run });
-  return { label: v.label, summary: v.summary, reason: v.error ? `haiku error: ${v.error}` : "haiku" };
+  // In strict mode a service-down here throws HaikuDownError (for the breaker);
+  // otherwise it fails open, exactly as before.
+  const v = await classifyWithHaiku(msg, { meter: opts.meter, run: opts.run, strict: opts.strict });
+  return {
+    label: v.label,
+    summary: v.summary,
+    reason: v.error ? `haiku error: ${v.error}` : "haiku",
+    usedHaiku: true,
+  };
 }
 
 /** Bind config once; returns (msg) => classify(msg, opts). For the runner. */
