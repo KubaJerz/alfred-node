@@ -44,8 +44,9 @@ function clean(s, max = 240) {
 
 /**
  * A Discord embed for a single inbound message. `entry` carries the sender,
- * subject and category triage() assigned. Pure — no network — so it's testable
- * and the poster below can batch several.
+ * subject, category, and (for a personal message) Haiku's one-sentence summary,
+ * which becomes the embed body. Pure — no network — so it's testable and the
+ * poster below can batch several.
  */
 export function mailEmbed(entry = {}) {
   const from = clean(entry.from) || "unknown sender";
@@ -55,6 +56,8 @@ export function mailEmbed(entry = {}) {
     color: bulk ? COLORS.bulk : COLORS.personal,
     author: { name: from },
     title: subject,
+    // The one-liner is the point of the ping — why this matters, in a sentence.
+    description: entry.summary ? clean(entry.summary, 500) : undefined,
     footer: { text: bulk ? "filed — bulk" : "new mail" },
   };
 }

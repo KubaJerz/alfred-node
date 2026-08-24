@@ -1,6 +1,7 @@
 // Run with: npm test   (node's built-in runner, no network, no credentials)
 import { test } from "node:test";
 import assert from "node:assert/strict";
+process.env.ANTHROPIC_API_KEY = ""; // never hit the real API from unit tests
 import { handleMessage, makeBrokerClient } from "../ronnie/index.js";
 
 // A fake broker + notify that record what Ronnie tried to do.

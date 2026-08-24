@@ -15,15 +15,16 @@
 //      it — a forgery, a stranger's attachment — never reaches import/remove and
 //      simply falls through to be triaged like any other mail.
 //
-//   2. Triage. Everything else: bulk → a boring label and silence; personal →
-//      a watched label and a webhook ping (tier 2). No model, ever.
+//   2. Triage. Everything else runs the classify pipeline (blocklist → allowlist
+//      → grep → Haiku): bulk → a boring label and silence; personal → a watched
+//      label and a webhook ping carrying Haiku's one-sentence why.
 //
 // The message is *enriched* by the caller (bot.js), which holds the token and so
 // is the thing that can read the .ics part and the Authentication-Results header.
 // Ronnie's broker can't read mail by design, so the read stays on the token side
 // and Ronnie is handed only what the decision needs.
 
-import { triage } from "../google/mail-triage.js";
+import { classify as defaultClassify } from "./classify.js";
 import { isForwardFromOwner } from "./sender-auth.js";
 import { parseICS, decideInvite } from "./ics.js";
 import { mailEmbed, inviteEmbed, post } from "./notify.js";
@@ -62,6 +63,7 @@ export async function handleMessage(msg = {}, deps = {}) {
     notify = (embeds) => post(embeds),
     labels = LABELS,
     owners,
+    classify = defaultClassify,
     log = () => {},
   } = deps;
 
@@ -96,17 +98,18 @@ export async function handleMessage(msg = {}, deps = {}) {
   }
 
   // ── 2. Triage path ────────────────────────────────────────────────────────
-  const { category } = triage(msg);
-  const labelId = category === "bulk" ? labels.bulk : labels.interesting;
+  const { label, summary, reason } = await classify(msg, { log });
+  const labelId = label === "bulk" ? labels.bulk : labels.interesting;
   if (labelId && msg.id) {
     await broker("POST /mail/label", { id: msg.id, addLabels: [labelId] });
   }
-  // Tier 2: a personal message is worth a ping; bulk is filed in silence.
-  if (category === "personal") {
-    await notify([mailEmbed({ ...msg, category })]);
+  // Tier 2: a personal message is worth a ping, carrying Haiku's one-liner; bulk
+  // is filed in silence.
+  if (label === "personal") {
+    await notify([mailEmbed({ ...msg, category: "personal", summary })]);
   }
-  log(`✉️  ${category} — ${msg.subject || "(no subject)"}`);
-  return { action: category === "bulk" ? "filed" : "pinged", category };
+  log(`✉️  ${label} (${reason}) — ${msg.subject || "(no subject)"}`);
+  return { action: label === "bulk" ? "filed" : "pinged", category: label };
 }
 
 /**

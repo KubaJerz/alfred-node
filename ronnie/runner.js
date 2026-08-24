@@ -14,6 +14,8 @@
 
 import { handleMessage, makeBrokerClient } from "./index.js";
 import { post } from "./notify.js";
+import { makeClassifier } from "./classify.js";
+import { makeMeter } from "./meter.js";
 
 /**
  * Build the drain processor. Given the enriched, already-code-screened safe
@@ -21,12 +23,12 @@ import { post } from "./notify.js";
  * buffering for Alfred (personal mail). Bulk is filed silently; invites are
  * handled on the calendar — neither belongs in the next-session digest.
  */
-export function makeProcessor({ broker, notify, labels, owners, log = () => {} }) {
+export function makeProcessor({ broker, notify, labels, owners, classify, log = () => {} }) {
   return async (messages = []) => {
     const keep = [];
     for (const msg of messages) {
       try {
-        const verdict = await handleMessage(msg, { broker, notify, labels, owners, log });
+        const verdict = await handleMessage(msg, { broker, notify, labels, owners, classify, log });
         // Only a personal message (pinged now) is also kept for the digest, so
         // Alfred sees it next session. Bulk and invites are done and dropped.
         if (verdict.action === "pinged") keep.push(msg);
@@ -50,6 +52,8 @@ export function makeRonnie({
   brokerUrl = process.env.RONNIE_BROKER_URL,
   brokerToken = process.env.RONNIE_BROKER_TOKEN,
   webhookUrl = process.env.RONNIE_DISCORD_WEBHOOK,
+  apiKey = process.env.ANTHROPIC_API_KEY,
+  capUSD = Number(process.env.RONNIE_HAIKU_DAILY_CAP_USD) || null,
   labels,
   owners,
   fetchImpl = fetch,
@@ -59,7 +63,14 @@ export function makeRonnie({
 
   const broker = makeBrokerClient({ url: brokerUrl, token: brokerToken, fetchImpl });
   const notify = (embeds) => post(embeds, { webhookUrl, fetchImpl });
+  // The meter + the blocklist/allowlist/grep/Haiku pipeline. block/allow come
+  // from env inside prefilter; apiKey/meter/cap are bound here. With no apiKey,
+  // classifyWithHaiku fails open to personal without a call, so Ronnie still
+  // labels and pings on the free stages alone.
+  const meter = makeMeter();
+  const classify = makeClassifier({ apiKey, meter, capUSD, fetchImpl, log });
   return {
-    process: makeProcessor({ broker, notify, labels, owners, log }),
+    meter,
+    process: makeProcessor({ broker, notify, labels, owners, classify, log }),
   };
 }

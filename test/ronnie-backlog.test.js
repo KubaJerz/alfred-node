@@ -1,6 +1,7 @@
 // Run with: npm test   (node's built-in runner, no network, no credentials)
 import { test } from "node:test";
 import assert from "node:assert/strict";
+process.env.ANTHROPIC_API_KEY = ""; // never hit the real API from unit tests
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { mkdtempSync } from "node:fs";
