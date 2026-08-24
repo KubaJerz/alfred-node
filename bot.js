@@ -7,7 +7,7 @@ import { fileURLToPath } from "url";
 import path from "path";
 import { startBroker } from "./google/broker.js";
 import { NOTION_ROUTES } from "./notion/broker.js";
-import { startMailListener } from "./google/gmail-push.js";
+import { startMailListener, processBacklog } from "./google/gmail-push.js";
 import { drainMailDigest } from "./google/gmail-buffer.js";
 import { RONNIE_ROUTES } from "./ronnie/broker-routes.js";
 import { makeRonnie } from "./ronnie/runner.js";
@@ -739,6 +739,13 @@ if (ronnieConfigured) {
   const ronnieBroker = await startBroker({ baseRoutes: {}, extraRoutes: RONNIE_ROUTES });
   ronnie = makeRonnie({ brokerUrl: ronnieBroker.url, brokerToken: ronnieBroker.token });
   console.log("🧰 Ronnie is on — inbound mail is triaged, labelled, and pinged");
+
+  // One-time pass over mail buffered before Ronnie existed. Runs before the
+  // listener so it can't race a live drain, and is idempotent (it skips
+  // already-triaged entries), so a restart with an empty backlog does nothing.
+  await processBacklog({ processor: ronnie.process }).catch((err) =>
+    console.error(`⚠️  Ronnie backlog pass failed: ${err.message}`)
+  );
 }
 
 // The inbound-mail listener. Like the broker, it's optional: with no topic /

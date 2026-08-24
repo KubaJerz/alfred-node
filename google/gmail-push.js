@@ -29,7 +29,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { gmailClient, GOOGLE_DIR, PUBSUB_KEY_FILE } from "./auth.js";
 import { screen } from "./mail-filter.js";
-import { appendPending } from "./gmail-buffer.js";
+import { appendPending, drainPending } from "./gmail-buffer.js";
 
 // Our own sync cursor. Separate file, own writer — never state.json (which has
 // exactly one writer, the turn loop) and never token.json (a credential).
@@ -261,13 +261,69 @@ export async function drainHistory(gmail, { log = console.log, processor = null 
       added++;
       // Drop everything but sender and subject before it rests on disk — the
       // digest needs no more, and enrich()'s headers/body/ics never persist.
-      entries.push({ id: e.id, ts: e.ts, from: e.from, subject: e.subject });
+      // Tag it triaged when Ronnie handled it, so a later backlog pass skips it
+      // and never re-labels or re-pings mail already dealt with.
+      const kept = { id: e.id, ts: e.ts, from: e.from, subject: e.subject };
+      if (keepIds) kept.triaged = true;
+      entries.push(kept);
     }
     if (entries.length) await appendPending(entries);
   }
 
   await writeSync({ historyId: newestHistoryId });
   return { added, withheld, resync: false };
+}
+
+/**
+ * One-time pass over mail already sitting in the queue — everything buffered
+ * before Ronnie was turned on. Live drains only ever see *new* arrivals, so
+ * without this the existing backlog would flow into the digest untriaged.
+ *
+ * It is idempotent, which is the whole trick: an entry Ronnie has handled is
+ * tagged `triaged`, and this skips anything tagged (and the withheld/resync
+ * markers). So it processes each message once and a restart re-does nothing.
+ * Entries carry their message id, so Ronnie re-fetches by id, enriches, screens,
+ * and acts — then the queue is rewritten to the markers, any newly-withheld
+ * message, and the personal mail Ronnie kept (now tagged).
+ *
+ * Runs only when a processor is supplied (Ronnie on). gmail/file are injectable
+ * for tests; by default it opens its own client and the real queue.
+ */
+export async function processBacklog({ processor, gmail = null, file, log = console.log } = {}) {
+  if (!processor) return { processed: 0, kept: 0 };
+
+  const entries = await drainPending(file); // reads and clears
+  if (!entries.length) return { processed: 0, kept: 0 };
+
+  // Untouched: already-triaged mail, withheld/resync markers, anything with no
+  // id to re-fetch. These go straight back into the queue.
+  const passthrough = entries.filter((e) => e.triaged || e.withheld || e.resync || !e.id);
+  const todo = entries.filter((e) => e.id && !e.triaged && !e.withheld && !e.resync);
+
+  if (!todo.length) {
+    if (passthrough.length) await appendPending(passthrough, file);
+    return { processed: 0, kept: 0 };
+  }
+
+  const client = gmail || (await gmailClient());
+  const enriched = (await Promise.all(todo.map((e) => enrich(client, e.id)))).filter(Boolean);
+  const screened = screen(enriched); // re-screen: a full fetch may catch a code metadata missed
+  const safe = screened.filter((e) => !e.withheld);
+  const nowWithheld = screened.filter((e) => e.withheld);
+
+  const keep = await processor(safe);
+  const kept = (keep || []).map((m) => ({
+    id: m.id,
+    ts: m.ts,
+    from: m.from,
+    subject: m.subject,
+    triaged: true,
+  }));
+
+  const rewrite = [...passthrough, ...nowWithheld, ...kept];
+  if (rewrite.length) await appendPending(rewrite, file);
+  log(`📮 Ronnie backlog: processed ${todo.length}, kept ${kept.length} personal for the digest`);
+  return { processed: todo.length, kept: kept.length };
 }
 
 /**
