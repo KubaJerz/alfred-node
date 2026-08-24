@@ -269,6 +269,31 @@ risky jobs to small least-privilege agents instead of widening his reach.
       what was added to Discord either way, so a bad parse is visible the same
       day rather than at the meeting.
 
+### Reliability — nightly jobs that fail at 3am
+
+- [ ] **Scheduled-job health — flag failures, and recycle where safe.** `bot.js`
+      is supervised (`start-alfred.sh` restarts it on crash with backoff); cron
+      jobs are not. `dream.sh` fires at 3am and fails silently on a bad night —
+      and worse, it stamps `last-dream` **unconditionally**, so a *failed* pass
+      marks itself done and the next session trusts memory that was never
+      written. As nightly jobs multiply (dream, the workout pull, Ronnie, mail
+      sync) the blind spots multiply with them.
+
+      Two wants:
+      - **Report.** A failed job publishes a failure event that `bot.js` surfaces
+        to Discord. This *is* the change bus aimed at failures instead of new
+        files, and the proactive-auth-check item (below) is one instance of it.
+        Cron can't reach Discord — only `bot.js` holds the client — so the job
+        leaves a marker and the bot drains it, same as any other producer.
+      - **Recycle.** Retry with backoff, or catch up a *missed* run (the dream
+        off-by-one fix was a hand-rolled, one-off version of this).
+
+      Do it in one pass, not piecemeal. First casualty to fix: jobs marking
+      themselves done on failure (the `last-dream` stamp). Shape: a thin wrapper
+      every scheduled job runs under — run the job, and on non-zero exit publish
+      the failure and decide retry-vs-defer — rather than each job hand-rolling
+      its own.
+
 ## Someday / Maybe
 
 - [ ] **Tiered memory (L1/L2).** `agent/var/memories/MEMORY.md` is injected into
