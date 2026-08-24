@@ -62,12 +62,10 @@ and move to **Done** with the PR number. Anything with a GitHub issue links to i
       cron that writes ten files is one event, not ten); never emit an empty block;
       and keep the payload a delta, never the whole world.
 
-### Integrations — give Alfred hands
+### Security — isolate Alfred, and push risky work onto their own agents
 
-Google access is live as of #25: OAuth consented, credentials held by a broker in
-`bot.js`, and `bin/gmail.js` / `bin/gcal.js` as the agent-facing CLIs, each paired
-with a skill under `agent/.claude/skills/`. What follows is what's left rather
-than what's missing.
+The #2 priority. Two halves of one idea: give Alfred a hard boundary, and hand
+risky jobs to small least-privilege agents instead of widening his reach.
 
 - [ ] **Run the agent as a separate Unix user.** This is what turns the broker
       from a strong default into a guarantee. Alfred currently runs as the same
@@ -77,6 +75,70 @@ than what's missing.
       survive Bash. Needs: a second user with its own authenticated Claude Code,
       a NOPASSWD sudoers rule, `chmod 700` on the credentials dir, and group
       sharing so memories stay writable.
+
+- [ ] **Separate agents for the risky work — Ronnie is the first.** _🚧 In
+      progress on `feat/ronnie-triage`._ Ronnie is a *distinct* agent that triages
+      inbound mail with Haiku over the Pub/Sub subscription — its own narrow
+      broker (label + invite import/remove only), a DKIM-authenticated forward
+      gate, an `.ics` parser, and a cost meter, none of it sharing Alfred's
+      reach. The pattern is the point: when a job needs a model but not Alfred's
+      full toolset, it gets its own bounded agent instead of a new power on his.
+      This is the *separate-agents* half of the security direction; the
+      *separate-user* item above is the isolation half.
+
+### Workout database
+
+- [ ] **Garmin connection + a workout database.** _🚧 In progress — branch
+      `feat/intervals-icu` scaffolded. The route being tried is **intervals.icu**
+      rather than Garmin direct: it exposes an official API and already ingests
+      Garmin/Strava, which sidesteps the no-official-API problem below._ Pull activities (runs, lifts,
+      HR, sleep) from Garmin into a store under `agent/var/` that Alfred can
+      query — "how far did I run this week", "am I recovered enough to train".
+      Open first: **Garmin has no official consumer API** (the Health/Activity
+      APIs are a partner program), so the practical route is an unofficial client
+      against Garmin Connect, which breaks when they change the site. Then the
+      schema — what one workout row is — and nightly pull vs. on-demand. ("galin"
+      in the ask; read as Garmin — correct if wrong.)
+
+### Voice
+
+- [ ] **Voice messages → text.** Discord voice notes are Ogg/Opus attachments.
+      The download primitive now exists (#40), so this reuses it and adds only its
+      own trigger (the `IsVoiceMessage` flag) and transcription. Transcribe
+      locally: audio is a different privacy category than text.
+
+      **Model: NVIDIA Parakeet-TDT-0.6B, via ONNX rather than NeMo** (Kuba,
+      2026-08-04). NeMo's dependency tree is built for GPU training; the int8
+      ONNX export is ~1 GB on `onnxruntime`.
+
+      *Whisper considered and not taken.* It is genuinely smaller — `tiny.en`
+      39 M, `base.en` 74 M, `small.en` 244 M against Parakeet's 600 M — and
+      `pip install faster-whisper` is far less install friction than community
+      ONNX exports. Three things outweighed that: RAM and disk aren't scarce
+      here (62 GB / 415 GB free), so a 1 GB model costs nothing; Whisper pads
+      every clip to a **fixed 30 s window**, so a 4-second note costs the same
+      as a 30-second one and the size advantage largely evaporates on exactly
+      the clips we'd send; and its silence-hallucination is worst at `tiny`/
+      `base`, which is the wrong failure mode for a transcript that *takes
+      actions*. Revisit only if the ONNX route proves unworkable — the
+      transcriber sits behind a `path -> text` call, so swapping it is cheap.
+
+      **This box is CPU-only** — no GPU, i7-8700 (6c/12t, AVX2, no VNNI), so
+      int8 buys ~1.5–2× not 4×: quantize for footprint, not speed. Estimated
+      RTF ~0.1 — 10 s note ≈ 1–2 s, 30 s ≈ 3–5 s, plus 1–2 s model load once
+      the file is in page cache. Unmeasured, and estimates on 2017 silicon run
+      optimistic; time it before designing around it. Either way it's small
+      next to a 10–30 s `claude -p` turn, so don't build streaming up front.
+
+      Needs `ffmpeg` (not installed) to decode Opus → 16 kHz mono PCM.
+
+      The transcript becomes the user message; Alfred never learns it was
+      spoken. One guard: echo what was heard when the turn takes an action — a
+      misheard "cancel Thursday's meeting" otherwise acts on the mishearing.
+
+## Next
+
+### Mail & calendar — the rest of the Pub/Sub arc
 
 - [ ] **Gmail → Alfred via Pub/Sub.** _Tier 1 is built (branch
       `feat/gmail-pubsub`, PR pending) — see the Done entry for what shipped.
@@ -207,16 +269,11 @@ than what's missing.
       what was added to Discord either way, so a bad parse is visible the same
       day rather than at the meeting.
 
-## Next
+## Someday / Maybe
 
 - [ ] **Tiered memory (L1/L2).** `agent/var/memories/MEMORY.md` is injected into
       every new session; it's empty today, but the split plan is already noted in
       that file's header (issue #8). Do it when size actually becomes a problem.
-
-## Someday / Maybe
-
-### New integration ideas (Kuba, 2026-08-12 — unscoped, capture-only)
-
 - [ ] **Give Alfred a phone number.** A number he can text — and be texted at —
       so he reaches Kuba outside Discord: reminders and nudges over a channel
       that's open even when Discord isn't. Settle the provider first, because it
@@ -225,56 +282,12 @@ than what's missing.
       an unofficial route that can break; Twilio is the friction-free alternative
       if "Google" isn't load-bearing. Inbound texts would ride the same
       buffer-vs-turn tiering as the Pub/Sub mail path.
-- [ ] **Garmin connection + a workout database.** Pull activities (runs, lifts,
-      HR, sleep) from Garmin into a store under `agent/var/` that Alfred can
-      query — "how far did I run this week", "am I recovered enough to train".
-      Open first: **Garmin has no official consumer API** (the Health/Activity
-      APIs are a partner program), so the practical route is an unofficial client
-      against Garmin Connect, which breaks when they change the site. Then the
-      schema — what one workout row is — and nightly pull vs. on-demand. ("galin"
-      in the ask; read as Garmin — correct if wrong.)
 - [ ] **Food logging + a database.** Let Kuba log meals to Alfred (a Discord line
       first, a photo later) and keep them queryable — what and when, ideally
       calories/macros. Two open questions: the schema, and whether Alfred
       *estimates* nutrition from a description (a model in the loop, proposing
       rather than recording as fact) or looks it up against a food database. Photo
       input rides on **Read inbound attachments** (shipped, #40).
-
-### Later integrations (Kuba, 2026-08-02 — explicitly "for later")
-
-- [ ] **Voice messages → text.** Discord voice notes are Ogg/Opus attachments.
-      The download primitive now exists (#40), so this reuses it and adds only its
-      own trigger (the `IsVoiceMessage` flag) and transcription. Transcribe
-      locally: audio is a different privacy category than text.
-
-      **Model: NVIDIA Parakeet-TDT-0.6B, via ONNX rather than NeMo** (Kuba,
-      2026-08-04). NeMo's dependency tree is built for GPU training; the int8
-      ONNX export is ~1 GB on `onnxruntime`.
-
-      *Whisper considered and not taken.* It is genuinely smaller — `tiny.en`
-      39 M, `base.en` 74 M, `small.en` 244 M against Parakeet's 600 M — and
-      `pip install faster-whisper` is far less install friction than community
-      ONNX exports. Three things outweighed that: RAM and disk aren't scarce
-      here (62 GB / 415 GB free), so a 1 GB model costs nothing; Whisper pads
-      every clip to a **fixed 30 s window**, so a 4-second note costs the same
-      as a 30-second one and the size advantage largely evaporates on exactly
-      the clips we'd send; and its silence-hallucination is worst at `tiny`/
-      `base`, which is the wrong failure mode for a transcript that *takes
-      actions*. Revisit only if the ONNX route proves unworkable — the
-      transcriber sits behind a `path -> text` call, so swapping it is cheap.
-
-      **This box is CPU-only** — no GPU, i7-8700 (6c/12t, AVX2, no VNNI), so
-      int8 buys ~1.5–2× not 4×: quantize for footprint, not speed. Estimated
-      RTF ~0.1 — 10 s note ≈ 1–2 s, 30 s ≈ 3–5 s, plus 1–2 s model load once
-      the file is in page cache. Unmeasured, and estimates on 2017 silicon run
-      optimistic; time it before designing around it. Either way it's small
-      next to a 10–30 s `claude -p` turn, so don't build streaming up front.
-
-      Needs `ffmpeg` (not installed) to decode Opus → 16 kHz mono PCM.
-
-      The transcript becomes the user message; Alfred never learns it was
-      spoken. One guard: echo what was heard when the turn takes an action — a
-      misheard "cancel Thursday's meeting" otherwise acts on the mishearing.
 - [ ] **Proactive auth health check.** Auth lapses are now caught on the turn
       they happen (#20), but not before. A probe on boot was deliberately
       skipped: it would run inside the launcher's restart loop. A once-daily
