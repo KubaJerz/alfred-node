@@ -5,6 +5,39 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
 
 ## [Unreleased]
 ### Added
+- **Strength load tracking — Garmin lifting → rolling per-muscle load.** A new
+  `strength/` subsystem and `strength` skill turn Garmin strength workouts into
+  progressive-overload signal. Reps and weight aren't in Intervals.icu's JSON
+  (it recomputes from streams and drops the FIT set records), so a broker route
+  downloads the original FIT and decodes the message-225 sets (`@garmin/fitsdk`);
+  weights come back as the whole pounds entered (Garmin stores kg at 1/16-kg
+  precision). Data lands in SQLite (`agent/var/strength.db`, `node:sqlite`, no
+  native dep) across an immutable raw layer, a model-interpreted layer, and
+  deterministic views. A headless **Claude Haiku 4.5** pass reads each workout
+  against the program templates + that day's note and names the exercises, while
+  the code enforces the misfire rule and applies the muscle factor map itself, so
+  the numbers stay exact; load is assist-scaled `Σ factor × reps × lb` (a pulldown
+  half-credits biceps), exposed as 7-/28-day ACWR and a 14-day trend per muscle.
+  `bin/strength.js` gives Alfred `digest` (pull + interpret, nightly via
+  `dream.sh` and on-command), `load`, `sets`, and `plot` (a rolling-load PNG
+  Alfred sends via `{img:}`). An optional `STRENGTH_LOG_CHANNEL` captures Discord
+  workout notes immutably to feed the interpreter. Off unless `INTERVALS_API_KEY`
+  is set. Design: `docs/strength-load-design.md`.
+- **Alfred can read training and wellness data from Intervals.icu.** An
+  `intervals` skill and `bin/intervals.js` over the same credential broker Google
+  and Notion use: `activities` and `activity` for completed workouts, `wellness`
+  for daily sleep, HRV, resting HR and readiness. This is how Garmin data reaches
+  him — the watch syncs to Garmin Connect, which syncs to Intervals.icu, which
+  this reads. The whole surface is **read-only by construction**: `intervals/
+  client.js` exposes GET and nothing else, so there is no route that could edit an
+  activity or push a workout back to the watch — a missing capability, not a
+  declined one, mirroring "no send route" for mail. `intervals/broker.js` windows
+  every list to the last 30 days by default and projects a curated handful of
+  fields (an Intervals.icu activity carries ~200), so a bare query can't drag
+  years of second-by-second data into the transcript. The key
+  (`INTERVALS_API_KEY`, from Settings → Developer) lives only in bot.js's
+  environment; athlete `0` means "the key's own athlete", so no id is needed. Off
+  unless the key is set, so a box without it runs exactly as before.
 - **Inbound mail reaches Alfred over Pub/Sub (tier 1 — buffer silently).**
   `bot.js` registers a Gmail `users.watch()` on the INBOX and drains change
   notifications from a **pull** subscription (`google/gmail-push.js`), so no

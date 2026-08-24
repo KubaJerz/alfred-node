@@ -43,6 +43,13 @@ lists when nothing changed, so the log still records that the pass ran." \
   --allowedTools "Bash,Read,Edit,Write" \
   --dangerously-skip-permissions
 
+# Nightly strength digest: pull new Garmin lifts, interpret them with the Haiku
+# pass, and recompute the rolling load. Runs here because dream.sh is the repo's
+# one nightly hook; it self-skips when INTERVALS_API_KEY isn't set, and a failure
+# must never abort the dreaming pass, so it's guarded.
+echo "$(date): Strength digest…"
+node "$REPO_DIR/strength/nightly.js" || echo "$(date): strength digest failed (non-fatal)"
+
 # Record that a pass ran. The bot owns state.json — this used to overwrite it
 # directly, which reset the session out from under an in-progress conversation
 # if the pass landed mid-chat. The bot reads this stamp instead and starts a
