@@ -31,14 +31,15 @@ test("v_set_load computes factor × reps × weight", () => {
   assert.equal(r.load, 100);
 });
 
-test("rolling acute average counts consecutive days", () => {
+test("rolling load is a true N-day mean — the pre-pad keeps early days from spiking", () => {
   const db = seed();
-  assert.equal(rowOn(db, "chest", "2026-08-01").acute_7, 100); // just day 1
+  // With the 27-day zero pad, day one divides by the full 7, not by 1.
+  assert.equal(rowOn(db, "chest", "2026-08-01").acute_7, 14.286);  // 100/7
   const d2 = rowOn(db, "chest", "2026-08-02");
   assert.equal(d2.load, 200);
-  assert.equal(d2.acute_7, 150);      // avg(100, 200)
-  assert.equal(d2.chronic_28, 150);   // same window so far
-  assert.equal(d2.acwr, 1);           // acute == chronic
+  assert.equal(d2.acute_7, 42.857);    // 300/7
+  assert.equal(d2.chronic_28, 10.714); // 300/28
+  assert.equal(d2.acwr, 4);            // (300/7) / (300/28) = 28/7
 });
 
 test("the series is densified — a rest day exists and drags the average to 0", () => {
@@ -53,9 +54,9 @@ test("the series is densified — a rest day exists and drags the average to 0",
 
 test("whole-body _total is plain tonnage, not the sum of muscle loads", () => {
   const db = seed();
-  // Only chest here, so _total on 08-02 = reps*lb = 200, same shape.
+  // Only chest here, so _total on 08-02 = reps*lb = 200, averaged over 7 days.
   assert.equal(rowOn(db, "_total", "2026-08-02").load, 200);
-  assert.equal(rowOn(db, "_total", "2026-08-02").acute_7, 150);
+  assert.equal(rowOn(db, "_total", "2026-08-02").acute_7, 42.857);
 });
 
 test("weekly fractional set count sums the factors", () => {
@@ -69,6 +70,6 @@ test("rollingSeries returns an ordered daily series for the plot", () => {
   const db = seed();
   const s = rollingSeries(db, "chest");
   assert.ok(s.length >= 2);
-  assert.equal(s[0].date, "2026-08-01");
+  assert.equal(s[0].date, "2026-07-05"); // 27-day pad before the first workout (08-01)
   for (let i = 1; i < s.length; i++) assert.ok(s[i].date > s[i - 1].date, "series not date-ordered");
 });

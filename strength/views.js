@@ -49,7 +49,12 @@ const VIEWS = {
     CREATE VIEW v_rolling AS
     WITH RECURSIVE
       bounds AS (
-        SELECT COALESCE(MIN(date), date('now')) AS d0, date('now') AS d1
+        -- Start the spine 27 days BEFORE the first workout (all zeros), so even
+        -- the earliest real day divides its 7-/28-day window by the full window
+        -- size instead of by the one-or-two days seen so far. Without this pad,
+        -- day one reads a whole day's load as its "average" and spikes.
+        SELECT date(COALESCE(MIN(date), date('now')), '-27 day') AS d0,
+               date('now') AS d1
         FROM workout WHERE is_lifting = 1
       ),
       spine(d) AS (
