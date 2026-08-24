@@ -10,6 +10,7 @@ import { NOTION_ROUTES } from "./notion/broker.js";
 import { startMailListener } from "./google/gmail-push.js";
 import { drainMailDigest } from "./google/gmail-buffer.js";
 import { easternDate, dailyDir, dailyNotePath, attachmentName, buildAttachmentBlock } from "./dailies.js";
+import { parseClearCommand } from "./commands.js";
 
 // ── Config ──────────────────────────────────────────────────────────────────
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
@@ -136,9 +137,11 @@ async function logTurn(entry) {
 }
 
 // On /clear: copy the just-ended conversation from messages.jsonl into
-// logs/<firstTs>_to_<lastTs>.jsonl (UTC, filename-safe), excluding the /clear
-// command itself, then reset the live transcript so the next conversation
-// starts clean. Returns the archive path, or null if there was nothing to save.
+// logs/<firstTs>_to_<lastTs>.jsonl (UTC, filename-safe), then reset the live
+// transcript so the next conversation starts clean. The /clear command line
+// never appears here — handleTurn archives *before* it logs the inbound turn,
+// so the transcript holds only the real messages. Returns the archive path, or
+// null if there was nothing to save.
 async function archiveConversation() {
   let raw;
   try {
@@ -151,9 +154,7 @@ async function archiveConversation() {
     .split("\n")
     .filter(Boolean)
     .map((l) => { try { return JSON.parse(l); } catch { return null; } })
-    .filter(Boolean)
-    // drop the /clear command line — we want the messages *before* it
-    .filter((e) => !(e.dir === "in" && /^\/(clear|c)$/i.test((e.text || "").trim())));
+    .filter(Boolean);
 
   if (!entries.length) return null;
 
@@ -478,17 +479,10 @@ client.on("messageCreate", async (msg) => {
 
   if (!userMessage && attachments.length === 0) return;
 
-  // Log the inbound turn (user → bot) before anything else, so the transcript
-  // reflects arrival order even if the turn then waits its place in the queue.
-  await logTurn({
-    dir: "in",
-    user: msg.author.tag,
-    userId: msg.author.id,
-    channel: msg.channelId,
-    text: userMessage,
-    attachments: attachments.length,
-  });
-
+  // The inbound turn is logged inside handleTurn, not here: a "/c <text>"
+  // command clears (and archives) the transcript first, so logging on arrival
+  // would file the new message into the conversation it just ended. The queue
+  // is FIFO, so logging when the turn runs still preserves arrival order.
   if (pendingTurns > 0) {
     console.log(`⏳ ${pendingTurns} turn(s) already in flight — queuing this one`);
     msg.react("⏳").catch(() => {}); // best-effort; needs the Add Reactions permission
@@ -500,9 +494,10 @@ client.on("messageCreate", async (msg) => {
 // single global state.json, so overlapping turns would resume the same session
 // twice and race to write the new session id back.
 async function handleTurn(msg, userMessage, attachments = []) {
-  // Handle /clear or /c command
-  const lowerMsg = userMessage.toLowerCase();
-  if (lowerMsg === "/clear" || lowerMsg === "/c") {
+  // "/clear" / "/c" as a prefix: bare = clear and wait; "/c <text>" = clear,
+  // then run <text> as the fresh session's first turn (one message does both).
+  const clear = parseClearCommand(userMessage);
+  if (clear) {
     console.log(`🧹 Clearing session for ${msg.author.tag}`);
 
     // Archive the just-ended conversation, then kick off memory consolidation.
@@ -523,10 +518,32 @@ async function handleTurn(msg, userMessage, attachments = []) {
       topic: "session cleared",
       timestamp: new Date().toISOString(),
     });
-    const note = archivePath ? " (archived + consolidating memory)" : "";
-    await msg.reply(`🧹 Session cleared.${note} The next message will start a fresh session with full context.`);
-    return;
+
+    // Nothing after the command → the old behaviour: confirm and wait.
+    if (!clear.remainder && attachments.length === 0) {
+      const note = archivePath ? " (archived + consolidating memory)" : "";
+      await msg.reply(`🧹 Session cleared.${note} The next message will start a fresh session with full context.`);
+      return;
+    }
+
+    // There's a message (and/or files) riding with the command. Signal the
+    // clear with a reaction instead of a second message, then fall through and
+    // handle the remainder as the fresh session's first turn. State is already
+    // reset above, so `shouldResume` below is false and full context loads.
+    msg.react("🧹").catch(() => {}); // best-effort; needs the Add Reactions permission
+    userMessage = clear.remainder;
   }
+
+  // Log the inbound turn now — after any /clear reset above — so it lands in the
+  // fresh transcript rather than the one we just archived.
+  await logTurn({
+    dir: "in",
+    user: msg.author.tag,
+    userId: msg.author.id,
+    channel: msg.channelId,
+    text: userMessage,
+    attachments: attachments.length,
+  });
 
   console.log(`📨 ${msg.author.tag}: ${userMessage.slice(0, 100)}`);
 
