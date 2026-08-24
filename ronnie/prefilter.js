@@ -2,9 +2,10 @@
 //
 //   1. blocklist  — senders you've decided you never care about -> bulk, filed.
 //   2. allowlist  — senders you always want -> personal, pinged.
-//   3. Gmail box  — Gmail already sorted it into Promotions, Social, or Updates
-//                   -> bulk, filed. Its own classifier, free; only Primary mail
-//                   (and Forums) goes on to Haiku, which is the whole cost story.
+//   3. Gmail box  — Gmail already sorted it into Promotions or Social -> bulk,
+//                   filed for free. Updates is left OUT on purpose (it sweeps in
+//                   bank/sign-in/verify mail), so Updates, Primary and Forums all
+//                   flow on to Haiku — that Haiku step is the whole cost story.
 //   4. grep       — a List-Unsubscribe / list header is a machine declaring
 //                   itself bulk -> bulk, filed. (mail-triage.js.)
 //
@@ -31,12 +32,12 @@ const BLOCK = parseList(process.env.RONNIE_BLOCK_SENDERS);
 const ALLOW = parseList(process.env.RONNIE_ALLOW_SENDERS);
 
 // Gmail's own inbox categories Ronnie files without a Haiku call. Promotions and
-// Social are pure noise; Updates is included by choice — it's mostly routine
-// confirmations, and filing it is the accepted trade for not paying Haiku on the
-// whole transactional wall (an action item that lands there is filed too; the
-// allowlist is the rescue). Forums is left out (usually caught by the list-header
-// grep). Primary (CATEGORY_PERSONAL) is never here — that's what Haiku judges.
-const BULK_CATEGORIES = new Set(["CATEGORY_PROMOTIONS", "CATEGORY_SOCIAL", "CATEGORY_UPDATES"]);
+// Social are pure noise — free to file and safe. Updates is deliberately NOT here:
+// Gmail's UPDATES label is far broader than the visible Updates tab and sweeps in
+// bank alerts, sign-in notices, and verify-your-details requests — exactly the
+// mail worth a Haiku judgement. So Updates (like Primary and Forums) flows on to
+// Haiku. Primary (CATEGORY_PERSONAL) is never here — that's what Haiku judges.
+const BULK_CATEGORIES = new Set(["CATEGORY_PROMOTIONS", "CATEGORY_SOCIAL"]);
 
 // Does this sender match a list entry — as an exact address or a domain?
 function listed(address, list) {
