@@ -7,8 +7,11 @@ import { fileURLToPath } from "url";
 import path from "path";
 import { startBroker } from "./google/broker.js";
 import { NOTION_ROUTES } from "./notion/broker.js";
-import { startMailListener } from "./google/gmail-push.js";
+import { startMailListener, migrateBacklogToQueue, enrich } from "./google/gmail-push.js";
+import { gmailClient, PUBSUB_KEY_FILE } from "./google/auth.js";
 import { drainMailDigest } from "./google/gmail-buffer.js";
+import { RONNIE_ROUTES } from "./ronnie/broker-routes.js";
+import { makeRonnie } from "./ronnie/runner.js";
 import { easternDate, dailyDir, dailyNotePath, attachmentName, buildAttachmentBlock } from "./dailies.js";
 import { parseClearCommand } from "./commands.js";
 
@@ -479,6 +482,33 @@ client.on("messageCreate", async (msg) => {
 
   if (!userMessage && attachments.length === 0) return;
 
+  // Ronnie's undo, handled here and NOT as a turn — it's a direct broker action
+  // and must not spawn claude -p. Only the exact affordance form fires (a cal: or
+  // mail: token from a Ronnie embed footer), so a plain "undo …" to Alfred still
+  // reaches a turn untouched.
+  const undoMatch = /^undo\s+((?:cal|mail):\S+)/i.exec(userMessage);
+  if (undoMatch && ronnie?.undo) {
+    const token = undoMatch[1];
+    try {
+      const r = await ronnie.undo(token);
+      await msg.react("↩️").catch(() => {});
+      console.log(`↩️  Ronnie undo ${token} → ${r.kind}`);
+    } catch (err) {
+      await msg.reply(`Couldn't undo \`${token}\`: ${err.message}`).catch(() => {});
+    }
+    return;
+  }
+
+  // Ronnie metrics: "/ronnie-metrics" renders the Haiku cost figure into today's
+  // daily folder and posts it back. Handled here, not as a turn — it just runs a
+  // script and attaches a PNG.
+  if (/^\/?ronnie-metrics\b/i.test(userMessage)) {
+    await runRonnieMetrics(msg).catch((err) =>
+      msg.reply(`Couldn't build Ronnie metrics: ${err.message}`).catch(() => {})
+    );
+    return;
+  }
+
   // The inbound turn is logged inside handleTurn, not here: a "/c <text>"
   // command clears (and archives) the transcript first, so logging on arrival
   // would file the new message into the conversation it just ended. The queue
@@ -489,6 +519,42 @@ client.on("messageCreate", async (msg) => {
   }
   await enqueueTurn(() => handleTurn(msg, userMessage, attachments));
 });
+
+// Build Ronnie's Haiku usage dashboard and post it. Writes a self-contained
+// HTML view (modernist design, Archivo inlined, no external fetches) into today's
+// daily folder so Alfred can surface it, drops a one-line breadcrumb in the daily
+// note, and attaches the file. Pure Node — scripts/ronnie-dashboard.mjs has no
+// runtime deps, so there's nothing to provision.
+async function runRonnieMetrics(msg) {
+  const today = new Date().toISOString().split("T")[0];
+  const usageFile = path.join(STATE_DIR, "ronnie-usage.jsonl");
+  const dailyDir = path.join(MEMORIES_DIR, "dailies");
+  const outHtml = path.join(dailyDir, `ronnie-usage-${today}.html`);
+  const script = path.join(REPO_DIR, "scripts", "ronnie-dashboard.mjs");
+  await mkdir(dailyDir, { recursive: true });
+
+  const summary = await new Promise((resolve, reject) => {
+    // process.execPath is this bot's own node — robust under nvm/tmux where
+    // `node` may not be on a bare PATH.
+    const child = spawn(process.execPath, [script, usageFile, outHtml], { stdio: ["ignore", "pipe", "pipe"] });
+    let out = "";
+    let err = "";
+    child.stdout.on("data", (d) => (out += d));
+    child.stderr.on("data", (d) => (err += d));
+    child.on("error", reject);
+    child.on("close", (code) =>
+      code === 0 ? resolve(out.trim()) : reject(new Error(err.trim().slice(0, 300) || `exited ${code}`))
+    );
+  });
+
+  if (existsSync(outHtml)) {
+    // A breadcrumb in the daily note so Alfred can mention it; best-effort.
+    await appendFile(path.join(dailyDir, `${today}.md`), `\n- 📊 Ronnie Haiku usage: ${summary}\n`).catch(() => {});
+    await msg.reply({ content: `📊 ${summary}\nOpen the attached dashboard in a browser.`, files: [new AttachmentBuilder(outHtml)] });
+  } else {
+    await msg.reply(summary || "No Ronnie usage recorded yet.");
+  }
+}
 
 // One turn at a time, in arrival order. Everything below reads and writes the
 // single global state.json, so overlapping turns would resume the same session
@@ -787,12 +853,60 @@ await bootstrap();
 // same token.
 const broker = await startBroker({ extraRoutes: NOTION_ROUTES });
 
+// Ronnie: a second, narrow broker (its own port and token, only the label +
+// calendar-import/remove routes) plus the queue + consumer that triage inbound
+// mail through it. Off unless configured — a webhook, labels, or owner addresses
+// present — so a box without Ronnie config drains mail exactly as before. bot.js
+// holds the token and runs both brokers; Ronnie is a client of its own one.
+const ronnieConfigured = !!(
+  process.env.RONNIE_DISCORD_WEBHOOK ||
+  process.env.RONNIE_LABEL_BULK ||
+  process.env.RONNIE_LABEL_INTERESTING ||
+  process.env.RONNIE_FORWARD_SENDERS
+);
+// The consumer fetches full messages, which needs the OAuth client — and that
+// only matters when the push path is actually set up. Build one client and share
+// it between the consumer's enrichOne and the listener, so there's one watch.
+const pushConfigured = !!(
+  process.env.GMAIL_PUBSUB_TOPIC &&
+  process.env.GMAIL_PUBSUB_SUBSCRIPTION &&
+  existsSync(PUBSUB_KEY_FILE)
+);
+let ronnie = null;
+let sharedGmail = null;
+if (ronnieConfigured) {
+  const ronnieBroker = await startBroker({ baseRoutes: {}, extraRoutes: RONNIE_ROUTES });
+  sharedGmail = pushConfigured ? await gmailClient() : null;
+  const enrichOne = sharedGmail ? (id) => enrich(sharedGmail, id) : undefined;
+  ronnie = makeRonnie({ brokerUrl: ronnieBroker.url, brokerToken: ronnieBroker.token, enrichOne });
+  console.log("🧰 Ronnie is on — inbound mail is queued, triaged, labelled, and pinged");
+
+  if (ronnie && sharedGmail) {
+    // Load the durable work queue, then migrate anything left in the old digest
+    // buffer into it (one-time, dedup-safe). Runs before the listener so it can't
+    // race a live drain.
+    await ronnie.queue.load();
+    await migrateBacklogToQueue({ queue: ronnie.queue }).catch((err) =>
+      console.error(`⚠️  Ronnie backlog migration failed: ${err.message}`)
+    );
+
+    // A periodic sweep is what re-probes held mail during a Haiku outage — the
+    // breaker's cooldown only matters if something calls drain() again. A no-op
+    // when the queue is empty. Plus one kick at boot to drain what's queued.
+    const sweepMs = Number(process.env.RONNIE_SWEEP_MS) || 60_000;
+    const sweep = setInterval(() => ronnie.drain().catch(() => {}), sweepMs);
+    sweep.unref?.();
+    ronnie.drain().catch((err) => console.error(`⚠️  Ronnie boot drain failed: ${err.message}`));
+  }
+}
+
 // The inbound-mail listener. Like the broker, it's optional: with no topic /
 // subscription / service-account key it logs that it's off and returns null,
 // so a box without the cloud setup runs exactly as before. A failure to start
 // (bad key, unreachable Pub/Sub) is logged and swallowed — mail is an add-on,
-// not a reason to take the whole bot down.
-startMailListener().catch((err) =>
+// not a reason to take the whole bot down. When Ronnie is on, each drain enqueues
+// new ids and kicks the consumer; when off, the drain buffers for the digest.
+startMailListener({ gmail: sharedGmail, enqueue: ronnie?.enqueue, onDrained: ronnie?.drain }).catch((err) =>
   console.error(`⚠️  Gmail push listener failed to start: ${err.message}`)
 );
 
