@@ -419,18 +419,56 @@ client.once("ready", () => {
 // messages. We watch the connection and, if it stays down past a grace period,
 // exit non-zero so the wrapper relaunches us with a fresh login.
 const WATCHDOG_GRACE_MS = parseInt(process.env.WATCHDOG_GRACE_MS || "90000"); // 90s
+// Flap detection: a wedged gateway can keep *resuming* every few seconds, so it
+// reads as "ready" on any given health tick and the grace-period check below
+// never fires — yet real-time events fall through the cracks the whole time
+// (this is exactly how Alfred once went silent for hours). So we also count
+// reconnects in a rolling window and restart once they cross a threshold.
+const FLAP_WINDOW_MS = parseInt(process.env.FLAP_WINDOW_MS || "180000"); // 3 min
+const FLAP_MAX = parseInt(process.env.FLAP_MAX || "5");                  // >5 in window
 let downSince = null;
+let reconnectAt = [];
+let restarting = false;
+
+// Post a one-line alert to a webhook (ALFRED_ALERT_WEBHOOK, else Ronnie's) so a
+// restart is visible in Discord within seconds instead of discovered hours later.
+// Never lets a slow or failed POST hold up the exit.
+async function notifyRestart(reason) {
+  const url = process.env.ALFRED_ALERT_WEBHOOK || process.env.RONNIE_DISCORD_WEBHOOK;
+  if (!url) return;
+  try {
+    await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: "Alfred", content: `⚠️ Alfred restarting — ${reason}` }),
+      signal: AbortSignal.timeout(3000),
+    });
+  } catch { /* a missed alert must never block the restart */ }
+}
 
 function restartProcess(reason) {
+  if (restarting) return; // one restart, even amid a reconnect storm
+  restarting = true;
   console.error(`🔄 Restarting bot: ${reason}`);
-  process.exit(1); // start-alfred.sh's `while true` loop relaunches us
+  // Fire the alert, then exit no matter what — with a hard backstop in case the
+  // POST never settles. start-alfred.sh's `while true` loop relaunches us.
+  notifyRestart(reason).finally(() => process.exit(1));
+  setTimeout(() => process.exit(1), 3500).unref();
 }
 
 // discord.js has given up on the session and won't reconnect on its own.
 client.on("invalidated", () => restartProcess("Discord session invalidated"));
 client.on("error", (err) => console.error(`⚠️  Client error: ${err?.message || err}`));
 client.on("shardDisconnect", (e, id) => console.warn(`⚠️  Shard ${id} disconnected (code ${e?.code}); awaiting reconnect…`));
-client.on("shardReconnecting", (id) => console.warn(`… shard ${id} reconnecting`));
+client.on("shardReconnecting", (id) => {
+  console.warn(`… shard ${id} reconnecting`);
+  const now = Date.now();
+  reconnectAt = reconnectAt.filter((t) => now - t < FLAP_WINDOW_MS);
+  reconnectAt.push(now);
+  if (reconnectAt.length > FLAP_MAX) {
+    restartProcess(`gateway flapping — ${reconnectAt.length} reconnects in ${Math.round(FLAP_WINDOW_MS / 1000)}s`);
+  }
+});
 client.on("shardResume", (id) => console.log(`✅ Shard ${id} resumed`));
 
 setInterval(() => {
