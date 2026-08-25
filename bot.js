@@ -313,13 +313,24 @@ function runClaude(message, sessionId) {
         ALFRED_BROKER: broker.url,
         ALFRED_BROKER_TOKEN: broker.token,
       },
-      timeout: TIMEOUT_MS,
       // The prompt rides in on `-p`, so the child never reads stdin. Leaving it
       // an open, unwritten pipe makes the CLI wait 3s for piped input and then
       // reply with "no stdin data received in 3s" — which surfaces as Alfred's
       // answer. Point stdin at /dev/null (instant EOF) so it proceeds at once.
       stdio: ["ignore", "pipe", "pipe"],
     });
+
+    // We time out the child ourselves rather than via spawn's `timeout` option.
+    // When that option fires, `claude` catches the SIGTERM and exits 143 with a
+    // NULL signal — so a `signal`-based check below never recognised the timeout
+    // and the user got a bare "(no response)". An explicit flag is unambiguous.
+    let timedOut = false;
+    const killer = setTimeout(() => {
+      timedOut = true;
+      proc.kill("SIGTERM");
+      // Backstop: if it ignores SIGTERM, take it out hard a moment later.
+      setTimeout(() => proc.kill("SIGKILL"), 2000).unref();
+    }, TIMEOUT_MS);
 
     let stdout = "";
     let stderr = "";
@@ -328,13 +339,14 @@ function runClaude(message, sessionId) {
     proc.stderr.on("data", (d) => (stderr += d.toString()));
 
     proc.on("close", (code, signal) => {
+      clearTimeout(killer);
       if (code !== 0) {
-        console.error(`⚠️  Claude exited ${code}${signal ? ` (${signal})` : ""}: ${stderr}`);
+        console.error(`⚠️  Claude exited ${code}${signal ? ` (${signal})` : ""}${timedOut ? " [timed out]" : ""}: ${stderr}`);
       }
 
-      // spawn's `timeout` kills the child rather than returning an error, so a
-      // timeout otherwise arrived as an empty/garbled reply. Report it plainly.
-      if (signal && !stdout.trim()) {
+      // A timeout kill leaves partial or no stdout; report it plainly instead of
+      // letting the empty result fall through to "(no response)".
+      if (timedOut) {
         const secs = Math.round(TIMEOUT_MS / 1000);
         resolve({
           result: `⏱️ That took longer than ${secs}s, so I stopped it. Ask again, or break it into smaller steps — raise \`CLAUDE_TIMEOUT_MS\` if it genuinely needs longer.`,
