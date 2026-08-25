@@ -236,9 +236,9 @@ Six properties, each a decision made on purpose:
 **Two Discord-side controls**, both caught in `bot.js`'s reader and run *without*
 a turn (no `claude -p`): an `undo cal:<uid>` / `undo mail:<id>` reply — the only
 Discord→Ronnie action path — calls Ronnie's broker to remove an imported event or
-re-file a mistaken ping as bulk; and `/ronnie-metrics` runs `scripts/ronnie-metrics.py`
-over `ronnie-usage.jsonl`, posts the cost figure, and drops it in today's daily
-folder for Alfred to surface. Both are gated on Ronnie being configured.
+re-file a mistaken ping as bulk; and `/ronnie-metrics` runs `scripts/ronnie-dashboard.mjs`
+over `ronnie-usage.jsonl`, posts a self-contained HTML cost dashboard, and drops it in
+today's daily folder for Alfred to surface. Both are gated on Ronnie being configured.
 
 Turning Ronnie off (drop the config) collapses this whole section: `drainHistory`
 falls back to buffering sender + subject for the digest, exactly the Pub/Sub path

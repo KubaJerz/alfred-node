@@ -520,21 +520,23 @@ client.on("messageCreate", async (msg) => {
   await enqueueTurn(() => handleTurn(msg, userMessage, attachments));
 });
 
-// Build Ronnie's Haiku cost figure and post it. Writes the PNG into today's
-// daily folder (so Alfred can surface it) and drops a one-line breadcrumb in the
-// daily note. The matplotlib script lives in scripts/; point RONNIE_PYTHON at an
-// interpreter that has matplotlib, else it falls back to `python3`.
+// Build Ronnie's Haiku usage dashboard and post it. Writes a self-contained
+// HTML view (modernist design, Archivo inlined, no external fetches) into today's
+// daily folder so Alfred can surface it, drops a one-line breadcrumb in the daily
+// note, and attaches the file. Pure Node — scripts/ronnie-dashboard.mjs has no
+// runtime deps, so there's nothing to provision.
 async function runRonnieMetrics(msg) {
   const today = new Date().toISOString().split("T")[0];
   const usageFile = path.join(STATE_DIR, "ronnie-usage.jsonl");
   const dailyDir = path.join(MEMORIES_DIR, "dailies");
-  const outPng = path.join(dailyDir, `ronnie-metrics-${today}.png`);
-  const script = path.join(REPO_DIR, "scripts", "ronnie-metrics.py");
-  const py = process.env.RONNIE_PYTHON || "python3";
+  const outHtml = path.join(dailyDir, `ronnie-usage-${today}.html`);
+  const script = path.join(REPO_DIR, "scripts", "ronnie-dashboard.mjs");
   await mkdir(dailyDir, { recursive: true });
 
   const summary = await new Promise((resolve, reject) => {
-    const child = spawn(py, [script, usageFile, outPng], { stdio: ["ignore", "pipe", "pipe"] });
+    // process.execPath is this bot's own node — robust under nvm/tmux where
+    // `node` may not be on a bare PATH.
+    const child = spawn(process.execPath, [script, usageFile, outHtml], { stdio: ["ignore", "pipe", "pipe"] });
     let out = "";
     let err = "";
     child.stdout.on("data", (d) => (out += d));
@@ -545,12 +547,11 @@ async function runRonnieMetrics(msg) {
     );
   });
 
-  if (existsSync(outPng)) {
+  if (existsSync(outHtml)) {
     // A breadcrumb in the daily note so Alfred can mention it; best-effort.
-    await appendFile(path.join(dailyDir, `${today}.md`), `\n- 📊 Ronnie Haiku metrics: ${summary}\n`).catch(() => {});
-    await msg.reply({ content: summary, files: [new AttachmentBuilder(outPng)] });
+    await appendFile(path.join(dailyDir, `${today}.md`), `\n- 📊 Ronnie Haiku usage: ${summary}\n`).catch(() => {});
+    await msg.reply({ content: `📊 ${summary}\nOpen the attached dashboard in a browser.`, files: [new AttachmentBuilder(outHtml)] });
   } else {
-    // Empty log — the script prints a message and writes no PNG.
     await msg.reply(summary || "No Ronnie usage recorded yet.");
   }
 }
