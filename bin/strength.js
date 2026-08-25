@@ -102,7 +102,11 @@ async function main() {
       const db = openDb();
       const out = await digest({ db, call, from: flags.from, to: flags.to });
       const s = out.sync;
-      console.log(`Synced ${s.workouts} workout(s) ${s.window.from}→${s.window.to}: ${s.lifting} lifting (${s.sets} sets), ${s.cardio} cardio.`);
+      if (s) {
+        console.log(`Synced ${s.workouts} workout(s) ${s.window.from}→${s.window.to}: ${s.lifting} lifting (${s.sets} sets), ${s.cardio} cardio.`);
+      } else {
+        console.log(`⚠️  Sync skipped (${out.syncError}); interpreting already-synced workouts only.`);
+      }
       for (const r of out.interpreted)
         console.log(`  ${r.activityId}: ${r.style ?? "?"} — ${r.written} sets${r.flagged ? `, ${r.flagged} unmapped` : ""}${r.misfires ? `, ${r.misfires} misfires dropped` : ""}`);
       for (const e of out.errors) console.log(`  ⚠️  ${e.activityId}: ${e.error}`);

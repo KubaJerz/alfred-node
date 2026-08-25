@@ -173,7 +173,19 @@ export async function interpretWorkout({ db, activityId, runModel = spawnHaiku }
  * caught and reported, not fatal to the batch.
  */
 export async function digest({ db, call, runModel, from, to } = {}) {
-  const sync = await syncStrength({ db, call, from, to });
+  // Sync (the activity pull) is the ONLY step that needs the broker; interpret
+  // needs just `claude -p`. Keep a broker failure from sinking the whole pass:
+  // if the pull can't run — e.g. a detached/background run that lost the broker
+  // env — log it and still interpret workouts already in the DB. Otherwise a
+  // backgrounded on-demand digest fails wholesale and forces a foreground retry
+  // that outlasts the turn timeout.
+  let sync = null, syncError = null;
+  try {
+    sync = await syncStrength({ db, call, from, to });
+  } catch (err) {
+    syncError = err.message;
+    console.error(`⚠️  strength sync skipped (${err.message}); interpreting already-synced workouts only`);
+  }
   const pending = db.prepare("SELECT id FROM workout WHERE is_lifting = 1 AND interpreted_at IS NULL").all();
   const interpreted = [], errors = [];
   for (const { id } of pending) {
@@ -183,5 +195,5 @@ export async function digest({ db, call, runModel, from, to } = {}) {
       errors.push({ activityId: id, error: err.message });
     }
   }
-  return { sync, interpreted, errors };
+  return { sync, syncError, interpreted, errors };
 }
