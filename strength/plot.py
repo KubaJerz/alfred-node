@@ -22,6 +22,7 @@ Usage: python plot.py <db_path> <out_png>
 import os
 import sys
 import sqlite3
+from datetime import date as _date, timedelta
 
 import matplotlib
 matplotlib.use("Agg")  # headless — no display needed
@@ -145,6 +146,14 @@ CW = W - 2 * PAD              # content width = 388
 # line count; compute the layout math first, then size the figure.
 ROW_H = 79
 N_ROWS = len(MUSCLES)
+SPARK_AXIS_H = 22             # shared 30-day date axis under the sparkline column
+TOTAL_H = 230                 # 90-day section: chart + date ticks + trend tiles
+
+def _pdate(s):
+    y, m, d = (int(x) for x in s.split("-")); return _date(y, m, d)
+def short_date(dt):
+    return dt.strftime("%b ") + str(dt.day)   # "Aug 3" — no leading zero
+today_dt = _pdate(dates[t]) if HAVE_DATA else None
 
 def wrap(text, prop, max_w, renderer):
     """Greedy word-wrap to fit max_w design-px (used for the verdict)."""
@@ -185,7 +194,7 @@ else:
 vlines = wrap(verdict.upper(), fp(9, 400), CW, _R)
 VERDICT_H = 10 + max(1, len(vlines)) * 15 + 14
 
-H = (44 + 2 + 153 + 2 + 33 + N_ROWS * ROW_H + 2 + 214 + 2 + VERDICT_H)
+H = (44 + 2 + 153 + 2 + 33 + N_ROWS * ROW_H + SPARK_AXIS_H + 2 + TOTAL_H + 2 + VERDICT_H)
 plt.close(_probe)
 
 fig = plt.figure(figsize=(W / 72, H / 72)); fig.set_dpi(200)
@@ -321,15 +330,19 @@ for m in order:
         l14, p14 = trend[m][t], trend[m][t - 14] if t - 14 >= 0 else 0.0
         delta = (l14 / p14 - 1) if p14 > 0 else 0.0
         st, col = status(acwr)
-        # acute value (right of name, before delta group of width 88)
-        gx = W - PAD - 88
-        text(gx - 8, ry1, fmt(ac), 13, 700, DIM, ha="right")
-        # delta group, right-aligned within 88px
         dcol = "#ffffff" if delta > 0.03 else ("#e0714f" if delta < -0.03 else MUTED)
+        # Delta group flows right→left with *measured* widths, so a 3-digit
+        # percent (e.g. -100%) pushes the arrow and the acute value left instead
+        # of overlapping them.
+        w14 = meas("14D", fp(9, 400), R)
         text(W - PAD, ry1, "14D", 9, 400, "#6f6b67", ha="right")
-        dw = meas(pct(delta), fp(19, 700), R)
-        text(W - PAD - 22, ry1, pct(delta), 19, 700, dcol, ha="right")
-        arrow(W - PAD - 22 - dw - 4, ry1, delta, dcol)
+        pnum = pct(delta)
+        pct_right = W - PAD - w14 - 6
+        text(pct_right, ry1, pnum, 19, 700, dcol, ha="right")
+        arrow_right = pct_right - meas(pnum, fp(19, 700), R) - 6
+        arrow(arrow_right, ry1, delta, dcol)
+        # acute value, right-aligned left of the 9px arrow with a fixed gap
+        text(arrow_right - 9 - 12, ry1, fmt(ac), 13, 700, DIM, ha="right")
     # row 2: sparkline + mini band + acwr
     ry2 = Y + 10 + 19 + 7
     sh = 30
@@ -349,11 +362,23 @@ for m in order:
         band(MINI_X, mby, MINI_W, 14, 0, gap=1, over=3)
     Y += ROW_H
 
+# ── shared 30-day date axis for every sparkline above ──
+rect(0, Y, W, SPARK_AXIS_H, CARD)
+if HAVE_DATA:
+    ax.plot([CX, CX + SPARK_W], [Y + 3, Y + 3], color=HAIR, lw=1, zorder=2)
+    for frac, ha in ((0.0, "left"), (0.5, "center"), (1.0, "right")):
+        tx = CX + 2 + frac * (SPARK_W - 4)
+        dt = today_dt - timedelta(days=int(round((1 - frac) * (D - 1))))
+        ax.plot([tx, tx], [Y + 3, Y + 6], color=MUTED, lw=1, zorder=3)
+        ltext(tx, Y + 14, short_date(dt).upper(), 8, 400, MUTED, ha=ha, track=0.06)
+    ltext(W - PAD, Y + 14, "30-DAY WINDOW", 8, 400, FAINT, ha="right", track=0.06)
+Y += SPARK_AXIS_H
+
 rect(0, Y, W, 2, RULE); Y += 2
 
 # ── 90-day total load ──
 top = Y
-rect(0, top, W, 214, CARD)
+rect(0, top, W, TOTAL_H, CARD)
 hy = top + 14 + 6
 ltext(CX, hy, "TOTAL LOAD · 90 DAYS", 11, 700, INK, track=0.16)
 ltext(W - PAD, hy, "7D — · 28D ---", 9, 400, MUTED, ha="right", track=0.10)
@@ -378,6 +403,12 @@ if HAVE_DATA:
     polyline(cpath(ch), "#7f858c", 1.6, dash=(4, 3))
     polyline(cpath(ac), INK, 2.0)
     ltext(shade_x + 6, cy + 13, "LAST 30", 9, 400, MUTED, track=0.11)
+    # month/day ticks along the 90-day axis (i=60 aligns with the LAST-30 line)
+    for ti, ha in ((0, "left"), (30, "center"), (60, "center"), (K - 1, "right")):
+        tx = CX + 4 + ti * (cw - 8) / (K - 1)
+        dt = today_dt - timedelta(days=(K - 1 - ti))
+        ax.plot([tx, tx], [cy + chh, cy + chh + 3], color=MUTED, lw=1, zorder=3)
+        ltext(tx, cy + chh + 12, short_date(dt).upper(), 8, 400, MUTED, ha=ha, track=0.06)
     # tiles
     d30 = (roll(load["_total"], t, 30) / roll(load["_total"], t - 30, 30) - 1) if roll(load["_total"], t - 30, 30) > 0 else 0.0
     d90 = (roll(load["_total"], t, 30) / roll(load["_total"], t - 60, 30) - 1) if roll(load["_total"], t - 60, 30) > 0 else 0.0
@@ -386,14 +417,14 @@ if HAVE_DATA:
 else:
     text(CX + cw / 2, cy + chh / 2, "awaiting data", 12, 400, MUTED, ha="center")
     tiles = [("30-DAY TREND", "—"), ("90-DAY TREND", "—"), ("REST DAYS /30", "—")]
-ty = cy + chh + 12
+ty = cy + chh + 22
 tw = (cw - 2 * 2) / 3
 for i, (lab, val) in enumerate(tiles):
     tx = CX + i * (tw + 2)
     rect(tx, ty, tw, 47, TILE)
     ltext(tx + 10, ty + 9 + 5, lab, 9, 400, MUTED, track=0.12)
     text(tx + 10, ty + 9 + 5 + 3 + 12, val, 17, 700, INK, va="center")
-Y = top + 214
+Y = top + TOTAL_H
 rect(0, Y, W, 2, ACCENT); Y += 2
 
 # ── verdict ──
