@@ -60,17 +60,18 @@ flowchart TD
     GATE -->|yes| Q["enqueueTurn<br/>one turn at a time"]
     CTX["loadContext<br/>SOUL.md + USER.md + MEMORY.md + today's daily"] --> Q
     Q --> SPAWN["spawn: claude -p<br/>cwd = agent/"]
-    SPAWN -.->|"skill matches"| SK["skills<br/>gmail · gcal · notion"]
-    SK -.->|"names cmd + rules"| CLIS["CLIs · bin/ · run via Bash<br/>gmail.js · gcal.js · notion.js · broker-client.js"]
+    SPAWN -.->|"skill matches"| SK["skills<br/>gmail · gcal · notion · intervals · strength"]
+    SK -.->|"names cmd + rules"| CLIS["CLIs · bin/ · run via Bash<br/>gmail.js · gcal.js · notion.js · intervals.js · strength.js · broker-client.js"]
     CLIS ==>|"asks"| BR["broker.js<br/>127.0.0.1 + bearer token"]
     BR --> G["Google Mail + Calendar"]
     BR --> N["Notion"]
+    BR --> I["Intervals.icu<br/>(Garmin data)"]
     SPAWN -->|"stdout JSON"| R["reply → Discord"]
     R --> U
     classDef external fill:#d6e2f2,stroke:#1f5fb8,color:#123f7d
     classDef gateway fill:#d8ebe2,stroke:#1b6b52,color:#12503c
     classDef stack fill:#f5e8d5,stroke:#b07a2a,color:#6e4a12
-    class U,G,N external
+    class U,G,N,I external
     class BR gateway
     class SK,CLIS stack
 ```
@@ -255,8 +256,8 @@ flowchart TD
     subgraph HOST["one Unix user — today (the gap)"]
         subgraph BOT["bot.js · long-running · holds the tokens"]
             direction TB
-            TOK["tokens<br/>google/token.json · auth.js · authorize.js<br/>NOTION_TOKEN (.env) · notion/client.js"]
-            BR["broker · one server · 10 Google routes + 8 Notion routes · no send<br/>withholds codes (mail-filter.js)<br/>no delete-with-guests (calendar-rules.js)<br/>notion rules (notion/broker.js)"]
+            TOK["tokens<br/>google/token.json · auth.js · authorize.js<br/>NOTION_TOKEN (.env) · notion/client.js<br/>INTERVALS_API_KEY (.env) · intervals/client.js"]
+            BR["broker · one server · 10 Google routes + 8 Notion routes + 4 Intervals routes · no send<br/>withholds codes (mail-filter.js)<br/>no delete-with-guests (calendar-rules.js)<br/>notion rules (notion/broker.js)<br/>intervals read-only (intervals/broker.js)"]
             TOK -->|"reads"| BR
         end
         subgraph AG["the agent · claude -p, per turn · no secret"]
@@ -266,13 +267,14 @@ flowchart TD
     end
     BR -->|"call"| G["Google Mail + Calendar"]
     BR -->|"call"| N["Notion"]
+    BR -->|"call (read-only)"| I["Intervals.icu"]
     classDef gateway fill:#d8ebe2,stroke:#1b6b52,color:#12503c
     classDef external fill:#d6e2f2,stroke:#1f5fb8,color:#123f7d
     classDef secret fill:#ece0f5,stroke:#7a4fb0,color:#4a2d70
     classDef agent fill:#f5e8d5,stroke:#b07a2a,color:#6e4a12
     classDef gapbox fill:none,stroke:#6b7a8c,stroke-width:1.5px,stroke-dasharray:6 4
     class BR gateway
-    class G,N external
+    class G,N,I external
     class TOK secret
     class CLI agent
     class HOST gapbox
@@ -306,6 +308,48 @@ API-reachable history — so those routes read the old value first and report th
 `from → to`, the only undo there is. A block `remove` is the opposite: it lands
 in Notion's Trash and is recoverable, so it's the safe kind of delete. Whole-page
 delete and comments stay unwired.
+
+Intervals.icu is the same shape again, but the simplest case: `intervals/client.js`
+holds the one API call (HTTP Basic on `INTERVALS_API_KEY`) and `intervals/broker.js`
+the three routes — `activities`, `activity`, `wellness`. It's where Alfred reads
+Garmin data, which reaches Intervals.icu by Garmin Connect sync. Its boundary
+isn't a scope or a sharing rule but the **method**: the client exposes GET and
+nothing else, so the read-only guarantee is structural — there is no write route
+to omit because there is no write path to reach, the same way mail has no send
+route. Lists window to the last 30 days and project a curated field set, so a
+query can't pull an account's whole history into the transcript.
+
+### Strength load (Garmin lifting)
+
+A subsystem on top of Intervals.icu: it turns Garmin strength workouts into a
+rolling per-muscle load. The data Intervals.icu's JSON hides — reps and weight —
+lives in the original FIT file, so this reads that instead.
+
+```mermaid
+flowchart TD
+    ICU["Intervals.icu"] -->|"pull: nightly + on-command"| FITD["FIT decode<br/>intervals/fit.js"]
+    FITD --> RAW[("raw_set<br/>immutable")]
+    NOTEIN["#workout-log msg"] -->|"bot.js"| NOTE[("workout_note<br/>immutable")]
+    RAW --> HAIKU{{"Haiku interpreter<br/>strength/digest.js"}}
+    NOTE --> HAIKU
+    CFG["templates + factor map<br/>strength/config.js"] --> HAIKU
+    HAIKU -->|"validated write"| LIFT[("lift_set + set_muscle")]
+    LIFT --> VIEWS["rolling views<br/>strength/views.js"]
+    VIEWS --> READ["bin/strength.js · plot<br/>strength/plot.js"]
+```
+
+The layers mirror the design in `docs/strength-load-design.md`. The SQLite store
+(`strength/db.js`, at `agent/var/strength.db`, gitignored) holds the schema and
+the config seed; `strength/ingest.js` walks the activity window and lands each
+workout (lifting → `raw_set`, else the cardio table); `strength/digest.js` runs a
+headless Haiku over the raw sets to write the interpreted `lift_set`, and applies
+the muscle factor map itself so the numbers stay exact; `strength/views.js`
+derives the 7-/28-day ACWR and 14-day trend; `strength/plot.js` renders the
+figure Alfred sends. The pull needs the key, so it runs broker-side through the
+`fit-sets` route on-command, and in-process via `strength/nightly.js` (from
+`dream.sh`) overnight. The `strength` skill and `bin/strength.js` are Alfred's
+read surface; the DB itself is local state, so those reads don't cross the broker.
+The one thing the broker still gates is the FIT download and decode.
 
 ## Memory
 
@@ -354,7 +398,7 @@ from cwd.
 
 | path | holds | in git? |
 |---|---|---|
-| repo root | the app + dev process — `bot.js`, `google/`, `notion/`, `bin/`, `test/` | yes |
+| repo root | the app + dev process — `bot.js`, `google/`, `notion/`, `intervals/`, `strength/`, `bin/`, `test/` | yes |
 | `agent/` | Alfred's config — `SOUL.md`, `memory-prompt.md`, `.claude/skills/` | yes |
 | `agent/var/` | Alfred's state — memories, transcripts, `state.json`, tokens | **never** |
 

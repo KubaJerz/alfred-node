@@ -7,6 +7,8 @@ import { fileURLToPath } from "url";
 import path from "path";
 import { startBroker } from "./google/broker.js";
 import { NOTION_ROUTES } from "./notion/broker.js";
+import { INTERVALS_ROUTES } from "./intervals/broker.js";
+import { openDb as openStrengthDb, insertNote } from "./strength/db.js";
 import { startMailListener, migrateBacklogToQueue, enrich } from "./google/gmail-push.js";
 import { gmailClient, PUBSUB_KEY_FILE } from "./google/auth.js";
 import { drainMailDigest } from "./google/gmail-buffer.js";
@@ -19,6 +21,8 @@ import { parseClearCommand } from "./commands.js";
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const ALLOWED_USER_IDS = (process.env.ALLOWED_USER_IDS || "").split(",").filter(Boolean);
 const TIMEOUT_MS = parseInt(process.env.CLAUDE_TIMEOUT_MS || "120000"); // 2 min default
+// A Discord channel whose messages are workout notes, not turns. Off unless set.
+const STRENGTH_LOG_CHANNEL = process.env.STRENGTH_LOG_CHANNEL || "";
 
 // ── Layout ──────────────────────────────────────────────────────────────────
 // Three kinds of files live here and they don't mix:
@@ -459,6 +463,20 @@ function enqueueTurn(fn) {
   return run;
 }
 
+// Append a workout note to the strength DB. Immutable and keyed by the Eastern
+// local date so it matches the workout's own date (Intervals dates are local),
+// even when the note is written late at night. Opened per note — cheap, and it
+// keeps no handle around when the feature is idle.
+function recordWorkoutNote(text) {
+  const db = openStrengthDb();
+  try {
+    const noteDate = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" }).format(new Date());
+    insertNote(db, { received_at: new Date().toISOString(), note_date: noteDate, text });
+  } finally {
+    db.close();
+  }
+}
+
 client.on("messageCreate", async (msg) => {
   // Ignore own messages and other bots
   if (msg.author.bot) return;
@@ -470,6 +488,24 @@ client.on("messageCreate", async (msg) => {
   // Auth check
   if (ALLOWED_USER_IDS.length && !ALLOWED_USER_IDS.includes(msg.author.id)) {
     console.log(`🚫 Ignored message from unauthorized user: ${msg.author.tag} (${msg.author.id})`);
+    return;
+  }
+
+  // Workout-log channel: a message here is a training note, not a turn for
+  // Alfred. Store it immutably (keyed by the local date, so it lines up with the
+  // workout's own date) for the strength interpreter, ack it, and stop. Off
+  // unless STRENGTH_LOG_CHANNEL is set.
+  if (STRENGTH_LOG_CHANNEL && msg.channelId === STRENGTH_LOG_CHANNEL) {
+    const note = msg.content.trim();
+    if (note) {
+      try {
+        recordWorkoutNote(note);
+        msg.react("💪").catch(() => {}); // best-effort ack
+      } catch (err) {
+        console.error(`🏋️  Failed to log workout note: ${err.message}`);
+        msg.react("⚠️").catch(() => {});
+      }
+    }
     return;
   }
 
@@ -849,9 +885,9 @@ await bootstrap();
 // to. It starts even when a service isn't configured yet — the routes then fail
 // with a message naming the missing setup step, which is more useful than the
 // whole bot refusing to boot over an integration that's still optional. Notion
-// routes mount alongside Google's on the one loopback server, reached with the
-// same token.
-const broker = await startBroker({ extraRoutes: NOTION_ROUTES });
+// and Intervals.icu routes mount alongside Google's on the one loopback server,
+// reached with the same token — one gateway, never a server per service.
+const broker = await startBroker({ extraRoutes: { ...NOTION_ROUTES, ...INTERVALS_ROUTES } });
 
 // Ronnie: a second, narrow broker (its own port and token, only the label +
 // calendar-import/remove routes) plus the queue + consumer that triage inbound
