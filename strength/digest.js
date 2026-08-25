@@ -27,7 +27,11 @@ function spawnHaiku(prompt, { timeoutMs = 120000 } = {}) {
     const proc = spawn(
       "claude",
       ["-p", prompt, "--model", HAIKU_MODEL, "--output-format", "json"],
-      { env: process.env, timeout: timeoutMs }
+      // Prompt rides in on `-p`; the child never reads stdin. Point it at
+      // /dev/null so the CLI doesn't stall 3s waiting for piped input and then
+      // emit "no stdin data received in 3s" into stderr (which, with the timeout
+      // firing, killed the digest — SIGTERM 143). See bot.js runClaude.
+      { env: process.env, timeout: timeoutMs, stdio: ["ignore", "pipe", "pipe"] }
     );
     let out = "", err = "";
     proc.stdout.on("data", (d) => (out += d));
