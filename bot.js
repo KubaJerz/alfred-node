@@ -521,7 +521,7 @@ client.on("messageCreate", async (msg) => {
 });
 
 // Build Ronnie's Haiku usage dashboard and post it. Writes a self-contained
-// HTML view (modernist design, Archivo inlined, no external fetches) into today's
+// HTML view (editorial serif design, fonts inlined, no external fetches) into today's
 // daily folder so Alfred can surface it, drops a one-line breadcrumb in the daily
 // note, and attaches the file. Pure Node — scripts/ronnie-dashboard.mjs has no
 // runtime deps, so there's nothing to provision.
