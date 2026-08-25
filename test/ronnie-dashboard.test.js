@@ -18,18 +18,23 @@ function run(rows, args = []) {
   return { res, html: res.status === 0 ? readFileSync(out, "utf8") : "" };
 }
 
+// The inlined font base64 can coincidentally contain "NaN"/"undefined"; strip the
+// <style> block (fonts live there) before asserting the *markup* is clean.
+const markup = (html) => html.replace(/<style>[\s\S]*?<\/style>/g, "");
+
 test("renders both periods, the font, and a summary table", () => {
   const now = Date.now();
   const { res, html } = run([
     { ts: now, in: 1_000_000, out: 0, model: "claude-haiku-4-5", cost: 0.02 },
   ]);
   assert.equal(res.status, 0);
-  assert.match(html, /@font-face/); // Archivo is inlined
+  assert.match(html, /@font-face/); // serif families inlined
+  assert.match(html, /Cormorant Garamond/); // the display face
   assert.match(html, /<h2>Weekly<\/h2>/);
   assert.match(html, /<h2>Monthly<\/h2>/);
   assert.match(html, /\$1\.00/); // 1,000,000 in-tokens @ $1/1M = $1.00 total
   assert.match(html, /1\.00M/); // token total formatted
-  assert.doesNotMatch(html, /NaN|undefined/);
+  assert.doesNotMatch(markup(html), /NaN|undefined/);
 });
 
 test("--fragment omits the document wrapper (for embedding)", () => {
@@ -43,5 +48,5 @@ test("an empty log still renders (zeroes, no crash)", () => {
   const { res, html } = run([]);
   assert.equal(res.status, 0);
   assert.match(html, /\$0\.00/);
-  assert.doesNotMatch(html, /NaN|undefined/);
+  assert.doesNotMatch(markup(html), /NaN|undefined/);
 });

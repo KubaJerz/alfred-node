@@ -63,7 +63,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
   (`ronnie/meter.js`, `agent/var/ronnie-usage.jsonl`) records every call and
   estimates spend at official token rates, backing a daily **call** cap; the
   `/ronnie-metrics` Discord command renders a self-contained HTML dashboard of it
-  (`scripts/ronnie-dashboard.mjs`, modernist design, no runtime deps).
+  (`scripts/ronnie-dashboard.mjs`, an editorial serif design — Cormorant Garamond
+  + Lora, hairline rules, dashed-grid area charts — no runtime deps).
   An `undo cal:<uid>` / `undo mail:<id>` reply reverses a calendar import or
   re-files a mistaken ping as bulk. Ronnie acts through its **own** narrow broker
   — the same server as Alfred's but started with only three routes (label a
