@@ -314,6 +314,11 @@ function runClaude(message, sessionId) {
         ALFRED_BROKER_TOKEN: broker.token,
       },
       timeout: TIMEOUT_MS,
+      // The prompt rides in on `-p`, so the child never reads stdin. Leaving it
+      // an open, unwritten pipe makes the CLI wait 3s for piped input and then
+      // reply with "no stdin data received in 3s" — which surfaces as Alfred's
+      // answer. Point stdin at /dev/null (instant EOF) so it proceeds at once.
+      stdio: ["ignore", "pipe", "pipe"],
     });
 
     let stdout = "";
