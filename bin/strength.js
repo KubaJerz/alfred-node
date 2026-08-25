@@ -65,10 +65,10 @@ const HELP = {
   plot: {
     use: "plot",
     detail: [
-      "Render the strength dashboard to a PNG and print its path. One dark mobile",
-      "card: whole-body ACWR against a detrain→build→spike band, a per-muscle",
-      "breakdown (30-day acute sparkline + ACWR mini-band per muscle), and the",
-      "90-day total-load chart with trend tiles — the whole picture in one image.",
+      "Render the strength figure to a PNG and print its path. An editorial",
+      "'Strength Load' broadsheet: whole-body acute:chronic against a zone band,",
+      "a per-muscle table (30-day sparkline · 7d load · change · ratio), the",
+      "90-day total-load chart, and a Reading/Next writeup — one image.",
       "",
       "Drawn with matplotlib (needs python + matplotlib on the host). To send it to",
       "Kuba, include {img:<path>} in your Discord reply — bot.js attaches the file",

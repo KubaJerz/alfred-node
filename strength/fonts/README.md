@@ -1,15 +1,19 @@
-# Archivo (bundled for the strength dashboard)
+# Fonts (bundled for the strength dashboard)
 
-`strength/plot.py` renders the dashboard PNG in Archivo — the typeface of the
-design it reproduces. matplotlib needs static `.ttf` files (and handles
-variable-font weight axes unreliably), so these three weights were instanced
-from the upstream variable font with `fontTools.varLib.instancer` at
-`wght` 400 / 600 / 700, `wdth` 100:
+`strength/plot.py` renders the "Strength Load" figure in the typefaces of the
+design it reproduces: **Cormorant Garamond** (the big numerals + section
+headings) and **Lora** (body text and the tracked labels). matplotlib needs
+static `.ttf` files and handles variable-font weight axes unreliably, so these
+weights were instanced from the upstream variable fonts with
+`fontTools.varLib.instancer`:
 
-- `Archivo-Regular.ttf`  — 400
-- `Archivo-SemiBold.ttf` — 600
-- `Archivo-Bold.ttf`     — 700
+- `CormorantGaramond-Light.ttf`   — 300  (hero numeral, headings, trend words)
+- `CormorantGaramond-Regular.ttf` — 400  (stat values, muscle names, 7d load)
+- `CormorantGaramond-Medium.ttf`  — 500  (per-muscle ratio numbers)
+- `Lora-Regular.ttf`              — 400  (body paragraphs, labels)
+- `Lora-Medium.ttf`              — 500
 
-Source: <https://github.com/google/fonts/tree/main/ofl/archivo>.
-Archivo is licensed under the SIL Open Font License 1.1 — see `OFL.txt`.
-If Archivo is ever absent here, `plot.py` falls back to the default sans-serif.
+Sources: <https://github.com/google/fonts/tree/main/ofl/cormorantgaramond> and
+<https://github.com/google/fonts/tree/main/ofl/lora>. Both are licensed under the
+SIL Open Font License 1.1 — see `OFL-Cormorant.txt` and `OFL-Lora.txt`. If a font
+is ever absent here, `plot.py` falls back to the default serif.

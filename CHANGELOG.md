@@ -21,10 +21,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
   the numbers stay exact; load is assist-scaled `Σ factor × reps × lb` (a pulldown
   half-credits biceps), exposed as 7-/28-day ACWR and a 14-day trend per muscle.
   `bin/strength.js` gives Alfred `digest` (pull + interpret, nightly via
-  `dream.sh` and on-command), `load`, `sets`, and `plot` (a dark mobile
-  dashboard PNG — whole-body ACWR against a detrain→build→spike band, a
-  per-muscle breakdown with 30-day acute sparklines, and the 90-day total-load
-  chart — rendered in matplotlib and sent via `{img:}`). An optional
+  `dream.sh` and on-command), `load`, `sets`, and `plot` (an editorial
+  "Strength Load" broadsheet PNG — whole-body acute:chronic against a
+  detrain→build→caution→spike band, a per-muscle table with 30-day sparklines
+  and plain-language change, the 90-day total-load chart, and a Reading/Next
+  writeup — rendered in matplotlib and sent via `{img:}`). An optional
   `STRENGTH_LOG_CHANNEL` captures Discord
   workout notes immutably to feed the interpreter. Off unless `INTERVALS_API_KEY`
   is set. Design: `docs/strength-load-design.md`.
