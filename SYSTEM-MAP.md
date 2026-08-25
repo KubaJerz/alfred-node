@@ -149,6 +149,102 @@ nothing (see Memory), so mail waits for the next `/clear`, dream, or first
 message of the day. The digest rides inside `finalMessage`, which `runClaude`
 never logs, so it can't reach `messages.jsonl` or anything downstream of it.
 
+## Ronnie — inbound-mail triage (tier 2)
+
+The Pub/Sub path above buffers mail for a *later* turn. Ronnie is the fork that
+*acts* on it as it lands — but still, no Alfred turn runs. The drain no longer
+processes mail inline: it **enqueues the new message ids** into a durable work
+queue, and a separate consumer pulls from it, triages, and removes an id only
+once it's handled. Gmail holds the content; the queue holds only ids, so nothing
+loses mail across a crash or an outage. Ronnie decides; `bot.js` executes through
+a broker of Ronnie's own. This is "tier 2" in `TODO.md`.
+
+```mermaid
+flowchart TD
+    D["drainHistory · gmail-push.js<br/>lists new ids from the cursor"] -->|"enqueue"| Q["mail-queue.jsonl<br/>queue.js · ids only"]
+    T["Pub/Sub nudge · 60s sweep"] -.->|"drain()"| C
+    Q -->|"pop id"| C["consumer.js<br/>runner.js assembles it"]
+    C -->|"enrich() by id"| SC{"screen()<br/>mail-filter.js"}
+    SC -.->|"login code → marker"| BUF["pending-mail.jsonl<br/>digest: markers only"]
+    SC -->|"safe"| H["handleMessage · index.js"]
+    H -->|".ics + DKIM · sender-auth.js · ics.js"| RBR
+    H -->|"else · classify.js → prefilter.js<br/>block/allow/category/list-header (mail-triage.js)"| PF{"decided?"}
+    PF -->|"free"| ACT
+    PF -->|"undecided"| BR{"breaker.js<br/>Haiku up?"}
+    BR -->|"ready"| HK["Haiku · haiku.js<br/>claude -p · meter.js · capped"]
+    BR -.->|"open → hold + back off 60s→30m"| Q
+    HK -->|"ok → success"| ACT{"label"}
+    HK -.->|"down → trip"| BR
+    ACT -->|"bulk → BULK + remove INBOX"| RBR
+    ACT -->|"personal"| PING["ping · notify.js"]
+    RBR["Ronnie's broker · broker-routes.js<br/>3 routes · own token"] ==>|"label / import / remove"| GM["Gmail / Calendar"]
+    PING --> DIS["Discord webhook · write-only"]
+
+    classDef external fill:#d6e2f2,stroke:#1f5fb8,color:#123f7d
+    classDef gateway fill:#d8ebe2,stroke:#1b6b52,color:#12503c
+    classDef agent fill:#f5e8d5,stroke:#b07a2a,color:#6e4a12
+    classDef store fill:#e7e7e7,stroke:#888,color:#333
+    class GM,DIS external
+    class SC,RBR gateway
+    class HK agent
+    class Q,BUF store
+```
+
+Six properties, each a decision made on purpose:
+
+- **The queue is the durable to-do list** (`queue.js`, `mail-queue.jsonl`). It
+  holds message **ids only** — no body or subject ever rests there, so the
+  codes-on-disk worry disappears (there's nothing in an id to redact). The drain
+  enqueues (dedup by id, so a re-listed drain after a crash can't double-queue);
+  the consumer removes an id only once it's genuinely handled. One process both
+  enqueues and consumes, serialized through an in-memory mutex.
+- **The credential screen is upstream of triage, unchanged** (green — the same
+  guarantee as the read path). The consumer runs `screen()` right after the fetch
+  and before triage, so a login code becomes a content-free marker in the digest
+  and Ronnie — and Haiku — never see it. A "verify"/"sign-in" notice that trips
+  that filter is withheld too; making those *ping* is a change to `mail-filter.js`,
+  the shared chokepoint, not to Ronnie.
+- **Haiku down trips a circuit breaker, not a retry storm** (`breaker.js`). Two
+  consecutive `claude -p` failures and it opens: the queue piles up untouched and
+  the cooldown grows exponentially (60s → 30 min), letting one probe through each
+  time; any success closes it and the backlog drains. Only a *service* failure
+  (`HaikuDownError`) does this — a junk verdict fails that one message open, and a
+  poison message that keeps throwing is surfaced as personal after 3 tries and
+  dropped, so one bad message can't wedge everything behind it.
+- **Two paths, invite first.** An `.ics` from one of Kuba's own addresses that
+  passes DKIM/DMARC (`sender-auth.js`) is the *only* thing that reaches the
+  calendar routes (`ics.js` turns it into an import or a remove). Anything that
+  fails the gate — a forgery, a stranger's attachment, a bare REPLY — falls
+  through and is triaged as ordinary mail. The auth check *is* the licence.
+- **The paid step runs last and rarely.** `prefilter.js` decides for free in
+  order — blocklist, allowlist, Gmail's own category (Promotions/Social → filed;
+  Updates/Primary go on), then a list-header (`mail-triage.js`). Only what's left
+  `undecided` spends one Haiku call (`haiku.js`), the way Alfred runs Claude —
+  subscription, no API key. `meter.js` logs every call to `ronnie-usage.jsonl` and
+  estimates cost at official token rates; past a daily **call** cap Ronnie
+  surfaces the rest as personal and posts a one-time notice. Bulk is *moved* (the
+  BULK label + `removeLabels: ["INBOX"]` is the archive); personal is *pinged*
+  with Haiku's one-sentence why (`notify.js`).
+- **A second broker — the one deliberate exception to "one gateway."** Credentials
+  below says one broker, never one per service; Ronnie is the exception, and it's
+  per *principal*, not per service. Ronnie is a different actor than Alfred with a
+  strictly smaller reach — the same `broker.js` server started with `baseRoutes:
+  {}` and only `RONNIE_ROUTES` (`broker-routes.js`, 3 routes: label a message,
+  add an invite, remove an invite), on its own port with its own token. It
+  **cannot** read mail, send, or touch Alfred's 18 routes — the trust boundary is
+  the route table, made physical.
+
+**Two Discord-side controls**, both caught in `bot.js`'s reader and run *without*
+a turn (no `claude -p`): an `undo cal:<uid>` / `undo mail:<id>` reply — the only
+Discord→Ronnie action path — calls Ronnie's broker to remove an imported event or
+re-file a mistaken ping as bulk; and `/ronnie-metrics` runs `scripts/ronnie-dashboard.mjs`
+over `ronnie-usage.jsonl`, posts a self-contained HTML cost dashboard, and drops it in
+today's daily folder for Alfred to surface. Both are gated on Ronnie being configured.
+
+Turning Ronnie off (drop the config) collapses this whole section: `drainHistory`
+falls back to buffering sender + subject for the digest, exactly the Pub/Sub path
+above, with nothing lost.
+
 ## Credentials
 
 Two boxes because there are two processes. `bot.js` runs continuously and holds
@@ -190,7 +286,9 @@ operations (`startBroker({ extraRoutes: NOTION_ROUTES })`). It is *not* the CLIs
 those are the clients in the agent box and hold nothing. The token is what the
 agent lacks, so it asks the broker across the guarded crossing (thick), and the
 broker reads a token and makes the authenticated call. The broker's rules run in
-`bot.js`, so **no prompt can talk them out of firing**.
+`bot.js`, so **no prompt can talk them out of firing**. (The one exception is
+Ronnie's own 3-route broker — see the Ronnie section: a second gateway *per
+principal*, not per service, so Ronnie's reach is a strict subset of Alfred's.)
 
 **The gap is the dashed box.** Both processes share one Unix user today, so
 `Bash` in the agent can read the tokens directly — around the broker, not

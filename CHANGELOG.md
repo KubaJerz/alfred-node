@@ -4,8 +4,6 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [SemVer](https://semver.org/).
 
 ## [Unreleased]
-
-## [2.9.0] - 2026-08-24
 ### Added
 - **Strength load tracking — Garmin lifting → rolling per-muscle load.** A new
   `strength/` subsystem and `strength` skill turn Garmin strength workouts into
@@ -44,6 +42,34 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
   (`INTERVALS_API_KEY`, from Settings → Developer) lives only in bot.js's
   environment; athlete `0` means "the key's own athlete", so no id is needed. Off
   unless the key is set, so a box without it runs exactly as before.
+- **Ronnie triages inbound mail (tier 2 — act, don't just buffer).** When
+  configured, each new message is handled the moment it lands, still without a
+  turn: `drainHistory` enqueues message **ids only** into a durable work queue
+  (`ronnie/queue.js`, `agent/var/mail-queue.jsonl` — no content on disk), and a
+  consumer (`ronnie/consumer.js`) pops each, fetches, screens for codes, triages,
+  and removes it only once handled — so a crash or an outage loses nothing. The
+  pipeline is cheap-first: blocklist/allowlist, then Gmail's own category
+  (Promotions/Social filed for free), then a list-header, and only what's left
+  reaches one Haiku call (`ronnie/haiku.js`, `claude -p` over the subscription —
+  no API key). Bulk is archived to a label out of the inbox; personal mail is
+  pinged over a write-only Discord webhook (`ronnie/notify.js`) with a one-line
+  "why"; a DKIM/DMARC-authenticated invite forwarded from one of your own
+  addresses is imported to (or removed from) the calendar (`ronnie/sender-auth.js`,
+  `ronnie/ics.js`). Haiku being **down** trips a circuit breaker
+  (`ronnie/breaker.js`): the queue holds and backs off exponentially (60s → 30
+  min, one probe per cooldown, reset on any success) rather than dropping mail or
+  mislabeling it; a single message that keeps failing is surfaced as personal
+  after a few tries so it can't wedge the queue. A cost meter
+  (`ronnie/meter.js`, `agent/var/ronnie-usage.jsonl`) records every call and
+  estimates spend at official token rates, backing a daily **call** cap; the
+  `/ronnie-metrics` Discord command renders a self-contained HTML dashboard of it
+  (`scripts/ronnie-dashboard.mjs`, modernist design, no runtime deps).
+  An `undo cal:<uid>` / `undo mail:<id>` reply reverses a calendar import or
+  re-files a mistaken ping as bulk. Ronnie acts through its **own** narrow broker
+  — the same server as Alfred's but started with only three routes (label a
+  message, import/remove an invite) and its own token, so it cannot read mail,
+  send, or touch Alfred's routes. Off unless a webhook, labels, or owner
+  addresses are set; unconfigured, mail buffers for the digest exactly as tier 1.
 - **`/c` (and `/clear`) now takes a message inline.** The command used to be an
   exact match — you cleared, waited for the "Session cleared" reply, then sent
   your question as a second message. It's now a **prefix**: `/c` alone still
