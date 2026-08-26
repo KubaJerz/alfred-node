@@ -39,11 +39,16 @@ const parseList = (v) =>
 const ENTROPY = parseList(process.env.RONNIE_TOPIC_ENTROPY_SENDERS || "entropy.co");
 const BANKING = parseList(process.env.RONNIE_TOPIC_BANKING_SENDERS);
 
-// Same matcher as prefilter's lists: an entry is an exact address or a domain.
+// Match an entry as an exact address, an exact domain, OR a parent domain of the
+// sender. Unlike the block/allow lists, topic rules match SUBDOMAINS: banks mail
+// you from `mail1.wellsfargo.com` / `e.chase.com`, never the bare apex, so a rule
+// `wellsfargo.com` has to catch `*.wellsfargo.com` to be useful at all.
 function listed(address, list) {
   if (!address) return false;
   const domain = address.split("@")[1] || "";
-  return list.some((entry) => address === entry || domain === entry);
+  return list.some(
+    (entry) => address === entry || domain === entry || domain.endsWith("." + entry)
+  );
 }
 
 /**

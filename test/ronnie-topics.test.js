@@ -16,6 +16,15 @@ test("domainTopic tags banking by domain or exact address", () => {
   assert.equal(domainTopic({ from: "someone-else@ally.com" }, opts), null); // exact rule, not domain
 });
 
+test("domainTopic matches SUBDOMAINS of a bank rule (how banks actually mail)", () => {
+  const banks = { entropy: [], banking: ["wellsfargo.com", "chase.com"] };
+  assert.equal(domainTopic({ from: "no-reply@mail1.wellsfargo.com" }, banks), "banking");
+  assert.equal(domainTopic({ from: "alerts@e.chase.com" }, banks), "banking");
+  assert.equal(domainTopic({ from: "x@notification.capitalone.com" }, banks), null); // no rule
+  // A look-alike apex is NOT a subdomain — no false match on "notchase.com".
+  assert.equal(domainTopic({ from: "x@notchase.com" }, banks), null);
+});
+
 test("domainTopic returns null when nothing matches", () => {
   assert.equal(domainTopic({ from: "jane@gmail.com" }, opts), null);
   assert.equal(domainTopic({}, opts), null);
