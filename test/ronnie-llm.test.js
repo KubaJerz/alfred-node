@@ -118,6 +118,16 @@ test("classify: falls back to Haiku's topic when no domain rule matches", async 
   assert.equal(r.topic, "jobs");
 });
 
+test("classify: taxes is forced to the interesting tier even if Haiku said bulk", async () => {
+  const r = await classify(
+    { from: "noreply@irs.gov", body: "your 1099 is available" },
+    { block: [], allow: [], run: fakeRun({ label: "bulk", summary: "", topic: "taxes" }) }
+  );
+  assert.equal(r.label, "personal"); // taxes never files to bulk
+  assert.equal(r.topic, "taxes");
+  assert.match(r.reason, /taxes forces interesting/);
+});
+
 test("classify: an undecided message goes to Haiku", async () => {
   const r = await classify(
     { from: "x@capitalone.com", body: "action needed" },

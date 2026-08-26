@@ -225,17 +225,23 @@ Seven properties, each a decision made on purpose:
   surfaces the rest as personal and posts a one-time notice. Bulk is *moved* (the
   BULK label + `removeLabels: ["INBOX"]` is the archive); personal is *pinged*
   with Haiku's one-sentence why (`notify.js`).
-- **Topic is a second, independent label axis** (`topics.js`). Attention decides
-  *ping + archive*; a topic says what the mail is *about* and co-applies to
-  either, so an `entropy.co` newsletter is `bulk + ENTROPY`. `entropy`/`banking`
-  are deterministic sender-domain rules (never the model's to assert, so injection
-  can't forge them); `taxes`/`jobs` come from the same Haiku verdict at no extra
-  cost, and a domain rule always wins over Haiku's guess. A one-time
-  `scripts/ronnie-backfill.mjs` relabels the existing inbox through these exact
-  primitives — dry-run report first, then `--apply` — Haiku-budgeted, resumable,
-  and never labelling withheld credential mail; it creates any missing topic
-  labels via `google/gmail-labels.js` (the one spot allowed to *create* labels —
-  the live broker can only apply ids that already exist).
+- **Topic is a second axis, nested under attention** (`topics.js`, `labels.js`).
+  Attention (`Interesting`/`Bulk`) is the parent and decides *ping + archive*; a
+  topic is a child *under* it, so the same mail is **Interesting/Banking** (a fraud
+  alert) or **Bulk/Banking** (a rewards blast). `entropy`/`banking`/`jobs` are
+  deterministic sender-domain rules — matching a domain **or any subdomain** of it,
+  since banks and boards mail from subdomains — and are never the model's to
+  assert, so injection can't forge them; `taxes` (and an active `jobs` thread that
+  isn't a known board) come from the same Haiku verdict, and a domain rule wins
+  over Haiku's guess. Two cross-axis rules: `taxes` is always Interesting (never
+  Bulk), and a job **board** is a listing (**Bulk/Jobs**) while an active thread is
+  **Interesting/Jobs**. The child-label ids are resolved (and created if missing) by
+  NAME at boot (`labels.js` → `google/gmail-labels.js`, the one spot allowed to
+  *create* labels; the live broker can only apply ids that already exist). A
+  one-time `scripts/ronnie-backfill.mjs` relabels the existing inbox through these
+  exact primitives — dry-run report first, then `--apply` — Haiku-budgeted,
+  resumable, migrating old flat `jobs`/`taxes` labels onto the tree, and never
+  labelling withheld credential mail.
 - **A second broker — the one deliberate exception to "one gateway."** Credentials
   below says one broker, never one per service; Ronnie is the exception, and it's
   per *principal*, not per service. Ronnie is a different actor than Alfred with a

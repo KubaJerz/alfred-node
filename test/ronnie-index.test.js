@@ -28,7 +28,10 @@ function harness() {
       labels: {
         bulk: "L_BULK",
         interesting: "L_INT",
-        topics: { entropy: "L_ENT", banking: "L_BANK", taxes: "L_TAX", jobs: "L_JOB" },
+        topics: {
+          interesting: { banking: "LI_BANK", jobs: "LI_JOB", taxes: "LI_TAX", entropy: "LI_ENT" },
+          bulk: { banking: "LB_BANK", jobs: "LB_JOB", entropy: "LB_ENT" },
+        },
       },
       owners: ["kuba@gmail.com"],
       classify: stubClassify,
@@ -63,33 +66,33 @@ test("a personal message is labelled interesting and pinged", async () => {
   assert.equal(h.posts.length, 1); // pinged
 });
 
-test("a topic co-applies as a second label on an interesting message", async () => {
+test("an interesting topic nests under the interesting parent (child id)", async () => {
   const h = harness();
   h.deps.classify = async () => ({ label: "personal", summary: "Interview.", topic: "jobs" });
   const r = await handleMessage({ id: "m3", from: "recruiter@acme.io", subject: "offer" }, h.deps);
   assert.equal(r.action, "pinged");
   assert.equal(r.topic, "jobs");
-  assert.deepEqual(h.calls[0].body.addLabels, ["L_INT", "L_JOB"]); // attention + topic
+  assert.deepEqual(h.calls[0].body.addLabels, ["L_INT", "LI_JOB"]); // parent + interesting/jobs
   assert.equal(h.calls[0].body.removeLabels, undefined); // interesting stays in inbox
   assert.match(h.posts[0][0].author.name, /#jobs/); // topic shown on the ping
 });
 
-test("a topic co-applies to filed bulk too (entropy newsletter)", async () => {
+test("the SAME topic picks a different child under the bulk parent", async () => {
   const h = harness();
   h.deps.classify = async () => ({ label: "bulk", summary: "", topic: "entropy" });
-  const r = await handleMessage({ id: "m4", from: "news@entropy.co", subject: "digest" }, h.deps);
+  const r = await handleMessage({ id: "m4", from: "news@entrpy.co", subject: "digest" }, h.deps);
   assert.equal(r.action, "filed");
-  assert.deepEqual(h.calls[0].body.addLabels, ["L_BULK", "L_ENT"]);
+  assert.deepEqual(h.calls[0].body.addLabels, ["L_BULK", "LB_ENT"]); // parent + bulk/entropy
   assert.deepEqual(h.calls[0].body.removeLabels, ["INBOX"]); // still archived
   assert.equal(h.posts.length, 0); // bulk is silent, topic or not
 });
 
-test("an unset topic label degrades to attention-only (no crash)", async () => {
+test("an unresolved child id degrades to attention-only (no crash)", async () => {
   const h = harness();
-  h.deps.labels = { bulk: "L_BULK", interesting: "L_INT", topics: { jobs: "" } };
+  h.deps.labels = { bulk: "L_BULK", interesting: "L_INT", topics: { interesting: { jobs: "" }, bulk: {} } };
   h.deps.classify = async () => ({ label: "personal", summary: "x", topic: "jobs" });
   const r = await handleMessage({ id: "m5", from: "a@b", subject: "s" }, h.deps);
-  assert.deepEqual(h.calls[0].body.addLabels, ["L_INT"]); // topic id blank → skipped
+  assert.deepEqual(h.calls[0].body.addLabels, ["L_INT"]); // child id blank → skipped
   assert.equal(r.topic, "jobs");
 });
 

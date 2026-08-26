@@ -1,32 +1,36 @@
 #!/usr/bin/env node
-// One-time backfill: relabel the existing inbox with Ronnie's two-axis scheme.
+// One-time backfill: relabel the existing inbox with Ronnie's nested scheme.
 //
-//   attention  bulk | interesting   (bulk is archived out of the inbox)
-//   topic      entropy | banking | taxes | jobs   (co-applied, optional)
+//   ATTENTION (parent)   Interesting | Bulk     (Bulk is archived out of inbox)
+//   TOPIC (child)         Banking | Jobs | Taxes | Entropy
 //
-// It reuses the EXACT live decision primitives — the credential screen, the
-// deterministic prefilter, the domain-topic rules, and (only when a message is
-// genuinely undecided) one Haiku call — so a backfilled label matches what the
-// live bot would have done. Nothing here can touch the calendar or send mail;
-// it only lists, labels, and archives.
+// So a message lands as `Interesting/Banking` (a fraud alert) or `Bulk/Banking`
+// (a rewards blast). Taxes is interesting-only. It reuses the EXACT live decision
+// primitives — credential screen, deterministic prefilter, domain topics, and
+// (only when undecided) one budgeted Haiku call — so a backfilled label matches
+// what the live bot would do. Nothing here touches the calendar or sends mail.
+//
+// Migration of your old flat labels: any message already wearing the flat `jobs`
+// label is, by your own hand, an active job → `Interesting/Jobs`; flat `taxes` →
+// `Interesting/Taxes`. On --apply those flat labels are stripped from the mail
+// (and `--delete-old-labels` removes the now-empty flat labels entirely).
 //
 // Two gears:
-//   (default)   DRY RUN — classify everything, write a report, mutate nothing.
-//   --apply     do the same, then apply labels + archive bulk in Gmail.
+//   (default)   DRY RUN — classify everything, write a report, mutate nothing
+//               (it won't even create the child labels).
+//   --apply     do the same, then create labels + apply + archive + migrate.
 //
-// Haiku is budgeted (--max-haiku, default 150) so a run stays cheap and under
-// the daily call ceiling; anything still undecided when the budget runs out is
-// recorded as "deferred" and left untouched. The run is checkpointed, so you
-// just run it again (across days if need be) and it picks up the deferred and
-// not-yet-seen mail until nothing is deferred. Credential/verification mail is
-// screened out and never labelled — you check those yourself, by design.
+// Haiku is budgeted (--max-haiku, default 150) and the run is checkpointed, so
+// re-running picks up deferred + unseen mail until nothing's deferred. Credential
+// mail is screened out and never labelled — you check those yourself, by design.
 //
 // Usage:
 //   node scripts/ronnie-backfill.mjs                     # dry run, report only
-//   node scripts/ronnie-backfill.mjs --max-haiku 120     # bound paid calls
+//   node scripts/ronnie-backfill.mjs --max-haiku 120
 //   node scripts/ronnie-backfill.mjs --query "in:inbox"  # scope (default in:inbox)
 //   node scripts/ronnie-backfill.mjs --max 200           # cap messages this run
-//   node scripts/ronnie-backfill.mjs --apply             # actually label+archive
+//   node scripts/ronnie-backfill.mjs --apply             # label + archive + migrate
+//   node scripts/ronnie-backfill.mjs --apply --delete-old-labels  # also drop flat jobs/taxes
 //   node scripts/ronnie-backfill.mjs --reset             # forget the checkpoint
 
 import "dotenv/config";
@@ -40,7 +44,7 @@ import { screen } from "../google/mail-filter.js";
 import { prefilter } from "../ronnie/prefilter.js";
 import { domainTopic, validHaikuTopic } from "../ronnie/topics.js";
 import { classifyWithHaiku } from "../ronnie/haiku.js";
-import { ensureLabels } from "../google/gmail-labels.js";
+import { resolveRonnieLabels } from "../ronnie/labels.js";
 
 const REPO = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const STATE_DIR = process.env.STATE_DIR || path.join(REPO, "agent", "var");
@@ -56,72 +60,45 @@ const opt = (name, def) => {
 };
 const APPLY = flag("--apply");
 const RESET = flag("--reset");
+const DELETE_OLD = flag("--delete-old-labels");
 const QUERY = opt("--query", "in:inbox");
-const MAX = Number(opt("--max", "0")) || Infinity; // messages to look at this run
+const MAX = Number(opt("--max", "0")) || Infinity;
 let haikuBudget = Number(opt("--max-haiku", "150"));
 
 const log = (...a) => console.log(...a);
 
-// ── the topic label names to create when no env id is given ───────────────────
-const TOPIC_NAMES = {
-  entropy: process.env.RONNIE_LABEL_ENTROPY_NAME || "Entropy",
-  banking: process.env.RONNIE_LABEL_BANKING_NAME || "Banking",
-  taxes: process.env.RONNIE_LABEL_TAXES_NAME || "Taxes",
-  jobs: process.env.RONNIE_LABEL_JOBS_NAME || "Jobs",
-};
+// Old flat labels to migrate away from (matched by these names).
+const OLD_FLAT = { jobs: "jobs", taxes: "taxes" };
 
-// Resolve every label id we might apply. Attention labels must come from the
-// same env the live bot uses (so we don't split mail across a second "bulk").
-// Topic labels use their env id if set, else an existing label of the right
-// name. A dry run NEVER creates anything — a missing topic label just resolves
-// to "" (the report still names the topic; application is skipped anyway). Only
-// --apply is allowed to create the missing labels, and it reports their ids.
+// Resolve the nested label map (create only on --apply) + the old flat ids.
 async function resolveLabels(gmail) {
-  const bulk = process.env.RONNIE_LABEL_BULK;
-  const interesting = process.env.RONNIE_LABEL_INTERESTING;
-  if (!bulk || !interesting) {
-    throw new Error(
-      "RONNIE_LABEL_BULK and RONNIE_LABEL_INTERESTING must be set (the live bot's ids) before backfilling."
-    );
+  const interestingId = process.env.RONNIE_LABEL_INTERESTING;
+  const bulkId = process.env.RONNIE_LABEL_BULK;
+  if (!interestingId || !bulkId) {
+    throw new Error("RONNIE_LABEL_INTERESTING and RONNIE_LABEL_BULK must be set (the live bot's parent ids).");
   }
-  const envId = { entropy: "RONNIE_LABEL_ENTROPY", banking: "RONNIE_LABEL_BANKING", taxes: "RONNIE_LABEL_TAXES", jobs: "RONNIE_LABEL_JOBS" };
+  const labels = await resolveRonnieLabels({ gmail, interestingId, bulkId, create: APPLY });
+  if (labels.created?.length) {
+    log(`\n  Created ${labels.created.length} child label(s): ${labels.created.join(", ")}\n`);
+  } else if (!APPLY) {
+    const missing = [];
+    for (const tier of ["interesting", "bulk"]) for (const [t, id] of Object.entries(labels.topics[tier])) if (!id) missing.push(`${tier}/${t}`);
+    if (missing.length) log(`\n  ${missing.length} child label(s) not created yet (dry run): ${missing.join(", ")}\n  --apply will create them.\n`);
+  }
 
-  // What already exists, by name — so a dry run can map without creating.
+  // Old flat label ids (by name) for the migration/strip.
   const list = await gmail.users.labels.list({ userId: "me" });
   const byName = new Map((list.data?.labels || []).map((l) => [l.name, l.id]));
-
-  const topics = {};
-  const toCreate = [];
-  for (const t of Object.keys(TOPIC_NAMES)) {
-    const id = process.env[envId[t]] || byName.get(TOPIC_NAMES[t]) || "";
-    topics[t] = id;
-    if (!id) toCreate.push(t);
-  }
-
-  if (toCreate.length && APPLY) {
-    const { ids } = await ensureLabels(toCreate.map((t) => TOPIC_NAMES[t]), { gmail });
-    for (const t of toCreate) topics[t] = ids[TOPIC_NAMES[t]];
-    log(`\n  Created ${toCreate.length} label(s). Add these to your .env so the live bot uses them:`);
-    for (const t of toCreate) log(`    ${envId[t]}=${topics[t]}`);
-    log("");
-  } else if (toCreate.length) {
-    log(`\n  ${toCreate.length} topic label(s) don't exist yet: ${toCreate.map((t) => TOPIC_NAMES[t]).join(", ")}.`);
-    log(`  Dry run won't create them; --apply will, and print their ids for your .env.\n`);
-  }
-  return { bulk, interesting, topics };
+  const oldFlat = {};
+  for (const [topic, name] of Object.entries(OLD_FLAT)) if (byName.has(name)) oldFlat[topic] = byName.get(name);
+  return { labels, oldFlat };
 }
 
-// List message ids for the query, newest first, paginating up to MAX.
 async function listIds(gmail) {
   const ids = [];
   let pageToken;
   do {
-    const r = await gmail.users.messages.list({
-      userId: "me",
-      q: QUERY,
-      maxResults: 500,
-      pageToken,
-    });
+    const r = await gmail.users.messages.list({ userId: "me", q: QUERY, maxResults: 500, pageToken });
     for (const m of r.data.messages || []) {
       ids.push(m.id);
       if (ids.length >= MAX) return ids;
@@ -131,35 +108,45 @@ async function listIds(gmail) {
   return ids;
 }
 
-// The live decision, composed from the same primitives classify() uses, but
-// with the Haiku call under our own budget so a dry run stays cheap.
-async function decide(msg) {
-  const dTopic = domainTopic(msg);
+// The decision, composed from the same primitives the live classify() uses, with
+// Haiku under our own budget, plus the flat-label migration + the taxes rule.
+async function decide(msg, oldFlat) {
+  const has = (id) => id && (msg.labelIds || []).includes(id);
+  // Migration: a message you'd hand-labelled `jobs`/`taxes` keeps that meaning,
+  // as an active/interesting item under the new tree.
+  let topic = domainTopic(msg);
+  let forcedInteresting = false;
+  if (has(oldFlat.jobs)) { topic = "jobs"; forcedInteresting = true; }
+  if (has(oldFlat.taxes)) { topic = "taxes"; forcedInteresting = true; }
+
   const pre = prefilter(msg);
-  if (pre.decision !== "undecided") {
-    return { attention: pre.decision, topic: dTopic, reason: pre.reason, usedHaiku: false };
+  let attention, reason, usedHaiku = false;
+  if (forcedInteresting) {
+    attention = "personal";
+    reason = "migrated from flat label";
+  } else if (pre.decision !== "undecided") {
+    attention = pre.decision;
+    reason = pre.reason;
+  } else if (haikuBudget > 0) {
+    haikuBudget -= 1;
+    const v = await classifyWithHaiku(msg); // non-strict, fails open to personal
+    attention = v.label;
+    topic = topic || validHaikuTopic(v.topic);
+    reason = v.error ? `haiku error: ${v.error}` : "haiku";
+    usedHaiku = true;
+  } else {
+    return { attention: null, topic, reason: "deferred (haiku budget spent)", deferred: true };
   }
-  if (haikuBudget <= 0) {
-    return { attention: null, topic: dTopic, reason: "deferred (haiku budget spent)", usedHaiku: false, deferred: true };
-  }
-  haikuBudget -= 1;
-  const v = await classifyWithHaiku(msg); // non-strict: fails open to personal
-  return {
-    attention: v.label,
-    topic: dTopic || validHaikuTopic(v.topic),
-    reason: v.error ? `haiku error: ${v.error}` : "haiku",
-    usedHaiku: true,
-  };
+
+  // Taxes is never bulk (matches classify.js).
+  if (topic === "taxes" && attention === "bulk") { attention = "personal"; reason += " → taxes forces interesting"; }
+  return { attention, topic, reason, usedHaiku };
 }
 
 // ── checkpoint ────────────────────────────────────────────────────────────────
 function loadCheckpoint() {
   if (RESET || !existsSync(CHECKPOINT)) return { done: {} };
-  try {
-    return JSON.parse(readFileSync(CHECKPOINT, "utf8"));
-  } catch {
-    return { done: {} };
-  }
+  try { return JSON.parse(readFileSync(CHECKPOINT, "utf8")); } catch { return { done: {} }; }
 }
 function saveCheckpoint(cp) {
   mkdirSync(STATE_DIR, { recursive: true });
@@ -171,28 +158,16 @@ const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<
 
 function writeReport(rows, counts) {
   const chip = (t) => (t ? `<span class="chip t-${t}">${t}</span>` : "");
-  const actionCell = (r) =>
-    r.action === "skip-withheld"
-      ? `<span class="a withheld">withheld — skipped</span>`
-      : r.action === "deferred"
-        ? `<span class="a deferred">deferred</span>`
-        : r.attention === "bulk"
-          ? `<span class="a bulk">file + archive</span>`
-          : `<span class="a keep">keep + label</span>`;
+  const label = (r) => {
+    if (r.action === "skip-withheld") return `<span class="a withheld">withheld — skipped</span>`;
+    if (r.action === "deferred") return `<span class="a deferred">deferred</span>`;
+    const tier = r.attention === "bulk" ? "Bulk" : "Interesting";
+    return `<span class="a ${r.attention === "bulk" ? "bulk" : "keep"}">${tier}${r.topic ? " / " + r.topic[0].toUpperCase() + r.topic.slice(1) : ""}</span>`;
+  };
   const body = rows
-    .map(
-      (r) => `<tr>
-      <td class="from">${esc(r.from)}</td>
-      <td class="subj">${esc(r.subject)}</td>
-      <td>${actionCell(r)}</td>
-      <td>${chip(r.topic)}</td>
-      <td class="why">${esc(r.reason)}</td>
-    </tr>`
-    )
+    .map((r) => `<tr><td class="from">${esc(r.from)}</td><td class="subj">${esc(r.subject)}</td><td>${label(r)}</td><td>${chip(r.topic)}</td><td class="why">${esc(r.reason)}</td></tr>`)
     .join("\n");
-  const summary = Object.entries(counts)
-    .map(([k, v]) => `<div class="stat"><b>${v}</b><span>${esc(k)}</span></div>`)
-    .join("");
+  const summary = Object.entries(counts).map(([k, v]) => `<div class="stat"><b>${v}</b><span>${esc(k)}</span></div>`).join("");
   const mode = APPLY ? "APPLIED to Gmail" : "DRY RUN — nothing changed";
   const html = `<!doctype html><meta charset="utf-8"><title>Ronnie backfill</title>
 <style>
@@ -213,8 +188,8 @@ function writeReport(rows, counts) {
   th{position:sticky;top:0;background:var(--card);font-weight:600;font-size:.78rem;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
   tr:last-child td{border-bottom:0}
   .from{white-space:nowrap;max-width:22ch;overflow:hidden;text-overflow:ellipsis}
-  .subj{max-width:44ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .why{color:var(--muted);white-space:nowrap}
+  .subj{max-width:40ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .why{color:var(--muted);white-space:nowrap;font-size:.82rem}
   .a{font-weight:600;white-space:nowrap}
   .a.bulk{color:var(--bulk)} .a.keep{color:var(--keep)} .a.deferred{color:var(--muted)} .a.withheld{color:var(--wh)}
   .chip{display:inline-block;padding:.08rem .5rem;border-radius:1rem;font-size:.76rem;font-weight:600;color:#fff}
@@ -224,7 +199,7 @@ function writeReport(rows, counts) {
 <p class="mode">${esc(mode)} · ${rows.length} messages · generated by scripts/ronnie-backfill.mjs</p>
 <div class="stats">${summary}</div>
 <div class="wrap"><table>
-<thead><tr><th>From</th><th>Subject</th><th>Action</th><th>Topic</th><th>Why</th></tr></thead>
+<thead><tr><th>From</th><th>Subject</th><th>Lands in</th><th>Topic</th><th>Why</th></tr></thead>
 <tbody>
 ${body}
 </tbody></table></div>`;
@@ -238,8 +213,7 @@ async function main() {
   log(`  query: ${QUERY}   haiku budget: ${haikuBudget}${MAX !== Infinity ? `   max msgs: ${MAX}` : ""}`);
 
   const gmail = await gmailClient();
-  const labels = await resolveLabels(gmail);
-  const topicId = { ...labels.topics };
+  const { labels, oldFlat } = await resolveLabels(gmail);
 
   const cp = loadCheckpoint();
   cp.done = cp.done || {};
@@ -247,23 +221,22 @@ async function main() {
   log(`  ${ids.length} messages match. ${Object.keys(cp.done).length} already decided in a previous run.\n`);
 
   const rows = [];
-  const counts = { total: 0, bulk: 0, interesting: 0, entropy: 0, banking: 0, taxes: 0, jobs: 0, withheld: 0, deferred: 0, applied: 0 };
+  const counts = { total: 0, interesting: 0, bulk: 0, banking: 0, jobs: 0, taxes: 0, entropy: 0, withheld: 0, deferred: 0, migrated: 0, applied: 0 };
   let processed = 0;
 
   for (const id of ids) {
-    // Skip anything already firmly decided; deferred ones are retried.
     const prev = cp.done[id];
     if (prev && prev.action !== "deferred") {
       rows.push(prev);
       counts.total++;
-      counts[prev.attention] != null && prev.attention && counts[prev.attention]++;
-      prev.topic && counts[prev.topic]++;
-      prev.action === "skip-withheld" && counts.withheld++;
+      if (prev.attention === "bulk") counts.bulk++; else if (prev.attention) counts.interesting++;
+      if (prev.topic) counts[prev.topic]++;
+      if (prev.action === "skip-withheld") counts.withheld++;
       continue;
     }
 
     const raw = await enrich(gmail, id);
-    if (!raw) continue; // 404 — message gone
+    if (!raw) continue;
     const screened = screen([raw])[0];
 
     let row;
@@ -271,22 +244,29 @@ async function main() {
       row = { id, from: "(withheld)", subject: "(withheld)", attention: null, topic: null, reason: "credential/verification — screened", action: "skip-withheld" };
       counts.withheld++;
     } else {
-      const d = await decide(raw);
+      const d = await decide(raw, oldFlat);
       if (d.deferred) {
         row = { id, from: raw.from, subject: raw.subject, attention: null, topic: d.topic, reason: d.reason, action: "deferred" };
         counts.deferred++;
       } else {
-        const action = d.attention === "bulk" ? "file+archive" : "keep+label";
-        row = { id, from: raw.from, subject: raw.subject, attention: d.attention, topic: d.topic, reason: d.reason, action };
-        counts[d.attention]++;
+        const tier = d.attention === "bulk" ? "bulk" : "interesting";
+        row = { id, from: raw.from, subject: raw.subject, attention: d.attention, topic: d.topic, reason: d.reason, action: "labelled" };
+        if (d.attention === "bulk") counts.bulk++; else counts.interesting++;
         if (d.topic) counts[d.topic]++;
+        if (/migrated/.test(d.reason)) counts.migrated++;
 
         if (APPLY) {
-          const addLabelIds = [d.attention === "bulk" ? labels.bulk : labels.interesting, d.topic ? topicId[d.topic] : ""].filter(Boolean);
-          const removeLabelIds = d.attention === "bulk" ? ["INBOX"] : [];
+          const parentId = labels[tier];
+          const childId = d.topic ? labels.topics[tier]?.[d.topic] || "" : "";
+          const addLabelIds = [parentId, childId].filter(Boolean);
+          const removeLabelIds = [
+            ...(d.attention === "bulk" ? ["INBOX"] : []),
+            // Strip any old flat label as we migrate the message onto the tree.
+            ...Object.values(oldFlat).filter((lid) => (raw.labelIds || []).includes(lid)),
+          ];
           await gmail.users.messages.modify({ userId: "me", id, requestBody: { addLabelIds, removeLabelIds } });
           counts.applied++;
-          row.action += " ✓";
+          row.action = "labelled ✓";
         }
       }
     }
@@ -304,13 +284,21 @@ async function main() {
   saveCheckpoint(cp);
   writeReport(rows, counts);
 
+  // Optional final cleanup: drop the now-migrated flat labels entirely.
+  if (APPLY && DELETE_OLD) {
+    for (const [topic, lid] of Object.entries(oldFlat)) {
+      try { await gmail.users.labels.delete({ userId: "me", id: lid }); log(`  deleted old flat label "${OLD_FLAT[topic]}"`); }
+      catch (e) { log(`  could not delete "${OLD_FLAT[topic]}": ${e.message}`); }
+    }
+  }
+
   log(`\nDone. ${counts.total} messages:`);
-  log(`  bulk ${counts.bulk} · interesting ${counts.interesting} · withheld ${counts.withheld} · deferred ${counts.deferred}`);
-  log(`  topics — entropy ${counts.entropy} · banking ${counts.banking} · taxes ${counts.taxes} · jobs ${counts.jobs}`);
+  log(`  interesting ${counts.interesting} · bulk ${counts.bulk} · withheld ${counts.withheld} · deferred ${counts.deferred} · migrated ${counts.migrated}`);
+  log(`  topics — banking ${counts.banking} · jobs ${counts.jobs} · taxes ${counts.taxes} · entropy ${counts.entropy}`);
   if (APPLY) log(`  applied to Gmail: ${counts.applied}`);
   if (counts.deferred) log(`  ${counts.deferred} deferred (Haiku budget spent) — run again to finish them.`);
   log(`\nReport: ${REPORT_HTML}`);
-  if (!APPLY) log(`This was a DRY RUN. Re-run with --apply to label + archive for real.`);
+  if (!APPLY) log(`This was a DRY RUN. Re-run with --apply to label + archive + migrate for real.`);
 }
 
 main().catch((err) => {

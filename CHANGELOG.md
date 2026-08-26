@@ -5,21 +5,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
 
 ## [Unreleased]
 ### Added
-- **Ronnie topic labels — a second, independent axis on top of bulk/interesting.**
-  Attention (interesting/bulk) still decides ping + archive; a *topic* now says
-  what the mail is *about* and co-applies to either — an `entropy.co` newsletter
-  is `bulk + ENTROPY`, a recruiter note is `interesting + JOBS`. Two topics are
-  deterministic sender-domain rules (`entropy`, `banking` — `RONNIE_TOPIC_*_SENDERS`,
-  `ronnie/topics.js`), so a prompt-injected email can't forge them; the other two
-  (`taxes`, `jobs`) are semantic and ride the Haiku call that already runs, at no
-  extra cost. Domain rules win over Haiku's guess. New `RONNIE_LABEL_{ENTROPY,
-  BANKING,TAXES,JOBS}` ids (any unset is skipped). A one-time **backfill**
+- **Ronnie topic labels — a topic axis nested under interesting/bulk.**
+  Attention (`Interesting`/`Bulk`) is the parent and still decides ping + archive;
+  a *topic* is a child nested under it, so the same mail lands as
+  `Interesting/Banking` (a fraud alert) or `Bulk/Banking` (a rewards blast). Three
+  topics are deterministic sender-domain rules (`entropy`, `banking`, `jobs`-boards
+  — `RONNIE_TOPIC_*_SENDERS`, `ronnie/topics.js`), matching a domain **or any
+  subdomain** of it (banks/boards mail from subdomains), and never the model's to
+  assert, so a prompt-injected email can't forge them; `taxes` and an active `jobs`
+  thread come from the Haiku call that already runs, and a domain rule wins over
+  Haiku. Two cross-axis rules: `taxes` is always Interesting (never Bulk), and a
+  job **board** is a listing (`Bulk/Jobs`) while an active thread is
+  `Interesting/Jobs`. Child labels are resolved/created by NAME at boot
+  (`ronnie/labels.js` → `google/gmail-labels.js`) from the two parent ids, so
+  there are no per-topic id env vars. A one-time **backfill**
   (`scripts/ronnie-backfill.mjs`) relabels the existing inbox with the same live
-  primitives — credential screen → prefilter → domain topic → budgeted Haiku —
-  as a dry-run report first (`agent/var/ronnie-backfill-report.html`), then
-  `--apply` to label + archive; Haiku-budgeted, checkpointed/resumable, and it
-  never labels withheld credential mail. A `google/gmail-labels.js` helper
-  creates the topic labels if they don't exist.
+  primitives — credential screen → prefilter → domain topic → budgeted Haiku — as
+  a dry-run report first (`agent/var/ronnie-backfill-report.html`), then `--apply`
+  to label + archive + migrate the old flat `jobs`/`taxes` labels onto the tree;
+  Haiku-budgeted, checkpointed/resumable, and it never labels withheld credential
+  mail.
 - **Strength load tracking — Garmin lifting → rolling per-muscle load.** A new
   `strength/` subsystem and `strength` skill turn Garmin strength workouts into
   progressive-overload signal. Reps and weight aren't in Intervals.icu's JSON

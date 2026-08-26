@@ -47,5 +47,12 @@ test("validHaikuTopic only admits the two semantic topics", () => {
 });
 
 test("TOPICS lists all four, domain topics first", () => {
-  assert.deepEqual(TOPICS, ["entropy", "banking", "taxes", "jobs"]);
+  assert.deepEqual(TOPICS, ["entropy", "banking", "jobs", "taxes"]);
+});
+
+test("domainTopic tags job boards (a listing skips Haiku, so it needs a rule)", () => {
+  const o = { entropy: [], banking: [], jobs: ["ripplematch.com", "greenhouse-mail.io"] };
+  assert.equal(domainTopic({ from: "no-reply@ripplematch.com" }, o), "jobs");
+  assert.equal(domainTopic({ from: "jobs@us.greenhouse-mail.io" }, o), "jobs"); // subdomain
+  assert.equal(domainTopic({ from: "someone@acme.io" }, o), null);
 });

@@ -35,15 +35,12 @@ import { mailEmbed, inviteEmbed, post } from "./notify.js";
 const LABELS = {
   bulk: process.env.RONNIE_LABEL_BULK || "",
   interesting: process.env.RONNIE_LABEL_INTERESTING || "",
-  // The topic axis — co-applied alongside bulk/interesting. Any unset id is
-  // simply skipped, so a topic whose label doesn't exist yet degrades to
-  // "attention only" rather than erroring.
-  topics: {
-    entropy: process.env.RONNIE_LABEL_ENTROPY || "",
-    banking: process.env.RONNIE_LABEL_BANKING || "",
-    taxes: process.env.RONNIE_LABEL_TAXES || "",
-    jobs: process.env.RONNIE_LABEL_JOBS || "",
-  },
+  // The topic axis is nested UNDER attention: a child label per (tier, topic),
+  // e.g. topics.interesting.banking = the id of "INTURESTING/Banking". The real
+  // ids are resolved at boot (labels.js) from the Gmail sidebar and injected;
+  // this default is empty, so with nothing resolved a topic simply isn't applied
+  // (attention still is) rather than erroring.
+  topics: { interesting: {}, bulk: {} },
 };
 
 // A short human string for the invite embed's time line.
@@ -61,7 +58,7 @@ function whenOf(resource) {
  * @param {{
  *   broker: (routeKey: string, body: object) => Promise<any>,
  *   notify?: (embeds: any[]) => Promise<any>,
- *   labels?: {bulk: string, interesting: string},
+ *   labels?: {bulk: string, interesting: string, topics?: {interesting: object, bulk: object}},
  *   owners?: string[],
  *   log?: (m: string) => void,
  * }} deps
@@ -108,10 +105,12 @@ export async function handleMessage(msg = {}, deps = {}) {
 
   // ── 2. Triage path ────────────────────────────────────────────────────────
   const { label, summary, reason, capped, usedHaiku, topic } = await classify(msg, { log });
-  const labelId = label === "bulk" ? labels.bulk : labels.interesting;
-  // The topic axis rides alongside attention: one topic id, co-applied to bulk
-  // or interesting alike (an entropy.co newsletter is bulk + ENTROPY).
-  const topicId = topic ? labels.topics?.[topic] || "" : "";
+  const tier = label === "bulk" ? "bulk" : "interesting";
+  const labelId = labels[tier];
+  // The topic is a child of the tier: interesting/Banking vs bulk/Banking are
+  // different ids. Apply both the parent (so the parent view shows everything)
+  // and the child. An unresolved child id is skipped — attention still applies.
+  const topicId = topic ? labels.topics?.[tier]?.[topic] || "" : "";
   const addLabels = [labelId, topicId].filter(Boolean);
   if (addLabels.length && msg.id) {
     // Filed mail is *moved* — the BULK label plus archiving it out of the inbox
