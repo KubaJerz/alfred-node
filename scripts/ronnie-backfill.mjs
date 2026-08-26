@@ -71,8 +71,11 @@ const TOPIC_NAMES = {
 };
 
 // Resolve every label id we might apply. Attention labels must come from the
-// same env the live bot uses (so we don't split mail across a second "bulk");
-// topic labels use their env id if set, else are created by name and reported.
+// same env the live bot uses (so we don't split mail across a second "bulk").
+// Topic labels use their env id if set, else an existing label of the right
+// name. A dry run NEVER creates anything — a missing topic label just resolves
+// to "" (the report still names the topic; application is skipped anyway). Only
+// --apply is allowed to create the missing labels, and it reports their ids.
 async function resolveLabels(gmail) {
   const bulk = process.env.RONNIE_LABEL_BULK;
   const interesting = process.env.RONNIE_LABEL_INTERESTING;
@@ -81,22 +84,29 @@ async function resolveLabels(gmail) {
       "RONNIE_LABEL_BULK and RONNIE_LABEL_INTERESTING must be set (the live bot's ids) before backfilling."
     );
   }
+  const envId = { entropy: "RONNIE_LABEL_ENTROPY", banking: "RONNIE_LABEL_BANKING", taxes: "RONNIE_LABEL_TAXES", jobs: "RONNIE_LABEL_JOBS" };
+
+  // What already exists, by name — so a dry run can map without creating.
+  const list = await gmail.users.labels.list({ userId: "me" });
+  const byName = new Map((list.data?.labels || []).map((l) => [l.name, l.id]));
+
   const topics = {};
   const toCreate = [];
-  const envId = { entropy: "RONNIE_LABEL_ENTROPY", banking: "RONNIE_LABEL_BANKING", taxes: "RONNIE_LABEL_TAXES", jobs: "RONNIE_LABEL_JOBS" };
   for (const t of Object.keys(TOPIC_NAMES)) {
-    const id = process.env[envId[t]];
-    if (id) topics[t] = id;
-    else toCreate.push(t);
+    const id = process.env[envId[t]] || byName.get(TOPIC_NAMES[t]) || "";
+    topics[t] = id;
+    if (!id) toCreate.push(t);
   }
-  if (toCreate.length) {
-    const { ids, created } = await ensureLabels(toCreate.map((t) => TOPIC_NAMES[t]), { gmail });
+
+  if (toCreate.length && APPLY) {
+    const { ids } = await ensureLabels(toCreate.map((t) => TOPIC_NAMES[t]), { gmail });
     for (const t of toCreate) topics[t] = ids[TOPIC_NAMES[t]];
-    if (created.length) {
-      log(`\n  Created ${created.length} label(s). Add these to your .env so the live bot uses them:`);
-      for (const t of toCreate) if (created.includes(TOPIC_NAMES[t])) log(`    ${envId[t]}=${topics[t]}`);
-      log("");
-    }
+    log(`\n  Created ${toCreate.length} label(s). Add these to your .env so the live bot uses them:`);
+    for (const t of toCreate) log(`    ${envId[t]}=${topics[t]}`);
+    log("");
+  } else if (toCreate.length) {
+    log(`\n  ${toCreate.length} topic label(s) don't exist yet: ${toCreate.map((t) => TOPIC_NAMES[t]).join(", ")}.`);
+    log(`  Dry run won't create them; --apply will, and print their ids for your .env.\n`);
   }
   return { bulk, interesting, topics };
 }
