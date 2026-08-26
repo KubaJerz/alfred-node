@@ -67,8 +67,8 @@ export function mailEmbed(entry = {}) {
 
 /**
  * A Discord embed announcing a calendar action Ronnie took from a forwarded
- * invite. The `.ics` UID rides in the footer because that is exactly what you
- * reply with to undo it — bot.js reads the reply and reverses the action.
+ * invite. The event id rides in the footer (as `uid`) because that is exactly
+ * what you reply with to undo it — bot.js reads the reply and deletes that event.
  */
 export function inviteEmbed({ action, summary, uid, when } = {}) {
   const removed = action === "removed";
@@ -76,9 +76,9 @@ export function inviteEmbed({ action, summary, uid, when } = {}) {
     color: removed ? COLORS.undo : COLORS.invite,
     title: `Calendar: ${removed ? "removed" : "added"} “${clean(summary) || "an event"}”`,
     description: when ? clean(when) : undefined,
-    // The UID is the undo handle (prefixed cal: so bot.js can tell it from a
-    // mail undo). Kept un-cleaned of case but capped; it's our own generated or
-    // parsed identifier, not free-form attacker prose.
+    // The event id is the undo handle (prefixed cal: so bot.js can tell it from a
+    // mail undo). Kept un-cleaned of case but capped; it's Google's own event id,
+    // not free-form attacker prose.
     footer: { text: `reply “undo cal:${String(uid ?? "").slice(0, 200)}” to reverse` },
   };
 }

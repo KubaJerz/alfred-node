@@ -140,4 +140,6 @@ export async function classifyWithHaiku(
   return { ...verdict, usage, usedHaiku: true };
 }
 
-export { MODEL, buildPrompt };
+// runClaude is exported so ronnie/invite.js can reuse the exact same one-shot
+// `claude -p` runner (spawn, JSON output, usage) rather than duplicate it.
+export { MODEL, buildPrompt, runClaude };

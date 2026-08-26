@@ -19,22 +19,29 @@ const hit = (path, opts = {}) =>
     headers: { "x-alfred-broker": broker.token, ...(opts.headers || {}) },
   });
 
-test("Ronnie's surface is exactly three routes — no fourth capability", () => {
+test("Ronnie's surface is exactly four routes — no mail read, no calendar edit", () => {
   assert.deepEqual(
     RONNIE_OPERATIONS.sort(),
-    ["POST /calendar/import", "POST /calendar/remove", "POST /mail/label"]
+    [
+      "DELETE /calendar/events",
+      "GET /calendar/events",
+      "POST /calendar/events",
+      "POST /mail/label",
+    ]
   );
 });
 
-test("the main broker's read/draft routes are NOT reachable here", async () => {
+test("the main broker's read/draft routes — and calendar EDIT — are NOT reachable here", async () => {
   // The whole point of the separate broker: Ronnie can't read mail even by
-  // guessing the path, because this route table never contained it.
+  // guessing the path, because this route table never contained it. Calendar
+  // reach is list/add/delete only — no PATCH, so an event can't be silently
+  // rewritten.
   for (const [method, path] of [
     ["GET", "/mail/search?q=x"],
     ["GET", "/mail/message?id=1"],
     ["POST", "/mail/draft"],
     ["POST", "/mail/reply"],
-    ["GET", "/calendar/events"],
+    ["PATCH", "/calendar/events"],
   ]) {
     const res = await hit(path, { method });
     assert.equal(res.status, 404, `${method} ${path} was reachable on Ronnie's broker`);
@@ -61,15 +68,15 @@ test("label validates before touching Google", async () => {
   assert.equal(noChange.status, 400); // nothing to add or remove
 });
 
-test("import requires a resource with iCalUID/start/end before any API call", async () => {
-  const bad = await hit("/calendar/import", {
+test("add requires summary/start/end before any API call", async () => {
+  const bad = await hit("/calendar/events", {
     method: "POST",
-    body: JSON.stringify({ resource: { summary: "x" } }),
+    body: JSON.stringify({ summary: "x" }), // no start/end
   });
   assert.equal(bad.status, 400);
 });
 
-test("remove requires an iCalUID before any API call", async () => {
-  const bad = await hit("/calendar/remove", { method: "POST", body: JSON.stringify({}) });
+test("delete requires an id before any API call", async () => {
+  const bad = await hit("/calendar/events", { method: "DELETE" });
   assert.equal(bad.status, 400);
 });
