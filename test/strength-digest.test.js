@@ -92,6 +92,19 @@ test("digest only interprets not-yet-interpreted lifting workouts", async () => 
   assert.equal(out2.interpreted.length, 0);
 });
 
+test("digest interprets already-synced workouts even when sync fails (no broker)", async () => {
+  const db = openDb(":memory:");
+  seedWorkout(db); // a lifting workout already in the DB, not yet interpreted
+  // A backgrounded/standalone run with no broker: the pull throws. digest must
+  // not sink the whole pass — it should still interpret what's already synced.
+  const call = async () => { throw new Error("Broker unavailable — ALFRED_BROKER not set"); };
+  const out = await digest({ db, call, runModel: fakeModel, from: "2026-08-01", to: "2026-08-24" });
+  assert.equal(out.sync, null);
+  assert.match(out.syncError, /Broker unavailable/);
+  assert.equal(out.interpreted.length, 1, "the pending workout was interpreted despite the failed sync");
+  assert.equal(out.errors.length, 0);
+});
+
 test("extractJson tolerates fences and surrounding prose", () => {
   assert.deepEqual(extractJson('```json\n{"a":1}\n```'), { a: 1 });
   assert.deepEqual(extractJson('Sure! {"style":"leg","sets":[]} — done'), { style: "leg", sets: [] });

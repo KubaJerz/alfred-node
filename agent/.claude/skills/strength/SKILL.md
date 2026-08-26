@@ -19,20 +19,28 @@ Garmin logs Kuba's sets (reps + weight) into the FIT file; a nightly pass pulls
 them, a model names the exercises, and the load is rolled into 7-/28-day windows
 per muscle. You read that; you don't compute it.
 
-## `digest` is the slow one — background it
+## `digest` is the slow one — defer it, never block on it
 
 `load`, `sets` and `plot` are instant database reads. **`digest` runs a model to
 interpret each new workout (~2 minutes each)**, so it can outlast a turn. It runs
-automatically overnight, so most of the time the data is already there — try
-`load` first.
+automatically overnight, so most of the time the data is already there — **try
+`load`/`sets` first**, and if the workout shows up, just answer.
 
 When Kuba asks you to *see a new workout* right now ("did my lift sync?", "check
-my workout"), and `load`/`sets` don't show it yet, run digest **detached** and say
-you'll confirm once it's processed — don't block the whole turn on it:
+my workout", "how'd today's lift look?") and `load`/`sets` don't show it yet, do
+**not** run `digest` yourself — it will blow the turn's time limit and he'll get
+no reply. Instead **defer it**: write a one-line acknowledgement and end your
+reply with the sentinel `{bg:strength}` on its own. For example:
 
-    node ../bin/strength.js digest > ../var/logs/strength-digest.log 2>&1 &
+    On it — pulling today's lift, back in ~2 min ⏳
+    {bg:strength}
 
-Then check `load`/`sets` a bit later (or next turn) and report what landed.
+bot.js sees the sentinel, sends your ack immediately, runs the digest in the
+background (it has the broker; a detached run you launch yourself does not), and
+**re-invokes you the moment it finishes** with the fresh data — so you answer his
+original question in a follow-up. You do not poll, wait, or run the digest; you
+only defer and then, when prompted, report. Reserve `{bg:strength}` for when data
+is genuinely missing — if `load`/`sets` already have it, don't defer.
 
 ## Everything is in pounds
 

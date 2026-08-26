@@ -27,7 +27,11 @@ function spawnHaiku(prompt, { timeoutMs = 120000 } = {}) {
     const proc = spawn(
       "claude",
       ["-p", prompt, "--model", HAIKU_MODEL, "--output-format", "json"],
-      { env: process.env, timeout: timeoutMs }
+      // Prompt rides in on `-p`; the child never reads stdin. Point it at
+      // /dev/null so the CLI doesn't stall 3s waiting for piped input and then
+      // emit "no stdin data received in 3s" into stderr (which, with the timeout
+      // firing, killed the digest — SIGTERM 143). See bot.js runClaude.
+      { env: process.env, timeout: timeoutMs, stdio: ["ignore", "pipe", "pipe"] }
     );
     let out = "", err = "";
     proc.stdout.on("data", (d) => (out += d));
@@ -169,7 +173,19 @@ export async function interpretWorkout({ db, activityId, runModel = spawnHaiku }
  * caught and reported, not fatal to the batch.
  */
 export async function digest({ db, call, runModel, from, to } = {}) {
-  const sync = await syncStrength({ db, call, from, to });
+  // Sync (the activity pull) is the ONLY step that needs the broker; interpret
+  // needs just `claude -p`. Keep a broker failure from sinking the whole pass:
+  // if the pull can't run — e.g. a detached/background run that lost the broker
+  // env — log it and still interpret workouts already in the DB. Otherwise a
+  // backgrounded on-demand digest fails wholesale and forces a foreground retry
+  // that outlasts the turn timeout.
+  let sync = null, syncError = null;
+  try {
+    sync = await syncStrength({ db, call, from, to });
+  } catch (err) {
+    syncError = err.message;
+    console.error(`⚠️  strength sync skipped (${err.message}); interpreting already-synced workouts only`);
+  }
   const pending = db.prepare("SELECT id FROM workout WHERE is_lifting = 1 AND interpreted_at IS NULL").all();
   const interpreted = [], errors = [];
   for (const { id } of pending) {
@@ -179,5 +195,5 @@ export async function digest({ db, call, runModel, from, to } = {}) {
       errors.push({ activityId: id, error: err.message });
     }
   }
-  return { sync, interpreted, errors };
+  return { sync, syncError, interpreted, errors };
 }
