@@ -53,9 +53,12 @@ export function mailEmbed(entry = {}) {
   const subject = clean(entry.subject) || "(no subject)";
   const bulk = entry.category === "bulk";
   const id = String(entry.id ?? "").slice(0, 200);
+  // The topic axis (taxes/jobs/banking/entropy), if any, rides in the author
+  // line as a hashtag so a glance tells you what the mail is about.
+  const topic = typeof entry.topic === "string" ? entry.topic : "";
   return {
     color: bulk ? COLORS.bulk : COLORS.personal,
-    author: { name: from },
+    author: { name: topic ? `${from} · #${topic}` : from },
     title: subject,
     // The one-liner is the point of the ping — why this matters, in a sentence.
     description: entry.summary ? clean(entry.summary, 500) : undefined,

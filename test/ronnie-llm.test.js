@@ -36,6 +36,18 @@ test("haiku drops the summary on a bulk verdict", async () => {
   assert.equal(v.summary, "");
 });
 
+test("haiku parses a taxes/jobs topic and clamps anything else to null", async () => {
+  const jobs = await classifyWithHaiku({ from: "a@b" }, { run: fakeRun({ label: "personal", summary: "s", topic: "jobs" }) });
+  assert.equal(jobs.topic, "jobs");
+  const bulkTaxes = await classifyWithHaiku({ from: "a@b" }, { run: fakeRun({ label: "bulk", summary: "", topic: "taxes" }) });
+  assert.equal(bulkTaxes.topic, "taxes"); // a topic rides on bulk too
+  // Haiku must not be able to assert a domain topic, or an unknown one.
+  const forged = await classifyWithHaiku({ from: "a@b" }, { run: fakeRun({ label: "personal", summary: "s", topic: "banking" }) });
+  assert.equal(forged.topic, null);
+  const none = await classifyWithHaiku({ from: "a@b" }, { run: fakeRun({ label: "personal", summary: "s" }) });
+  assert.equal(none.topic, null);
+});
+
 test("haiku sends the FULL body to the model", async () => {
   let prompt;
   const run = async (p) => {
@@ -75,8 +87,35 @@ test("classify: blocklist decides with no Haiku run", async () => {
     { from: "deals@krispykreme.com" },
     { block: ["krispykreme.com"], allow: [], run: async () => { called = true; return { text: "{}", usage: {} }; } }
   );
-  assert.deepEqual(r, { label: "bulk", summary: "", reason: "blocklist", usedHaiku: false });
+  assert.deepEqual(r, { label: "bulk", summary: "", reason: "blocklist", topic: null, usedHaiku: false });
   assert.equal(called, false);
+});
+
+test("classify: a domain topic applies even to prefiltered bulk (no Haiku)", async () => {
+  let called = false;
+  const r = await classify(
+    { from: "news@entropy.co", headers: { "list-unsubscribe": "<u>" } },
+    { block: [], allow: [], entropy: ["entropy.co"], run: async () => { called = true; return { text: "{}", usage: {} }; } }
+  );
+  assert.equal(r.label, "bulk"); // list header filed it
+  assert.equal(r.topic, "entropy"); // topic still tagged, for free
+  assert.equal(called, false); // and no paid call
+});
+
+test("classify: a domain topic wins over Haiku's guess", async () => {
+  const r = await classify(
+    { from: "alerts@chase.com", body: "your refund" },
+    { block: [], allow: [], banking: ["chase.com"], run: fakeRun({ label: "personal", summary: "s", topic: "taxes" }) }
+  );
+  assert.equal(r.topic, "banking"); // deterministic beats the model
+});
+
+test("classify: falls back to Haiku's topic when no domain rule matches", async () => {
+  const r = await classify(
+    { from: "recruiter@acme.io", body: "we'd love to interview you" },
+    { block: [], allow: [], run: fakeRun({ label: "personal", summary: "Interview offer.", topic: "jobs" }) }
+  );
+  assert.equal(r.topic, "jobs");
 });
 
 test("classify: an undecided message goes to Haiku", async () => {

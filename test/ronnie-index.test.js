@@ -25,7 +25,11 @@ function harness() {
         posts.push(embeds);
         return { posted: true };
       },
-      labels: { bulk: "L_BULK", interesting: "L_INT" },
+      labels: {
+        bulk: "L_BULK",
+        interesting: "L_INT",
+        topics: { entropy: "L_ENT", banking: "L_BANK", taxes: "L_TAX", jobs: "L_JOB" },
+      },
       owners: ["kuba@gmail.com"],
       classify: stubClassify,
     },
@@ -57,6 +61,36 @@ test("a personal message is labelled interesting and pinged", async () => {
   assert.equal(r.action, "pinged");
   assert.deepEqual(h.calls[0], { routeKey: "POST /mail/label", body: { id: "m1", addLabels: ["L_INT"] } });
   assert.equal(h.posts.length, 1); // pinged
+});
+
+test("a topic co-applies as a second label on an interesting message", async () => {
+  const h = harness();
+  h.deps.classify = async () => ({ label: "personal", summary: "Interview.", topic: "jobs" });
+  const r = await handleMessage({ id: "m3", from: "recruiter@acme.io", subject: "offer" }, h.deps);
+  assert.equal(r.action, "pinged");
+  assert.equal(r.topic, "jobs");
+  assert.deepEqual(h.calls[0].body.addLabels, ["L_INT", "L_JOB"]); // attention + topic
+  assert.equal(h.calls[0].body.removeLabels, undefined); // interesting stays in inbox
+  assert.match(h.posts[0][0].author.name, /#jobs/); // topic shown on the ping
+});
+
+test("a topic co-applies to filed bulk too (entropy newsletter)", async () => {
+  const h = harness();
+  h.deps.classify = async () => ({ label: "bulk", summary: "", topic: "entropy" });
+  const r = await handleMessage({ id: "m4", from: "news@entropy.co", subject: "digest" }, h.deps);
+  assert.equal(r.action, "filed");
+  assert.deepEqual(h.calls[0].body.addLabels, ["L_BULK", "L_ENT"]);
+  assert.deepEqual(h.calls[0].body.removeLabels, ["INBOX"]); // still archived
+  assert.equal(h.posts.length, 0); // bulk is silent, topic or not
+});
+
+test("an unset topic label degrades to attention-only (no crash)", async () => {
+  const h = harness();
+  h.deps.labels = { bulk: "L_BULK", interesting: "L_INT", topics: { jobs: "" } };
+  h.deps.classify = async () => ({ label: "personal", summary: "x", topic: "jobs" });
+  const r = await handleMessage({ id: "m5", from: "a@b", subject: "s" }, h.deps);
+  assert.deepEqual(h.calls[0].body.addLabels, ["L_INT"]); // topic id blank → skipped
+  assert.equal(r.topic, "jobs");
 });
 
 test("a bulk message is labelled bulk and NOT pinged", async () => {

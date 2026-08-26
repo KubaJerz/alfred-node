@@ -14,22 +14,27 @@
 
 import { prefilter } from "./prefilter.js";
 import { classifyWithHaiku } from "./haiku.js";
+import { domainTopic, validHaikuTopic } from "./topics.js";
 
 /**
  * @param {object} msg  enriched message: { from, subject, body, headers }
  * @param {object} [opts] { block, allow, meter, run, capCalls, log }
  */
 export async function classify(msg = {}, opts = {}) {
+  // The topic axis is independent of attention: a sender-domain topic
+  // (entropy/banking) is decided up front and applies even to filed bulk mail.
+  const dTopic = domainTopic(msg, opts);
+
   const pre = prefilter(msg, { block: opts.block, allow: opts.allow });
   if (pre.decision !== "undecided") {
-    return { label: pre.decision, summary: "", reason: pre.reason, usedHaiku: false };
+    return { label: pre.decision, summary: "", reason: pre.reason, topic: dTopic, usedHaiku: false };
   }
 
   // Undecided -> the paid stage, unless the daily call cap says stop.
   if (opts.capCalls && opts.meter) {
     const calls = await opts.meter.callsToday();
     if (calls >= opts.capCalls) {
-      return { label: "personal", summary: "", reason: "over daily cap", capped: true, usedHaiku: false };
+      return { label: "personal", summary: "", reason: "over daily cap", topic: dTopic, capped: true, usedHaiku: false };
     }
   }
 
@@ -40,6 +45,8 @@ export async function classify(msg = {}, opts = {}) {
     label: v.label,
     summary: v.summary,
     reason: v.error ? `haiku error: ${v.error}` : "haiku",
+    // Domain topic wins; only fall back to Haiku's guess (taxes/jobs) if none.
+    topic: dTopic || validHaikuTopic(v.topic),
     usedHaiku: true,
   };
 }

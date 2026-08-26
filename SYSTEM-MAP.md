@@ -168,15 +168,15 @@ flowchart TD
     SC -.->|"login code → marker"| BUF["pending-mail.jsonl<br/>digest: markers only"]
     SC -->|"safe"| H["handleMessage · index.js"]
     H -->|".ics + DKIM · sender-auth.js · ics.js"| RBR
-    H -->|"else · classify.js → prefilter.js<br/>block/allow/category/list-header (mail-triage.js)"| PF{"decided?"}
+    H -->|"else · classify.js → prefilter.js<br/>block/allow/category/list-header (mail-triage.js)<br/>+ topics.js: domain → entropy/banking"| PF{"decided?"}
     PF -->|"free"| ACT
     PF -->|"undecided"| BR{"breaker.js<br/>Haiku up?"}
-    BR -->|"ready"| HK["Haiku · haiku.js<br/>claude -p · meter.js · capped"]
+    BR -->|"ready"| HK["Haiku · haiku.js<br/>claude -p · meter.js · capped<br/>label + taxes/jobs topic"]
     BR -.->|"open → hold + back off 60s→30m"| Q
-    HK -->|"ok → success"| ACT{"label"}
+    HK -->|"ok → success"| ACT{"attention<br/>+ topic"}
     HK -.->|"down → trip"| BR
-    ACT -->|"bulk → BULK + remove INBOX"| RBR
-    ACT -->|"personal"| PING["ping · notify.js"]
+    ACT -->|"bulk → BULK (+topic) − INBOX"| RBR
+    ACT -->|"personal (+topic) → label"| PING["ping · notify.js"]
     RBR["Ronnie's broker · broker-routes.js<br/>3 routes · own token"] ==>|"label / import / remove"| GM["Gmail / Calendar"]
     PING --> DIS["Discord webhook · write-only"]
 
@@ -190,7 +190,7 @@ flowchart TD
     class Q,BUF store
 ```
 
-Six properties, each a decision made on purpose:
+Seven properties, each a decision made on purpose:
 
 - **The queue is the durable to-do list** (`queue.js`, `mail-queue.jsonl`). It
   holds message **ids only** — no body or subject ever rests there, so the
@@ -225,6 +225,17 @@ Six properties, each a decision made on purpose:
   surfaces the rest as personal and posts a one-time notice. Bulk is *moved* (the
   BULK label + `removeLabels: ["INBOX"]` is the archive); personal is *pinged*
   with Haiku's one-sentence why (`notify.js`).
+- **Topic is a second, independent label axis** (`topics.js`). Attention decides
+  *ping + archive*; a topic says what the mail is *about* and co-applies to
+  either, so an `entropy.co` newsletter is `bulk + ENTROPY`. `entropy`/`banking`
+  are deterministic sender-domain rules (never the model's to assert, so injection
+  can't forge them); `taxes`/`jobs` come from the same Haiku verdict at no extra
+  cost, and a domain rule always wins over Haiku's guess. A one-time
+  `scripts/ronnie-backfill.mjs` relabels the existing inbox through these exact
+  primitives — dry-run report first, then `--apply` — Haiku-budgeted, resumable,
+  and never labelling withheld credential mail; it creates any missing topic
+  labels via `google/gmail-labels.js` (the one spot allowed to *create* labels —
+  the live broker can only apply ids that already exist).
 - **A second broker — the one deliberate exception to "one gateway."** Credentials
   below says one broker, never one per service; Ronnie is the exception, and it's
   per *principal*, not per service. Ronnie is a different actor than Alfred with a

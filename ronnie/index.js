@@ -35,6 +35,15 @@ import { mailEmbed, inviteEmbed, post } from "./notify.js";
 const LABELS = {
   bulk: process.env.RONNIE_LABEL_BULK || "",
   interesting: process.env.RONNIE_LABEL_INTERESTING || "",
+  // The topic axis — co-applied alongside bulk/interesting. Any unset id is
+  // simply skipped, so a topic whose label doesn't exist yet degrades to
+  // "attention only" rather than erroring.
+  topics: {
+    entropy: process.env.RONNIE_LABEL_ENTROPY || "",
+    banking: process.env.RONNIE_LABEL_BANKING || "",
+    taxes: process.env.RONNIE_LABEL_TAXES || "",
+    jobs: process.env.RONNIE_LABEL_JOBS || "",
+  },
 };
 
 // A short human string for the invite embed's time line.
@@ -98,25 +107,30 @@ export async function handleMessage(msg = {}, deps = {}) {
   }
 
   // ── 2. Triage path ────────────────────────────────────────────────────────
-  const { label, summary, reason, capped, usedHaiku } = await classify(msg, { log });
+  const { label, summary, reason, capped, usedHaiku, topic } = await classify(msg, { log });
   const labelId = label === "bulk" ? labels.bulk : labels.interesting;
-  if (labelId && msg.id) {
+  // The topic axis rides alongside attention: one topic id, co-applied to bulk
+  // or interesting alike (an entropy.co newsletter is bulk + ENTROPY).
+  const topicId = topic ? labels.topics?.[topic] || "" : "";
+  const addLabels = [labelId, topicId].filter(Boolean);
+  if (addLabels.length && msg.id) {
     // Filed mail is *moved* — the BULK label plus archiving it out of the inbox
     // (Gmail has no folders; a label + removing INBOX is the move). Interesting
-    // mail keeps its inbox spot and just gets the label + a ping.
-    const body = { id: msg.id, addLabels: [labelId] };
+    // mail keeps its inbox spot and just gets the label + a ping. The topic
+    // label is added on either path without affecting the archive decision.
+    const body = { id: msg.id, addLabels };
     if (label === "bulk") body.removeLabels = ["INBOX"];
     await broker("POST /mail/label", body);
   }
   // Tier 2: a personal message is worth a ping, carrying Haiku's one-liner; bulk
   // is filed in silence.
   if (label === "personal") {
-    await notify([mailEmbed({ ...msg, category: "personal", summary })]);
+    await notify([mailEmbed({ ...msg, category: "personal", summary, topic })]);
   }
-  log(`✉️  ${label} (${reason}) — ${msg.subject || "(no subject)"}`);
+  log(`✉️  ${label}${topic ? ` #${topic}` : ""} (${reason}) — ${msg.subject || "(no subject)"}`);
   // capped is surfaced so the runner can post a one-time "hit the cap" notice;
   // usedHaiku tells the consumer whether to credit the breaker with a success.
-  return { action: label === "bulk" ? "filed" : "pinged", category: label, reason, capped, usedHaiku };
+  return { action: label === "bulk" ? "filed" : "pinged", category: label, topic, reason, capped, usedHaiku };
 }
 
 /**
