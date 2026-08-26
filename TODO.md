@@ -76,262 +76,7 @@ risky jobs to small least-privilege agents instead of widening his reach.
       a NOPASSWD sudoers rule, `chmod 700` on the credentials dir, and group
       sharing so memories stay writable.
 
-- [ ] **Separate agents for the risky work — Ronnie is the first.** _🚧 In
-      progress on `feat/ronnie-triage`._ Ronnie is a *distinct* agent that triages
-      inbound mail with Haiku over the Pub/Sub subscription — its own narrow
-      broker (label + invite import/remove only), a DKIM-authenticated forward
-      gate, an `.ics` parser, and a cost meter, none of it sharing Alfred's
-      reach. The pattern is the point: when a job needs a model but not Alfred's
-      full toolset, it gets its own bounded agent instead of a new power on his.
-      This is the *separate-agents* half of the security direction; the
-      *separate-user* item above is the isolation half.
-
-### Workout database
-
-- [ ] **Garmin connection + a workout database.** _🚧 In progress — branch
-      `feat/intervals-icu` scaffolded. The route being tried is **intervals.icu**
-      rather than Garmin direct: it exposes an official API and already ingests
-      Garmin/Strava, which sidesteps the no-official-API problem below._ Pull activities (runs, lifts,
-      HR, sleep) from Garmin into a store under `agent/var/` that Alfred can
-      query — "how far did I run this week", "am I recovered enough to train".
-      Open first: **Garmin has no official consumer API** (the Health/Activity
-      APIs are a partner program), so the practical route is an unofficial client
-      against Garmin Connect, which breaks when they change the site. Then the
-      schema — what one workout row is — and nightly pull vs. on-demand. ("galin"
-      in the ask; read as Garmin — correct if wrong.)
-
-### Voice
-
-- [ ] **Voice messages → text.** Discord voice notes are Ogg/Opus attachments.
-      The download primitive now exists (#40), so this reuses it and adds only its
-      own trigger (the `IsVoiceMessage` flag) and transcription. Transcribe
-      locally: audio is a different privacy category than text.
-
-      **Model: NVIDIA Parakeet-TDT-0.6B, via ONNX rather than NeMo** (Kuba,
-      2026-08-04). NeMo's dependency tree is built for GPU training; the int8
-      ONNX export is ~1 GB on `onnxruntime`.
-
-      *Whisper considered and not taken.* It is genuinely smaller — `tiny.en`
-      39 M, `base.en` 74 M, `small.en` 244 M against Parakeet's 600 M — and
-      `pip install faster-whisper` is far less install friction than community
-      ONNX exports. Three things outweighed that: RAM and disk aren't scarce
-      here (62 GB / 415 GB free), so a 1 GB model costs nothing; Whisper pads
-      every clip to a **fixed 30 s window**, so a 4-second note costs the same
-      as a 30-second one and the size advantage largely evaporates on exactly
-      the clips we'd send; and its silence-hallucination is worst at `tiny`/
-      `base`, which is the wrong failure mode for a transcript that *takes
-      actions*. Revisit only if the ONNX route proves unworkable — the
-      transcriber sits behind a `path -> text` call, so swapping it is cheap.
-
-      **This box is CPU-only** — no GPU, i7-8700 (6c/12t, AVX2, no VNNI), so
-      int8 buys ~1.5–2× not 4×: quantize for footprint, not speed. Estimated
-      RTF ~0.1 — 10 s note ≈ 1–2 s, 30 s ≈ 3–5 s, plus 1–2 s model load once
-      the file is in page cache. Unmeasured, and estimates on 2017 silicon run
-      optimistic; time it before designing around it. Either way it's small
-      next to a 10–30 s `claude -p` turn, so don't build streaming up front.
-
-      Needs `ffmpeg` (not installed) to decode Opus → 16 kHz mono PCM.
-
-      The transcript becomes the user message; Alfred never learns it was
-      spoken. One guard: echo what was heard when the turn takes an action — a
-      misheard "cancel Thursday's meeting" otherwise acts on the mishearing.
-
 ## Next
-
-### Mail & calendar — the rest of the Pub/Sub arc
-
-- [ ] **Gmail → Alfred via Pub/Sub.** _Tier 1 is built (branch
-      `feat/gmail-pubsub`, PR pending) — see the Done entry for what shipped.
-      What's left in this item: the cloud go-live (topic + pull subscription +
-      service-account key), then tiers 2–3, then forwarded invites, which ride
-      the same path. The notes below stay the reference for all of that._
-      `users.watch()` publishes change
-      notifications to a Cloud Pub/Sub topic. Use a **pull** subscription: this
-      box is a laptop behind NAT, and pull needs no public endpoint or domain
-      verification. Auth is OAuth as the user (done, `google/auth.js`) — a
-      service account can't reach a personal mailbox without domain-wide
-      delegation, which is Workspace-only. The service account is for draining
-      the *subscription*, which is our own cloud resource.
-
-      **Delivery is tiered; everything starts at tier 1.** Alfred isn't running
-      between messages — `runClaude` spawns a fresh `claude -p` per turn — so
-      there is nothing to interrupt, and the question is only whether mail
-      creates a turn or waits for one.
-
-      1. *Buffer, silently.* Append a line to `var/pending-mail.jsonl`. No agent,
-         no Discord post. Prepended as a delimited digest to the next real turn
-         (before the `"User Message: "` trailer `loadContext` ends with), then
-         the buffer is cleared — it persists in the session transcript from then
-         on, so re-injecting would only duplicate.
-      2. *Ping without waking him.* bot.js posts to Discord itself. No LLM call.
-         Most of the value of push is knowing mail arrived, and that needs no
-         model.
-      3. *Spawn a turn.* Narrow rules only. Note this lands inside the resumed
-         session, so it pollutes the conversation unless given its own.
-
-      _Tiers 2–3 run inside **Ronnie** (the item below), which refines the naming
-      here: the ping is a write-only webhook post from Ronnie, not bot.js itself,
-      and the spawn is capability-scoped by trusted code. The tiers stay; the
-      runtime is Ronnie's box._
-
-      Promote via a **Gmail label** — labelling a thread from your phone retunes
-      what's urgent with no redeploy.
-
-      **Never buffer sensitive mail** (verification codes, OTPs, password
-      resets) — the same `classify()` chokepoint the read path uses, so sign-in
-      *alerts* buffer normally now while a code never does. Injecting one writes
-      it to
-      `~/.claude/projects/<cwd>/<session>.jsonl`, which is outside the repo and
-      therefore outside `agent/var/`, `.gitignore` and the memory funnel alike.
-      Match on subject/snippet and drop the content entirely — record only that
-      *something* was withheld. Alfred can fetch a live code on request instead,
-      which is better anyway since codes expire.
-
-      Fails silently if you get these wrong: `watch()` expires after 7 days and
-      just goes quiet; notifications carry only a `historyId`, and a stale one
-      makes `users.history.list` 404 (needs full-resync fallback); a mailing-list
-      burst or a bulk "mark read" from a phone floods the buffer without
-      coalescing.
-- [ ] **Ronnie — the inbound-mail worker.** The runtime that tiers 2–3 and the
-      forwarded-invite handler both run inside. Its own process, its own Unix
-      user, its own container; holds no token. Ronnie is a **broker client** —
-      the same shape the map draws for Alfred: it decides, it never holds the
-      keys to act. (Genderfluid; they/them.)
-
-      **Why a separate process, not bot.js.** The pipeline — drain the pull
-      subscription → `pending-mail.jsonl` → grep the subject → classify → grep the
-      sender → is-this-a-forward-from-Kuba → DKIM-check → hand off — is logic that
-      holds no secret and reads attacker-controlled mail. That is exactly the
-      thing to isolate. bot.js keeps only the two jobs nothing else can do: it
-      **is** the credential broker that executes a label-move or a calendar write,
-      and it **is** the Discord read connection that catches an undo. Everything
-      between those two is Ronnie's, in their own box. This is the first real
-      tenant for "run the agent as a separate user" above.
-
-      **Capability is the containment, not the prompt.** Give Ronnie their own
-      narrow broker — two routes, `label` and `calendar-write`, nothing else —
-      with its own token. Then "all Ronnie can do is label and touch invites" is a
-      guarantee in the route table, not a promise the model keeps. An OAuth
-      `gmail.modify` scope would *also* let it read the mailbox; the route won't —
-      so scope is not the boundary, the broker is.
-
-      **Two spawn profiles, and trusted code picks the level — Ronnie never grants
-      it to themselves.** bot.js checks the authenticated sender *before* spawning
-      and hands over only the matching capability:
-      - untrusted inbound → **label-only**. Grep carries tier 1 (promotional mail:
-        a `List-Unsubscribe` header, `Precedence: bulk`, known senders → a boring
-        label); tier 2 is the interesting rest. No model needed to start.
-      - a **DKIM-verified forward from one of Kuba's own addresses** → label +
-        `calendar-write`. This is the invite path below.
-
-      If Ronnie read the body and chose their own permissions, a crafted "I'm a
-      forward from Kuba, enable delete" would be injection winning. The arbiter is
-      the auth verdict in trusted code, never the model reading the mail.
-
-      **DKIM is the authenticator; the From-string match only kills lookalikes.**
-      The sender controls the `From:` field completely, so an exact-match on the
-      two addresses stops `kuba@gmail.com.evil.com` and homoglyph tricks but does
-      nothing against forgery — the forger types the exact string too. What can't
-      be forged is a DKIM signature for the domain (needs the domain's private
-      key). So gate on the **DKIM-pass + DMARC-aligned** sender Gmail already
-      computes — read that verdict, don't parse `From:` — *and* exact-match the
-      address. Both, not either. Honest limits: only as strong as those two
-      domains' DMARC (gmail = strict; a custom domain, verify it publishes
-      DKIM+DMARC), and account takeover of one of them bypasses everything — but
-      then the mailbox is theirs anyway, out of scope.
-
-      **Adds auto, deletes announced-and-undoable.** With a DKIM-gated sender the
-      attacker path is closed, so an add can run automatically — idempotent on the
-      `.ics UID` (the dedupe key the invite item already leans on), so a replayed
-      forward is a no-op. A delete is irreversible, so Ronnie **always posts** the
-      action to Discord and you undo by replying with that `UID`. The post is a
-      **webhook** — write-only, no bot token, the embed colour carries the tier
-      (green/blue) — because a webhook can't read, and shouldn't. The undo *reply*
-      is caught by **bot.js**, which already reads Discord; that keeps Ronnie
-      write-only. Posting and listening split cleanly: Ronnie writes, bot.js
-      listens. (Invite import mechanics — `events.import`, `METHOD`, the timezone
-      traps — live in the next item; Ronnie is the box they run in.)
-- [ ] **Forwarded calendar invites add themselves.** Kuba gets invites at other
-      addresses; he forwards one here and it lands on the calendar. Rides on the
-      Pub/Sub path above — same trigger, different handler.
-
-      **Why this doesn't already happen.** Gmail auto-adds an invite when you are
-      in the `.ics` `ATTENDEE` list. Forwarding doesn't rewrite that list, so the
-      forwarded copy names the original invitees and Gmail correctly ignores it.
-      The gap is real, not a setting someone forgot to tick.
-
-      **⚠️ Tested 2026-08-04, and it changes the design: an inline forward from
-      Outlook has no `.ics` at all.** Kuba forwarded a real one; the message came
-      through as plain `multipart/alternative` — `text/plain` + `text/html`,
-      nothing else. Five *natively received* invitations in the same mailbox all
-      carry `text/calendar; name=invite.ics`, so the part exists right up until
-      the forward drops it. Everything below about `events.import` is correct and
-      applies to nothing, unless one of these holds:
-
-      - **Forward as attachment** (Outlook: Forward as Attachment; Gmail: Forward
-        as attachment) wraps the original as `message/rfc822`, `.ics` intact.
-        Parser has to descend into the nested message. This is the good path and
-        it costs Kuba one different menu item — establish whether it survives
-        before building anything else.
-      - **Parse the human-readable body.** The forwarded text *did* carry
-        everything needed: `When: Occurs every Tuesday from 10:30 AM to 12:30 PM
-        effective 6/30/2026 until 11/24/2026. There are 16 more occurrences.
-        America/New_York`. That is a sentence, not a data format — regexes will
-        pass the demo and fail on the next locale, so this is the one branch
-        where a model belongs, and it must propose rather than write.
-
-      So the handler is two-path: `.ics` present → deterministic import; no
-      `.ics` → Alfred reads the text, proposes an event, Kuba confirms. Don't
-      auto-write from prose.
-
-      Also worth noting from the same test: the message forwarded was an
-      `Accepted:` reply (`METHOD:REPLY`), not an invitation (`METHOD:REQUEST`).
-      Check `METHOD` before importing, or an acceptance notice becomes an event.
-
-      **Use `events.import`, not `events.insert`.** It takes the `.ics` file's
-      own `iCalUID`, and re-importing the same UID updates the existing event
-      instead of making a second one. That is duplicate protection and reschedule
-      handling for free — forward the same invite twice, or forward the "updated
-      invitation" a week later, and the calendar stays right. Doing this with
-      `insert` means hand-rolling a UID→eventId map, which is the same job done
-      worse. Needs a new broker route; `POST /calendar/events` can't set a UID.
-
-      **Only act on mail Kuba forwarded himself.** Otherwise anyone who knows the
-      address can write to the calendar by emailing an attachment, and a
-      malicious `.ics` is a plausible thing to send. Gate on the sender being one
-      of his own addresses, or require a Gmail label he applies. This is the one
-      decision here with a security consequence.
-
-      Traps, most of which are the six-hours-off bug wearing a different hat:
-      - `DTSTART` comes in three shapes — UTC (`...Z`), a `TZID=` parameter, or
-        *floating* with no zone at all. Floating means wall-clock time and has to
-        be read as Eastern; treating it as UTC lands the event four hours out.
-      - `DTSTART;VALUE=DATE` is all-day and must not carry a `timeZone`.
-      - `RRULE` is on most real invites, since recurring meetings are the common
-        case. The recurrence builder that was a blocker here has shipped
-        (`toRecurrence`, `--days`/`--rrule`), so a weekly standup no longer
-        imports as a single event. **The one recurrence piece still missing is
-        `EXDATE`** — the skipped weeks a `.ics` carries for a holiday or a
-        cancelled session, which prose can't express. It's only reachable
-        through a forwarded invite, so it belongs to *this* feature, not a
-        standalone recurrence item.
-      - `METHOD:CANCEL` is a forwarded cancellation. With the UID in hand the
-        event is findable, and deleting it is allowed because an imported event
-        carries no attendees.
-      - Colour can't be inferred — nothing in an `.ics` maps to Kuba's six
-        categories. Open question: a dedicated "imported, not yet filed" colour
-        makes the backlog visible and reviewable, but it isn't one of the six.
-
-      Attendees need no special handling: the broker has no path to that field,
-      so the invitees land in `--description` as text, which is already the
-      convention. The guarantee holds without anyone remembering it.
-
-      **No model in the loop — on the `.ics` path.** Parsing an `.ics` is
-      deterministic, so that branch belongs in `bot.js` on the Pub/Sub path, not
-      in a turn, which also means it works while Kuba is asleep. The prose branch
-      is the opposite: it needs Alfred, and it proposes rather than writes. Post
-      what was added to Discord either way, so a bad parse is visible the same
-      day rather than at the meeting.
 
 ### Reliability — nightly jobs that fail at 3am
 
@@ -406,6 +151,74 @@ risky jobs to small least-privilege agents instead of widening his reach.
 
 ## Done
 
+- [x] ~~**Forwarded calendar invites add themselves — one model path, no `.ics`
+      parser.**~~ Built as the redesign above described, and it deleted more than
+      it added: the hand-rolled RFC-5545 parser (`ronnie/ics.js`) and the
+      `POST /calendar/import` route are gone. Past the unchanged DKIM + owner gate,
+      a Haiku pass (`ronnie/invite.js`) reads the forward — prose or `.ics` — and
+      returns add / delete / none; an add is deduped by *reading* the day and
+      letting the model judge a match (leaning toward adding when unsure), then
+      created with the same `POST /calendar/events` insert `bin/gcal.js` uses; a
+      delete finds and removes the matching event; none triages as ordinary mail.
+      Ronnie's broker traded import/remove for the gcal trio — a read-only
+      `GET /calendar/events` (dedupe only) plus `POST`/`DELETE` — so its reach is
+      list/add/delete, no edit. The undo handle is the created event id. Handles
+      the inline-Outlook-forward case that has no `.ics` at all, which is what
+      made a model the *only* sensible path. The surviving trap — a zoneless time
+      is Eastern wall-clock — lives in the prompt now, with the same-day channel
+      post as the safety net. Still worth a real end-to-end forward before it's
+      trusted in the wild.
+- [x] ~~**Ronnie — the inbound-mail worker, and the separate-agent security
+      half.**~~ The pub/sub arc's tier-2/3 runtime, split off from `bot.js` as its
+      own broker client: it drains the pull subscription, prefilters and
+      classifies with a **Haiku** circuit breaker, and acts through a *narrow*
+      broker (label + calendar import/remove only) that holds no general token —
+      capability is the containment, not the prompt. A DKIM + owner-address gate,
+      checked in trusted code, decides the spawn profile (untrusted → label-only;
+      verified forward-from-Kuba → +calendar-write), so Ronnie never grants
+      themselves permission. Adds run idempotently on the `.ics` UID; deletes are
+      posted to Discord over a write-only webhook and undone by reply
+      (`cal:<uid>`, caught by bot.js). Ships a queue + meter and a `/ronnie-metrics`
+      usage dashboard. This is the *separate-agents* half of the Security
+      direction, now real — only the *separate-user* item there remains. (PRs #47,
+      #49; extension `feat/ronnie-topic-labels` — per-topic Gmail labels — still
+      open.)
+- [x] ~~**Gmail → Alfred via Pub/Sub.**~~ `users.watch()` publishes change
+      notifications to a Cloud Pub/Sub topic, drained over a **pull** subscription
+      (no public endpoint, works behind NAT), OAuth as the user. Delivery is
+      tiered: buffer silently (tier 1 — appended to `pending-mail.jsonl`, drained
+      into the next real turn as a delimited digest, then cleared), ping without
+      waking him, or spawn a turn. Sensitive mail (codes/OTPs/resets) never
+      buffers — the same `classify()` chokepoint the read path uses. Tiers 2–3 run
+      inside Ronnie. (PRs #25, #37)
+- [x] ~~**Garmin data + a workout database.**~~ Reached via **Intervals.icu**
+      rather than an unofficial Garmin-Connect client (the item's feared route):
+      it has an official API and already ingests Garmin Connect, so the watch →
+      Connect → Intervals.icu → Alfred chain needs nothing brittle. An `intervals`
+      skill + `bin/intervals.js` read activities and wellness, **read-only by
+      construction** (`intervals/client.js` exposes GET only — no write route
+      exists). On top of it a `strength/` subsystem turns Garmin lifting into
+      rolling per-muscle load in a SQLite DB (`agent/var/strength.db`,
+      `node:sqlite`, no native dep) across raw/interpreted/view layers — a headless
+      **Haiku** pass names exercises while code keeps the numbers exact — exposed
+      as ACWR + trend with `digest`/`load`/`sets`/`plot` and a nightly pull. Off
+      unless `INTERVALS_API_KEY` is set. (PR #48 + strength load)
+- [x] ~~**Voice messages → text.**~~ A voice note (lone Opus attachment, the
+      `IsVoiceMessage` flag) is transcribed on-device and the transcript *becomes*
+      the user message, so everything downstream is blind to whether the turn was
+      typed or spoken. `voice/transcribe.js` → `voice/transcribe.py`: ffmpeg
+      decodes Opus → 16 kHz mono, then **Parakeet-TDT-0.6B int8** via onnx-asr on
+      onnxruntime, loaded from the HF cache with downloads off so a live turn
+      never touches the network. The predicted numbers were the risk the item
+      flagged ("time it before designing around it") — measured on this CPU-only
+      box they came in *better*: RTF ~0.06 (11 s note → 0.7 s) + ~2 s model load,
+      **630 MB** on disk after pruning the fp32 pair — under the ~1 GB estimate.
+      `ffmpeg` turned out to already be in the venv (a static build), so no sudo
+      after all. The bot echoes `🎙️ heard: …` before the turn — the action-echo
+      guard, done deterministically in `bot.js` rather than left to the model.
+      Whisper stays not-taken per the item's reasoning. `scripts/setup-voice.sh`
+      provisions deps + model; unset, a note draws a graceful reply and no turn.
+      Reuses the #40 download primitive. (PR pending)
 - [x] ~~**Read inbound attachments — and the day-folder + Eastern-date arc it
       pulled in.**~~ Alfred was send-only: a message with files but no caption hit
       `if (!userMessage) return` and was dropped, `msg.attachments` never read.

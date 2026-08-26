@@ -57,7 +57,9 @@ answers, it exits.
 ```mermaid
 flowchart TD
     U["Kuba · Discord"] -->|message| GATE{"authorized<br/>user?"}
-    GATE -->|yes| Q["enqueueTurn<br/>one turn at a time"]
+    GATE -->|"voice note"| TR["transcribe<br/>ffmpeg → Parakeet int8<br/>voice/transcribe.js"]
+    TR -->|"transcript = message"| Q
+    GATE -->|"text / files"| Q["enqueueTurn<br/>one turn at a time"]
     CTX["loadContext<br/>SOUL.md + USER.md + MEMORY.md + today's daily"] --> Q
     Q --> SPAWN["spawn: claude -p<br/>cwd = agent/"]
     SPAWN -.->|"skill matches"| SK["skills<br/>gmail · gcal · notion · intervals · strength"]
@@ -75,6 +77,16 @@ flowchart TD
     class BR gateway
     class SK,CLIS stack
 ```
+
+A **voice note** is the one message that isn't its own text: it arrives as a
+lone Opus attachment with the `IsVoiceMessage` flag. `voice/transcribe.js` runs
+it through ffmpeg (Opus → 16 kHz mono) and the on-device Parakeet-TDT int8 model
+(`voice/transcribe.py`, via onnx-asr) — audio is transcribed locally, never sent
+out — and the transcript *becomes* the user message, so everything downstream is
+blind to whether a turn was typed or spoken. The bot echoes `🎙️ heard: …` first,
+so a mishearing is visible before the turn acts on it. Provisioned once by
+`scripts/setup-voice.sh`; if it isn't set up, the note draws a graceful reply and
+no turn.
 
 The `bin/` CLIs are **never loaded into context** — the agent's tools are only
 `Bash,Read,Edit,Write`, and it *runs* the CLIs as subprocesses. `SOUL.md` (always
@@ -167,8 +179,8 @@ flowchart TD
     C -->|"enrich() by id"| SC{"screen()<br/>mail-filter.js"}
     SC -.->|"login code → marker"| BUF["pending-mail.jsonl<br/>digest: markers only"]
     SC -->|"safe"| H["handleMessage · index.js"]
-    H -->|".ics + DKIM · sender-auth.js · ics.js"| RBR
-    H -->|"else · classify.js → prefilter.js<br/>block/allow/category/list-header (mail-triage.js)<br/>+ topics.js: domain → entropy/banking"| PF{"decided?"}
+    H -->|"DKIM forward · sender-auth.js · invite.js (model)"| RBR
+    H -->|"else · classify.js → prefilter.js<br/>block/allow/category/list-header (mail-triage.js)<br/>+ topics.js: domain → entropy/banking/jobs"| PF{"decided?"}
     PF -->|"free"| ACT
     PF -->|"undecided"| BR{"breaker.js<br/>Haiku up?"}
     BR -->|"ready"| HK["Haiku · haiku.js<br/>claude -p · meter.js · capped<br/>label + taxes/jobs topic"]
@@ -178,7 +190,7 @@ flowchart TD
     ACT -->|"bulk → Bulk/topic − INBOX"| RBR
     ACT -->|"interesting → label, kept, silent"| RBR
     ACT -->|"priority → label + ping"| PING["ping · notify.js"]
-    RBR["Ronnie's broker · broker-routes.js<br/>3 routes · own token"] ==>|"label / import / remove"| GM["Gmail / Calendar"]
+    RBR["Ronnie's broker · broker-routes.js<br/>4 routes · own token"] ==>|"label / list / add / delete"| GM["Gmail / Calendar"]
     PING --> DIS["Discord webhook · write-only"]
 
     classDef external fill:#d6e2f2,stroke:#1f5fb8,color:#123f7d
@@ -212,11 +224,16 @@ Seven properties, each a decision made on purpose:
   (`HaikuDownError`) does this — a junk verdict fails that one message open, and a
   poison message that keeps throwing is surfaced as priority (a ping) after 3
   tries and dropped, so one bad message can't wedge everything behind it.
-- **Two paths, invite first.** An `.ics` from one of Kuba's own addresses that
+- **Two paths, invite first.** A forward from one of Kuba's own addresses that
   passes DKIM/DMARC (`sender-auth.js`) is the *only* thing that reaches the
-  calendar routes (`ics.js` turns it into an import or a remove). Anything that
-  fails the gate — a forgery, a stranger's attachment, a bare REPLY — falls
-  through and is triaged as ordinary mail. The auth check *is* the licence.
+  calendar routes. Past that gate a Haiku pass (`invite.js`) reads the forward —
+  prose body or `.ics`, it doesn't care — and returns add / delete / none; an add
+  is deduped by *reading* the day and letting the model judge a match, then
+  created with the same gcal insert `bin/gcal.js` uses; a delete finds and removes
+  the matching event; none (a bare REPLY, ordinary mail) falls through to triage.
+  Anything that fails the gate — a forgery, a stranger's attachment — falls
+  through too. The auth check *is* the licence; a prompt-injected invite can at
+  worst create a junk event, announced and undoable.
 - **The paid step runs last and rarely.** `prefilter.js` decides for free in
   order — blocklist, allowlist, Gmail's own category (Promotions/Social → filed;
   Updates/Primary go on), then a list-header (`mail-triage.js`). Only what's left
@@ -251,15 +268,15 @@ Seven properties, each a decision made on purpose:
   below says one broker, never one per service; Ronnie is the exception, and it's
   per *principal*, not per service. Ronnie is a different actor than Alfred with a
   strictly smaller reach — the same `broker.js` server started with `baseRoutes:
-  {}` and only `RONNIE_ROUTES` (`broker-routes.js`, 3 routes: label a message,
-  add an invite, remove an invite), on its own port with its own token. It
-  **cannot** read mail, send, or touch Alfred's 18 routes — the trust boundary is
-  the route table, made physical.
+  {}` and only `RONNIE_ROUTES` (`broker-routes.js`, 4 routes: label a message,
+  and list / add / delete calendar events — the same three the gcal CLI uses, no
+  edit), on its own port with its own token. It **cannot** read mail, send, or
+  touch Alfred's 18 routes — the trust boundary is the route table, made physical.
 
 **Two Discord-side controls**, both caught in `bot.js`'s reader and run *without*
-a turn (no `claude -p`): an `undo cal:<uid>` / `undo mail:<id>` reply — the only
-Discord→Ronnie action path — calls Ronnie's broker to remove an imported event or
-re-file a mistaken ping as bulk; and `/ronnie-metrics` runs `scripts/ronnie-dashboard.mjs`
+a turn (no `claude -p`): an `undo cal:<eventId>` / `undo mail:<id>` reply — the only
+Discord→Ronnie action path — calls Ronnie's broker to delete the event Ronnie added
+or re-file a mistaken ping as bulk; and `/ronnie-metrics` runs `scripts/ronnie-dashboard.mjs`
 over `ronnie-usage.jsonl`, posts a self-contained HTML cost dashboard, and drops it in
 today's daily folder for Alfred to surface. Both are gated on Ronnie being configured.
 

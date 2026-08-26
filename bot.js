@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { Client, GatewayIntentBits, Partials, AttachmentBuilder } from "discord.js";
+import { Client, GatewayIntentBits, Partials, AttachmentBuilder, MessageFlags } from "discord.js";
 import { spawn } from "child_process";
 import { readFile, writeFile, mkdir, appendFile } from "fs/promises";
 import { existsSync, openSync, statSync } from "fs";
@@ -18,6 +18,7 @@ import { resolveRonnieLabels } from "./ronnie/labels.js";
 import { ensureLabels } from "./google/gmail-labels.js";
 import { easternDate, dailyDir, dailyNotePath, attachmentName, buildAttachmentBlock } from "./dailies.js";
 import { parseClearCommand } from "./commands.js";
+import { transcribe, transcriptionAvailable } from "./voice/transcribe.js";
 
 // ── Config ──────────────────────────────────────────────────────────────────
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
@@ -25,6 +26,14 @@ const ALLOWED_USER_IDS = (process.env.ALLOWED_USER_IDS || "").split(",").filter(
 const TIMEOUT_MS = parseInt(process.env.CLAUDE_TIMEOUT_MS || "120000"); // 2 min default
 // A Discord channel whose messages are workout notes, not turns. Off unless set.
 const STRENGTH_LOG_CHANNEL = process.env.STRENGTH_LOG_CHANNEL || "";
+
+// Deferred strength pull. Interpreting a just-finished workout is a ~2-min model
+// job — too slow to block a turn on. Alfred ends a reply with this sentinel to
+// send an immediate ack; bot.js then runs the digest out-of-band (it holds the
+// broker, so the detached-process credential loss doesn't apply) and, when the
+// data lands, enqueues a follow-up turn so Alfred reports back on his own.
+const BG_STRENGTH_RE = /\{bg:strength\}/i;
+const BG_DIGEST_TIMEOUT_MS = parseInt(process.env.BG_DIGEST_TIMEOUT_MS || "600000"); // 10 min
 
 // ── Layout ──────────────────────────────────────────────────────────────────
 // Three kinds of files live here and they don't mix:
@@ -315,8 +324,24 @@ function runClaude(message, sessionId) {
         ALFRED_BROKER: broker.url,
         ALFRED_BROKER_TOKEN: broker.token,
       },
-      timeout: TIMEOUT_MS,
+      // The prompt rides in on `-p`, so the child never reads stdin. Leaving it
+      // an open, unwritten pipe makes the CLI wait 3s for piped input and then
+      // reply with "no stdin data received in 3s" — which surfaces as Alfred's
+      // answer. Point stdin at /dev/null (instant EOF) so it proceeds at once.
+      stdio: ["ignore", "pipe", "pipe"],
     });
+
+    // We time out the child ourselves rather than via spawn's `timeout` option.
+    // When that option fires, `claude` catches the SIGTERM and exits 143 with a
+    // NULL signal — so a `signal`-based check below never recognised the timeout
+    // and the user got a bare "(no response)". An explicit flag is unambiguous.
+    let timedOut = false;
+    const killer = setTimeout(() => {
+      timedOut = true;
+      proc.kill("SIGTERM");
+      // Backstop: if it ignores SIGTERM, take it out hard a moment later.
+      setTimeout(() => proc.kill("SIGKILL"), 2000).unref();
+    }, TIMEOUT_MS);
 
     let stdout = "";
     let stderr = "";
@@ -325,13 +350,14 @@ function runClaude(message, sessionId) {
     proc.stderr.on("data", (d) => (stderr += d.toString()));
 
     proc.on("close", (code, signal) => {
+      clearTimeout(killer);
       if (code !== 0) {
-        console.error(`⚠️  Claude exited ${code}${signal ? ` (${signal})` : ""}: ${stderr}`);
+        console.error(`⚠️  Claude exited ${code}${signal ? ` (${signal})` : ""}${timedOut ? " [timed out]" : ""}: ${stderr}`);
       }
 
-      // spawn's `timeout` kills the child rather than returning an error, so a
-      // timeout otherwise arrived as an empty/garbled reply. Report it plainly.
-      if (signal && !stdout.trim()) {
+      // A timeout kill leaves partial or no stdout; report it plainly instead of
+      // letting the empty result fall through to "(no response)".
+      if (timedOut) {
         const secs = Math.round(TIMEOUT_MS / 1000);
         resolve({
           result: `⏱️ That took longer than ${secs}s, so I stopped it. Ask again, or break it into smaller steps — raise \`CLAUDE_TIMEOUT_MS\` if it genuinely needs longer.`,
@@ -412,6 +438,14 @@ client.once("ready", () => {
   } else {
     console.log(`⚠️  No ALLOWED_USER_IDS set — responding to ALL users. Set this for safety!`);
   }
+  // One-time probe so the operator knows voice notes will work before the first
+  // one arrives. It's advisory only — the message handler still catches a failed
+  // transcribe — so a false negative here never blocks a turn.
+  console.log(
+    transcriptionAvailable()
+      ? "🎙️  Voice transcription ready (Parakeet int8 via onnx-asr)."
+      : "🎙️  Voice transcription unavailable — run scripts/setup-voice.sh to enable it."
+  );
 });
 
 // ── Connection watchdog ──────────────────────────────────────────────────────
@@ -517,6 +551,13 @@ function recordWorkoutNote(text) {
   }
 }
 
+// A Discord voice message carries the IsVoiceMessage flag; its lone attachment
+// is the Opus audio. The flag is how we tell a voice note from any other audio
+// file the user might drop in — only the former should be transcribed-as-speech.
+function isVoiceMessage(msg) {
+  return Boolean(msg.flags?.has?.(MessageFlags.IsVoiceMessage));
+}
+
 client.on("messageCreate", async (msg) => {
   // Ignore own messages and other bots
   if (msg.author.bot) return;
@@ -550,11 +591,39 @@ client.on("messageCreate", async (msg) => {
   }
 
   // Strip mention and trim whitespace from the message
-  const userMessage = msg.content.replace(/<@!?\d+>/g, "").trim();
+  let userMessage = msg.content.replace(/<@!?\d+>/g, "").trim();
 
   // Download any files first — a file sent with no caption arrives with empty
   // content and would otherwise be dropped by the guard below before it's seen.
-  const attachments = await saveInboundAttachments(msg);
+  let attachments = await saveInboundAttachments(msg);
+
+  // Voice notes: a Discord voice message is a single Opus attachment and no
+  // text. Transcribe it locally (voice/transcribe.js) and let the transcript BE
+  // the user message, so Alfred answers the words and never learns they were
+  // spoken — the same downstream path as typed text. The audio is not handed on
+  // as an attachment: Alfred can't read Opus, and the point is the text. Echo
+  // what was heard first, so a mishear ("cancel Thursday's meeting") is visible
+  // before the turn acts on it.
+  if (isVoiceMessage(msg) && attachments.length) {
+    const audioPath = attachments[0]; // a voice message carries exactly one file
+    await msg.channel.sendTyping().catch(() => {});
+    let transcript;
+    try {
+      transcript = await transcribe(audioPath);
+    } catch (err) {
+      console.error(`🎙️  Transcription failed: ${err.message}`);
+      await msg.reply("🎙️ Sorry — I couldn't transcribe that voice note.").catch(() => {});
+      return;
+    }
+    if (!transcript) {
+      await msg.reply("🎙️ I didn't catch any speech in that voice note.").catch(() => {});
+      return;
+    }
+    console.log(`🎙️  Voice note → "${transcript.slice(0, 100)}"`);
+    await msg.reply(`🎙️ heard: "${transcript}"`).catch(() => {});
+    userMessage = transcript;
+    attachments = []; // the transcript replaces the audio; don't inject the ogg
+  }
 
   if (!userMessage && attachments.length === 0) return;
 
@@ -770,14 +839,23 @@ async function handleTurn(msg, userMessage, attachments = []) {
       return;
     }
 
+    // Deferred strength pull: Alfred ended the reply with {bg:strength} to ack
+    // now and let the slow digest run out-of-band. Strip the sentinel, send the
+    // ack (a default if he wrote only the token), then kick the job off.
+    const deferStrength = BG_STRENGTH_RE.test(replyText);
+    const visibleText = deferStrength ? replyText.replace(BG_STRENGTH_RE, "").trim() : replyText;
+
     // Pull out any {img:}/{pdf:}/{file:} attachments, then send (Discord has a
     // 2000-char limit per message; files batch to 10 per message).
-    const { text: cleaned, files } = extractAttachments(replyText);
-    const reply = cleaned.trim() || (files.length ? "" : "(empty response)");
+    const { text: cleaned, files } = extractAttachments(visibleText);
+    const reply = cleaned.trim() ||
+      (files.length ? "" : deferStrength ? "On it — pulling your workout, back in ~2 min ⏳" : "(empty response)");
     await sendReply(msg, reply, files);
 
-    console.log(`✅ Replied (${reply.length} chars${files.length ? `, ${files.length} file(s)` : ""})`);
+    console.log(`✅ Replied (${reply.length} chars${files.length ? `, ${files.length} file(s)` : ""}${deferStrength ? ", deferred digest" : ""})`);
     await logTurn({ dir: "out", kind: "reply", text: reply, files: files.length, sessionId: response.session_id || null });
+
+    if (deferStrength) startStrengthDigestFollowup(msg);
   } catch (err) {
     console.error("❌ Error:", err);
     const errReply = `Something went wrong:\n\`\`\`\n${err.message}\n\`\`\``;
@@ -785,6 +863,80 @@ async function handleTurn(msg, userMessage, attachments = []) {
     await logTurn({ dir: "out", kind: "error", text: errReply, error: err.message });
   } finally {
     clearInterval(typingInterval);
+  }
+}
+
+// Run the strength digest out-of-band after Alfred deferred it with
+// {bg:strength}. bot.js holds the broker, so — unlike a claude-spawned detached
+// run — the activity pull works here. When it lands, enqueue a follow-up turn so
+// Alfred answers the original question with the freshly interpreted data. The
+// digest is idempotent, so a redundant run (e.g. nothing new) is harmless.
+function startStrengthDigestFollowup(msg) {
+  console.log("🏋️  Deferred strength digest started (background)");
+  const proc = spawn("node", ["../bin/strength.js", "digest"], {
+    cwd: AGENT_DIR,
+    env: { ...process.env, ALFRED_BROKER: broker.url, ALFRED_BROKER_TOKEN: broker.token },
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: BG_DIGEST_TIMEOUT_MS,
+  });
+  let out = "", err = "";
+  proc.stdout.on("data", (d) => (out += d.toString()));
+  proc.stderr.on("data", (d) => (err += d.toString()));
+  proc.on("close", (code) => {
+    console.log(`🏋️  Deferred digest ${code === 0 ? "done" : `failed (exit ${code})`}`);
+    enqueueTurn(() => strengthFollowupTurn(msg, { ok: code === 0, out, err }));
+  });
+  proc.on("error", (e) => {
+    console.error(`🏋️  Deferred digest spawn error: ${e.message}`);
+    enqueueTurn(() => strengthFollowupTurn(msg, { ok: false, out: "", err: e.message }));
+  });
+}
+
+// The follow-up itself: resume the current session (read at run time, so a
+// message that arrived meanwhile is respected) and let Alfred report the result
+// in his own voice. Runs through the turn queue, so it never races a live turn.
+// A concrete fallback covers the cases where there's no session or Alfred stays
+// silent, so a deferred pull never ends in silence.
+async function strengthFollowupTurn(msg, { ok, out, err }) {
+  const fallback = ok
+    ? "✅ Pulled your workout — ask me how it looks for the breakdown."
+    : "⚠️ I couldn't pull your workout just now — try again in a bit.";
+  try {
+    const state = await readState();
+    const sessionId = state.last_session_id;
+    if (!sessionId) { await sendReply(msg, fallback, []); return; }
+
+    const summary = ok
+      ? `Digest output:\n${(out || "").trim().slice(0, 1000)}`
+      : `It FAILED (${(err || "").trim().slice(0, 300) || "unknown error"}).`;
+    const nudge =
+      `[SYSTEM — not a user message: the background strength digest you started has finished. ${summary}\n\n` +
+      `Answer the user's earlier request now with the freshly interpreted data (read it via the strength skill — ` +
+      `load/sets are instant). Reply naturally as a follow-up; do NOT run the digest again. If it failed, say so briefly.]`;
+
+    await msg.channel.sendTyping().catch(() => {});
+    const response = await runClaude(nudge, sessionId);
+    if (!response.is_auth_error && !response.is_timeout) {
+      await writeState({
+        last_session_id: response.session_id || sessionId,
+        status: "open",
+        topic: "strength digest follow-up",
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    const replyText = (response.result || "").trim();
+    const canon = (s) => s.toLowerCase().replace(/[^a-z_]/g, "");
+    if (!replyText || canon(replyText) === canon(NO_REPLY)) { await sendReply(msg, fallback, []); return; }
+
+    const { text: cleaned, files } = extractAttachments(replyText);
+    const reply = cleaned.trim() || (files.length ? "" : fallback);
+    await sendReply(msg, reply, files);
+    console.log(`✅ Strength follow-up replied (${reply.length} chars${files.length ? `, ${files.length} file(s)` : ""})`);
+    await logTurn({ dir: "out", kind: "reply", text: reply, files: files.length, sessionId: response.session_id || null });
+  } catch (e) {
+    console.error(`❌ Strength follow-up error: ${e.message}`);
+    await sendReply(msg, fallback, []).catch(() => {});
   }
 }
 

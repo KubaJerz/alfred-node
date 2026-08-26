@@ -18,6 +18,7 @@
 import { handleMessage, makeBrokerClient } from "./index.js";
 import { post, capEmbed, mailEmbed } from "./notify.js";
 import { makeClassifier } from "./classify.js";
+import { extractInvite as runExtractInvite, matchEvent as runMatchEvent } from "./invite.js";
 import { makeMeter } from "./meter.js";
 import { makeQueue } from "./queue.js";
 import { makeBreaker } from "./breaker.js";
@@ -55,10 +56,20 @@ export function makeRonnie({
   // open; only the service being down backs the whole queue off.
   const classify = makeClassifier({ meter, capCalls, strict: true, log });
 
+  // The invite reader + dedupe, bound to the same meter so their Haiku calls are
+  // counted too. Both are gated by the DKIM + owner check inside handleMessage,
+  // so they only ever run on Kuba's own authenticated forwards — a surface too
+  // narrow to spam, which is why they're not under the daily cap the triage
+  // classifier is.
+  const extractInvite = (m) => runExtractInvite(m, { meter });
+  const matchEvent = (candidate, existing) => runMatchEvent(candidate, existing, { meter });
+
   // One-per-day "hit the daily cap" Discord notice, folded into the handle step.
   let capNotifiedOn = null;
   const handle = async (msg) => {
-    const verdict = await handleMessage(msg, { broker, notify, labels, owners, classify, log });
+    const verdict = await handleMessage(msg, {
+      broker, notify, labels, owners, classify, extractInvite, matchEvent, log,
+    });
     if (verdict.capped) {
       const today = new Date().toISOString().slice(0, 10);
       if (capNotifiedOn !== today) {
@@ -80,9 +91,9 @@ export function makeRonnie({
 
   // Reverse an action from a Discord "undo <token>" reply. Two forms, keyed by a
   // prefix so bot.js needn't know which is which:
-  //   cal:<uid>  — remove the calendar event Ronnie imported from an invite.
-  //   mail:<id>  — re-file a message Ronnie pinged as bulk (archive it), for
-  //                when Ronnie called a message priority and it wasn't.
+  //   cal:<eventId>  — delete the calendar event Ronnie added from an invite.
+  //   mail:<id>      — re-file a message Ronnie pinged as bulk (archive it), for
+  //                    when Ronnie called a message priority and it wasn't.
   const undo = async (token) => {
     const i = String(token).indexOf(":");
     const kind = i === -1 ? "cal" : token.slice(0, i);
@@ -97,9 +108,10 @@ export function makeRonnie({
       });
       return { kind: "mail", id: arg };
     }
-    // "cal" (and any bare/legacy token): reverse a calendar import by iCalUID.
-    await broker("POST /calendar/remove", { iCalUID: arg });
-    return { kind: "calendar", uid: arg };
+    // "cal" (and any bare/legacy token): delete the event Ronnie added, by the
+    // event id it announced. Recoverable from Google's Trash for 30 days.
+    await broker("DELETE /calendar/events", { id: arg });
+    return { kind: "calendar", id: arg };
   };
 
   return {

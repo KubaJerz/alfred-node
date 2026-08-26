@@ -10,17 +10,28 @@ const stubClassify = async (m) => {
   return { label: bulk ? "bulk" : "priority", summary: bulk ? "" : "why" };
 };
 
-// A fake broker + notify that record what Ronnie tried to do.
-function harness() {
+// A fake broker + notify that record what Ronnie tried to do. The broker is
+// route-aware: GET /calendar/events returns whatever `state.existing` holds (so
+// a test can seed the calendar for dedupe), POST returns a fresh event id, the
+// rest echo. `state.invite` / `state.match` seed the model stubs — extractInvite
+// and matchEvent are injected so no test ever spawns `claude -p`.
+function harness(state = {}) {
   const calls = [];
   const posts = [];
+  state.existing = state.existing || [];
+  state.invite = state.invite || { action: "none" };
+  state.match = state.match || { matchId: null };
   return {
     calls,
     posts,
+    state,
     deps: {
-      broker: async (routeKey, body) => {
-        calls.push({ routeKey, body });
-        return { id: "evt-x", ...body };
+      broker: async (routeKey, payload) => {
+        calls.push({ routeKey, body: payload });
+        if (routeKey === "GET /calendar/events") return { events: state.existing };
+        if (routeKey === "POST /calendar/events") return { id: "evt-new" };
+        if (routeKey === "DELETE /calendar/events") return { id: payload.id };
+        return { id: "evt-x", ...payload };
       },
       notify: async (embeds) => {
         posts.push(embeds);
@@ -38,28 +49,24 @@ function harness() {
       },
       owners: ["kuba@gmail.com"],
       classify: stubClassify,
+      extractInvite: async () => state.invite,
+      matchEvent: async () => state.match,
     },
   };
 }
 
 const google = (v) => `mx.google.com; ${v}`;
-const authedInvite = (icsBody) => ({
+// An authenticated owner forward. The .ics/body content is irrelevant now that
+// extraction is a stubbed model call — only the DKIM + owner gate reads the
+// envelope — so the helper just carries a valid From + Authentication-Results.
+const authedForward = (over = {}) => ({
   id: "m1",
   from: "Kuba <kuba@gmail.com>",
+  subject: "Fwd: invite",
   authResults: [google("dkim=pass; dmarc=pass header.from=gmail.com")],
-  ics: icsBody,
+  ...over,
 });
-const REQUEST = [
-  "BEGIN:VCALENDAR",
-  "METHOD:REQUEST",
-  "BEGIN:VEVENT",
-  "UID:inv-1",
-  "SUMMARY:Kickoff",
-  "DTSTART;TZID=America/New_York:20260701T090000",
-  "DTEND;TZID=America/New_York:20260701T100000",
-  "END:VEVENT",
-  "END:VCALENDAR",
-].join("\r\n");
+const EVENT = { summary: "Kickoff", start: "2026-07-01T09:00:00", end: "2026-07-01T10:00:00" };
 
 test("a priority message is labelled Priority, kept in inbox, and pinged", async () => {
   const h = harness();
@@ -128,42 +135,80 @@ test("a priority message keeps its inbox spot (not archived)", async () => {
   assert.equal(h.calls[0].body.removeLabels, undefined); // stays in the inbox
 });
 
-test("an authenticated invite REQUEST is imported and announced", async () => {
-  const h = harness();
-  const r = await handleMessage(authedInvite(REQUEST), h.deps);
+test("an authenticated invite the model reads as 'add' is created and announced", async () => {
+  const h = harness({ invite: { action: "add", event: EVENT } }); // calendar empty → no dup
+  const r = await handleMessage(authedForward(), h.deps);
   assert.equal(r.action, "invite-added");
-  assert.equal(h.calls[0].routeKey, "POST /calendar/import");
-  assert.equal(h.calls[0].body.resource.iCalUID, "inv-1");
-  assert.match(h.posts[0][0].footer.text, /undo cal:inv-1/);
+  // It dedupes by reading the day first, then adds via the same gcal insert.
+  assert.equal(h.calls[0].routeKey, "GET /calendar/events");
+  assert.deepEqual(h.calls[0].body, { from: "2026-07-01", to: "2026-07-02", limit: 50 });
+  const add = h.calls.find((c) => c.routeKey === "POST /calendar/events");
+  assert.equal(add.body.summary, "Kickoff");
+  assert.equal(add.body.start, "2026-07-01T09:00:00");
+  // The undo handle in the embed is the created event id, not an iCalUID.
+  assert.match(h.posts[0][0].footer.text, /undo cal:evt-new/);
 });
 
-test("an authenticated CANCEL removes the event", async () => {
-  const h = harness();
-  const r = await handleMessage(authedInvite(REQUEST.replace("METHOD:REQUEST", "METHOD:CANCEL")), h.deps);
+test("a duplicate invite is skipped — no add, leans on the model's match", async () => {
+  const h = harness({
+    invite: { action: "add", event: EVENT },
+    existing: [{ id: "evt-old", summary: "Kickoff", start: "2026-07-01T09:00:00" }],
+    match: { matchId: "evt-old" },
+  });
+  const r = await handleMessage(authedForward(), h.deps);
+  assert.equal(r.action, "invite-duplicate");
+  assert.ok(!h.calls.some((c) => c.routeKey === "POST /calendar/events")); // nothing added
+  assert.equal(h.posts.length, 0); // nothing announced
+});
+
+test("a cancellation deletes the matching event and announces it", async () => {
+  const h = harness({
+    invite: { action: "delete", event: EVENT },
+    existing: [{ id: "evt-old", summary: "Kickoff", start: "2026-07-01T09:00:00" }],
+    match: { matchId: "evt-old" },
+  });
+  const r = await handleMessage(authedForward(), h.deps);
   assert.equal(r.action, "invite-removed");
-  assert.deepEqual(h.calls[0], { routeKey: "POST /calendar/remove", body: { iCalUID: "inv-1" } });
+  const del = h.calls.find((c) => c.routeKey === "DELETE /calendar/events");
+  assert.deepEqual(del.body, { id: "evt-old" });
+  assert.match(h.posts[0][0].title, /removed/);
+});
+
+test("a bad recurrence falls back to a single event rather than failing", async () => {
+  const h = harness({ invite: { action: "add", event: { ...EVENT, rrule: "GARBAGE" } } });
+  // The first POST (with the rrule) rejects; the retry without it succeeds.
+  let posts = 0;
+  h.deps.broker = async (routeKey, payload) => {
+    h.calls.push({ routeKey, body: payload });
+    if (routeKey === "GET /calendar/events") return { events: [] };
+    if (routeKey === "POST /calendar/events") {
+      posts++;
+      if (payload.rrule) throw new Error("--rrule must start with FREQ=");
+      return { id: "evt-new" };
+    }
+    return { id: "evt-x" };
+  };
+  const r = await handleMessage(authedForward(), h.deps);
+  assert.equal(r.action, "invite-added");
+  assert.equal(posts, 2); // tried with rrule, then without
 });
 
 test("an invite that FAILS the DKIM gate never touches the calendar", async () => {
-  const h = harness();
-  // Same .ics, but a forged non-Google Authentication-Results.
-  const forged = {
-    id: "m9",
-    from: "kuba@gmail.com",
-    subject: "Fwd: invite",
-    authResults: ["evil.com; dmarc=pass header.from=gmail.com"],
-    ics: REQUEST,
-  };
+  // The model would say 'add', but the forged (non-Google) Authentication-Results
+  // fails the gate, so extraction never runs and the calendar is never reached.
+  const h = harness({ invite: { action: "add", event: EVENT } });
+  const forged = authedForward({ from: "kuba@gmail.com", authResults: ["evil.com; dmarc=pass header.from=gmail.com"] });
   const r = await handleMessage(forged, h.deps);
-  // Falls through to ordinary triage — no calendar call at all.
-  assert.ok(!h.calls.some((c) => c.routeKey.startsWith("POST /calendar")));
+  assert.ok(!h.calls.some((c) => c.routeKey.includes("/calendar/")));
   assert.equal(r.action, "pinged"); // treated as normal mail
 });
 
-test("an authenticated REPLY is not imported — it falls through to triage", async () => {
-  const h = harness();
-  const r = await handleMessage(authedInvite(REQUEST.replace("METHOD:REQUEST", "METHOD:REPLY")), h.deps);
-  assert.ok(!h.calls.some((c) => c.routeKey.startsWith("POST /calendar")));
+test("an authenticated non-invite (model says 'none') falls through to triage", async () => {
+  // Passes the gate (a genuine owner forward), but the model reads it as no
+  // event — so it drops to ordinary triage and is pinged, no calendar call.
+  const h = harness({ invite: { action: "none" } });
+  const r = await handleMessage(authedForward(), h.deps);
+  assert.ok(!h.calls.some((c) => c.routeKey.includes("/calendar/")));
   assert.equal(r.action, "pinged");
 });
 

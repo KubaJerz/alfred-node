@@ -30,6 +30,40 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
   (and a one-pass sweep of a former employer's mail into `Bulk/UT`);
   Haiku-budgeted, checkpointed/resumable, and it never labels withheld credential
   mail.
+- **Forwarded calendar invites add themselves — one model path, no `.ics`
+  parser.** A calendar invitation (or cancellation) that Kuba forwards to himself
+  now lands on the calendar. The DKIM + owner-address gate (`sender-auth.js`) is
+  unchanged and still the licence to touch the calendar at all; past it, a Haiku
+  pass (`ronnie/invite.js`) reads the forward — prose body *or* `.ics`, it doesn't
+  care — and returns add / delete / none. An add is deduped by *reading* the day
+  and letting the model judge whether the event is already there (leaning toward
+  adding when unsure — a stray duplicate is a two-second delete, a missed meeting
+  isn't), then created; a delete finds the matching event and removes it; none
+  falls through to ordinary triage. Every write is the same `POST`/`DELETE
+  /calendar/events` operation `bin/gcal.js` uses — Ronnie's broker gained a
+  read-only `GET /calendar/events` (for dedupe) in place of the old bespoke
+  import/remove pair, so its calendar reach is now list/add/delete and nothing
+  more (still no edit). The undo handle in the Discord embed is the created event
+  id. This handles the inline-Outlook-forward case the old design couldn't: those
+  carry no `.ics` at all, so a model was always going to be needed — now it's the
+  only path. **Removed** the hand-rolled RFC-5545 parser (`ronnie/ics.js`) and its
+  `POST /calendar/import` route. The one trap that outlived the parser is the
+  timezone (a zoneless time is Eastern wall-clock); the prompt carries that rule
+  and the same-day channel post is the safety net.
+- **Voice messages → text, transcribed on-device.** A Discord voice note (a lone
+  Opus attachment with the `IsVoiceMessage` flag) is now transcribed locally and
+  its transcript *becomes* the user message — everything downstream is blind to
+  whether the turn was typed or spoken. `voice/transcribe.js` bridges to
+  `voice/transcribe.py`, which decodes Opus → 16 kHz mono with ffmpeg and runs
+  **NVIDIA Parakeet-TDT-0.6B int8** via onnx-asr on onnxruntime; the model loads
+  from the local Hugging Face cache with downloads disabled, so a live turn never
+  blocks on the network. Audio is transcribed on-device — a different privacy
+  category than text — and never leaves the box. The bot echoes `🎙️ heard: …`
+  before the turn runs, so a mishearing ("cancel Thursday's meeting") is visible
+  before Alfred acts on it. Measured on this CPU-only host: ~0.7s inference +
+  ~2s model load per short note (RTF ~0.06), ~630 MB on disk. Provisioned once by
+  `scripts/setup-voice.sh`; if it isn't set up, a voice note draws a graceful
+  reply and no turn. Reuses the inbound-attachment download primitive (#40).
 - **Strength load tracking — Garmin lifting → rolling per-muscle load.** A new
   `strength/` subsystem and `strength` skill turn Garmin strength workouts into
   progressive-overload signal. Reps and weight aren't in Intervals.icu's JSON

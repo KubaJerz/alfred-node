@@ -1,25 +1,29 @@
 # Contributing to Alfred Node
 
-Guidance for Claude Code (and humans) working **on** this repository. The bot's
-own runtime instructions live in `agent/SOUL.md`; this file is the dev workflow.
+Rules for Claude Code (and humans) working **on** this repo. The bot's own
+runtime instructions live in `agent/SOUL.md`. This file is the dev workflow.
+
+Write everything here — code comments, commit messages, PR text, and chat with
+the user about this project — in Simplified Technical English. See the last
+section.
 
 ## What this is
 
-**Alfred Node** is a personal AI assistant that bridges Discord and a headless
-Claude Code instance. `bot.js` is the whole app: it listens for Discord
-messages from authorized users, injects context (`agent/SOUL.md`,
-`agent/var/USER.md`, and the memory files), runs `claude -p ...` as a
-subprocess, and replies with the result. A nightly `dream.sh` pass consolidates
+**Alfred Node** bridges Discord and a headless Claude Code instance. `bot.js` is
+the whole app. It listens for Discord messages from authorized users, injects
+context (`agent/SOUL.md`, `agent/var/USER.md`, the memory files), runs
+`claude -p ...` as a subprocess, and replies. A nightly `dream.sh` pass folds
 daily notes into long-term memory.
 
 - **Entry point:** `bot.js` (ES modules, `"type": "module"`)
-- **Runtime:** Node.js (currently v24.x via nvm) + `discord.js` v14
-- **Secrets:** live in `.env` (gitignored). Never commit real tokens. `env.example` documents the keys.
-- **Attachments:** Alfred can send files by emitting `{img:path}` / `{pdf:path}` / `{file:path}` in its reply; `bot.js` extracts these, attaches the files, and strips the tokens. Documented for the agent in `agent/SOUL.md`.
+- **Runtime:** Node.js v24.x via nvm, `discord.js` v14
+- **Secrets:** live in `.env` (gitignored). Never commit real tokens.
+  `env.example` documents the keys.
+- **Attachments:** Alfred sends files with `{img:path}` / `{pdf:path}` /
+  `{file:path}` tokens in its reply. `bot.js` extracts the files and strips the
+  tokens. See `agent/SOUL.md`.
 
-### Three layers, kept apart
-
-See `CLAUDE.md` for the full table. The short version:
+## Three layers, kept apart
 
 | path | holds | committed? |
 |---|---|---|
@@ -27,235 +31,227 @@ See `CLAUDE.md` for the full table. The short version:
 | `agent/` | Alfred's config; also its cwd | yes |
 | `agent/var/` | memories, transcripts, logs, `USER.md` | **never** |
 
-`agent/var/` is personal data, guarded by a single `.gitignore` rule. Don't add
-exceptions to it, don't move state files out of it, and don't add anything to
-`agent/` that a person editing this repo needs — that belongs at the root.
-`bot.js` resolves all three from its own module path; `AGENT_DIR`/`STATE_DIR`
-override them but should normally stay unset.
+- `agent/var/` is personal data. One `.gitignore` rule guards it. Do not add
+  exceptions. Do not move state files out of it.
+- Do not add anything to `agent/` that a person editing this repo needs. That
+  belongs at the root.
+- `bot.js` resolves all three paths from its own module path. `AGENT_DIR` and
+  `STATE_DIR` override them but must normally stay unset.
 
-### CLI tools carry their own manual
+See `CLAUDE.md` for the full table.
+
+## CLI tools carry their own help
 
 Every CLI under `bin/` answers `--help` two ways: the whole surface as one line
-per command, and a single command in full via `<command> --help` (with
-`help <command>` as an alias). `help()` in `bin/lib/broker-client.js` does both
-from a `name -> { use, detail }` table, so a new tool fills in the table rather
-than writing help text.
+per command, and one command in full via `<command> --help` (or
+`help <command>`). `help()` in `bin/lib/broker-client.js` builds both from a
+`name -> { use, detail }` table. A new tool fills in the table.
 
-Both spellings are ordinary — git, docker and cargo all take them. What's
-deliberate is the *split*. Alfred's context is a budget, and a skill that
-restates every flag spends it on the twenty commands he isn't running. So the
-skill carries a one-line command list plus the rules a usage block can't express
-(Eastern times, what the colours mean, withheld means stop), and the detail for
-one command stays a shell call away. Progressive disclosure: he pulls the page
-he needs, not the manual.
+Three rules, each enforced by `test/cli.test.js`:
 
-Three properties are easy to break and each one has bitten:
+1. `--help` must work with no broker in the environment. Check credentials on
+   first use, not at import.
+2. Help exits 0 on stdout.
+3. Help runs before dispatch. Extend `test/cli.test.js` when you add a command.
 
-- **`--help` must work with no broker in the environment.** Check credentials on
-  first use, not at import, or "run `--help` for the flags" is a dead pointer.
-- **Help exits 0 on stdout.** It's an answer, not a failure — `set -e` and piped
-  reads treat the difference as real.
-- **Help is checked before dispatch.** `delete --help` once fell through into
-  `delete`, so asking how a command worked *attempted* it. `test/cli.test.js`
-  asserts help never reaches the broker; extend it when you add a command.
+`--help <command>` is not a form. Nothing takes an argument to `--help`.
 
-`--help <command>` is deliberately not a form. Nothing takes an argument to
-`--help`, and inventing that would be a local convention to memorise.
+## The system map is part of the change
 
-### The system map is part of the change
+`SYSTEM-MAP.md` is a set of Mermaid diagrams of the live system. Its "Reading
+this map" section states the visual grammar.
 
-`SYSTEM-MAP.md` is what the current system actually looks like — a set of Mermaid
-diagrams (a turn end to end, the trust boundary, how memory moves, the layers,
-the cron jobs) with the grammar for reading them stated at the top. It exists
-because most of the work here starts with *"where would that change go?"*, and
-answering that from a fresh read of `bot.js` every time is slow and gets it
-subtly wrong.
+- **Design against it.** Point at where a change lands and which boxes or arrows
+  it adds, moves, or deletes.
+- **Update it in the same PR as the change, and only then.** Most changes touch
+  nothing on it. Dev-side changes (a worktree helper, a `TODO.md` note, these
+  docs) add no box. The map tracks the *system* — the app Alfred runs.
+- **Run `npm run map:check` before the PR.** It flags drift. It is not in the
+  pre-commit hook.
 
-**It is a living contract, so treat it three ways:**
-
-- **Design against it.** When weighing how to build something, point at where on
-  the map it lands and which boxes or arrows it adds, moves, or deletes. That is
-  the fastest way to see what a change actually touches, and to disagree about it
-  before writing code.
-- **Update it in the same PR as the change it describes — and only then.** Most
-  changes describe nothing on it: a dev-side one (this worktree helper, a
-  `TODO.md` note, a tweak to these contributing docs) adds no box or arrow, and
-  `map:check` won't ask you to touch the map. It's the *system* — the app Alfred
-  runs — that the map tracks; when that moves, a map that lags is worse than no
-  map, because it gets believed. Its visual grammar — the colour and
-  arrow keys, structure-not-colour for the trust boundary, one-box-per-gateway,
-  guarantee-vs-request — is documented in the map's own "Reading this map"
-  section; keep new diagrams inside it.
-- **Let the check catch drift.** `npm run map:check` flags the ways it rots on its
-  own — something added and never drawn, something drawn and since deleted, a
-  wrong broker route count (per service), and a `.claude/skills/` at the repo
-  root (which would load into Alfred). It is **not** in the pre-commit hook: a
-  diagram lagging one commit isn't worth blocking work, but it's worth noticing
-  before a PR.
-
-It's hand-written, deliberately. A generated map draws every arrow and so says
-nothing about which ones matter; the useful content is which boundaries are
-guarantees and which are requests. The checker verifies the map is *accurate*,
-not *complete* — judgement about what's worth drawing stays with whoever writes
-it. If something genuinely isn't worth a box, say so in the map and the check
-passes.
-
-**It is a convention, not a Claude Code skill — on purpose.** A skill can't live
-anywhere the dev side sees it without Alfred seeing it too: discovery walks *up*
-from `agent/`, so a repo-root `.claude/skills/` loads into Alfred, and
-`~/.claude/skills/` is shared by the same Unix user. So map maintenance stays a
-documented rule plus `map:check`. Revisit making it a real skill only after "run
-the agent as a separate Unix user" (`TODO.md`) gives the dev side its own skill
-space.
+The map is hand-written. The checker verifies that it is accurate, not complete.
 
 ## Working agreement (READ BEFORE CHANGING CODE)
 
-This repo follows a lightweight **issue → branch → PR → version** flow. The goal
-is that every meaningful change is traceable and `main` always works.
+Flow: **issue → worktree branch → PR → version**. `main` always works.
 
-### 1. Branch — never commit directly to `main`
-- Cut a branch for every change. Naming: `type/short-description`
-  (e.g. `fix/dns-crash-resilience`, `feat/slash-status-command`, `chore/repo-bootstrap`).
-- Allowed types: `feat`, `fix`, `chore`, `docs`, `refactor`.
+### 1. Work in a worktree — always
 
-### 2. Issue first — for features and bug fixes
-- **Bugs and features** start as a GitHub issue describing the problem and intended outcome, then a PR that closes it.
-  - Open it with `gh issue create`, and reference it in the PR body with `Closes #<n>`.
-- **Trivial changes** (typos, comments, formatting, doc tweaks) may skip the issue and go straight to a small PR.
-- When in doubt, open the issue — it's cheap and keeps history readable.
+Do all code work in a git worktree, one per branch. Never work directly in the
+primary checkout, and never commit to `main`.
 
-### 3. PR — one concern per PR
-- Keep PRs focused on a single issue/concern. Don't mix a bug fix with unrelated refactors.
-- Open with `gh pr create`. The body should explain **what** changed and **why**, and link the issue.
-- Title uses Conventional-Commit style: `fix: prevent crash on transient DNS failure`.
-
-### 4. Version — SemVer + CHANGELOG on every PR that changes behavior
-- Versioning is [SemVer](https://semver.org/): `MAJOR.MINOR.PATCH` in `package.json`.
-  - `PATCH` — bug fixes, no API/behavior change for the user.
-  - `MINOR` — new backward-compatible features (e.g. a new command).
-  - `MAJOR` — breaking changes (config format, removed commands, etc.).
-- Every behavior-changing PR:
-  1. Adds an entry under `## [Unreleased]` in `CHANGELOG.md` (categorized: Added / Changed / Fixed / Removed).
-  2. Bumps the version in `package.json` to match.
-- On release, move `[Unreleased]` entries under a new `## [x.y.z] - YYYY-MM-DD` heading and tag the commit: `git tag vx.y.z && git push --tags`.
-- `chore`/`docs` PRs that don't change runtime behavior don't need a version bump.
-
-### Worktrees — a checkout per parallel branch
-
-Running more than one branch at once — several agents, or a long change parked
-next to a quick fix — is what worktrees are for. `git worktree` gives each branch
-its own working directory backed by the one shared `.git`, so two checkouts never
-fight over the index or a half-staged file. This is a **dev-side** tool; the live
-bot is unaffected and keeps running from its own checkout.
-
-Use the helper — it does the two steps this repo's layout makes non-obvious
-(place the tree, install deps):
+Use the helper. It cuts the branch, places the tree, and runs `npm install`:
 
 ```sh
-scripts/worktree.sh feat/slash-status      # cut the branch + worktree + npm install
+scripts/worktree.sh feat/slash-status      # cut branch + worktree + npm install
 scripts/worktree.sh ls                     # list them
 scripts/worktree.sh rm feat/slash-status   # remove when merged (branch is kept)
 ```
 
-Three rules, each with a reason that bites if you skip it:
+Three rules:
 
-- **A worktree is a clean checkout — treat it as dev-only.** `.env`,
-  `node_modules/` and `agent/var/` are all gitignored, so none of them exist in a
-  fresh tree. So: run `npm install` before the tests (the helper does it), and
-  don't run the live bot from a worktree — it has neither credentials nor state.
-  Don't "fix" that by copying `.env` or `agent/var/` in. The test suite is
-  hermetic and needs neither, and a second live checkout of personal state is
-  exactly what the three-layer split exists to prevent.
-- **Worktrees live as siblings, never nested inside the repo.** The helper puts
-  them under `../alfred-node.worktrees/<branch>`. A checkout placed *inside* the
-  repo shows up as an untracked directory in the parent's `git status` and carries
-  its own `agent/` and `.claude/` tree a directory walk can stumble into. Kept
-  outside, each tree's status stays about that tree.
-- **The hooks come for free; `map:check` still doesn't run itself.**
-  `core.hooksPath` lives in shared git config, so a new worktree runs the
-  pre-commit and commit-msg hooks with no per-worktree setup. As everywhere,
-  `npm run map:check` isn't in the hook (by design) — run it before the PR, from
-  whichever worktree holds the change.
+- **A worktree is a clean checkout. Treat it as dev-only.** `.env`,
+  `node_modules/`, and `agent/var/` are gitignored, so a fresh tree has none of
+  them. Run `npm install` before the tests (the helper does it). Do not run the
+  live bot from a worktree. Do not copy `.env` or `agent/var/` into it.
+- **Worktrees live as siblings, never nested in the repo.** The helper puts them
+  under `../alfred-node.worktrees/<branch>`.
+- **Hooks come for free.** `core.hooksPath` lives in shared git config, so a new
+  worktree runs the hooks with no setup. `npm run map:check` still does not run
+  itself — run it before the PR.
 
-Clean up merged worktrees with `scripts/worktree.sh rm ...` (or `git worktree
-remove`); a stale worktree keeps its branch checked out and blocks deleting it.
+Remove merged worktrees with `scripts/worktree.sh rm ...`. A stale worktree
+keeps its branch checked out and blocks deleting it.
+
+### 2. Branch naming
+
+- Format: `type/short-description` (e.g. `fix/dns-crash-resilience`,
+  `feat/slash-status-command`).
+- Allowed types: `feat`, `fix`, `chore`, `docs`, `refactor`.
+
+### 3. Issue first — for features and bug fixes
+
+- Bugs and features start as a GitHub issue. Open it with `gh issue create`.
+  Reference it in the PR body with `Closes #<n>`.
+- Trivial changes (typos, comments, formatting, doc tweaks) skip the issue.
+- When in doubt, open the issue.
+
+### 4. PR — one concern per PR
+
+- Keep each PR on a single concern. Do not mix a bug fix with an unrelated
+  refactor.
+- Open with `gh pr create`. The body explains **what** changed and **why**, and
+  links the issue.
+- Title uses Conventional-Commit style: `fix: prevent crash on transient DNS
+  failure`.
+
+### 5. Version — SemVer + CHANGELOG on every behavior change
+
+- Version is [SemVer](https://semver.org/) `MAJOR.MINOR.PATCH` in
+  `package.json`:
+  - `PATCH` — bug fixes, no behavior change for the user.
+  - `MINOR` — new backward-compatible features.
+  - `MAJOR` — breaking changes.
+- Every behavior-changing PR:
+  1. Adds an entry under `## [Unreleased]` in `CHANGELOG.md`
+     (Added / Changed / Fixed / Removed).
+  2. Bumps the version in `package.json`.
+- On release, move `[Unreleased]` under a new `## [x.y.z] - YYYY-MM-DD` heading
+  and tag: `git tag vx.y.z && git push --tags`.
+- `chore`/`docs` PRs that do not change runtime behavior need no version bump.
 
 ## Commit messages
-Use Conventional Commits: `type: summary` (e.g. `fix: catch sendTyping rejection`).
-Keep the summary imperative and under ~72 chars.
 
-### One commit per change, not one per thought
+- Use Conventional Commits: `type: summary` (e.g. `fix: catch sendTyping
+  rejection`). Keep the summary imperative and under ~72 chars.
+- One commit per change — the smallest thing someone might revert or find with
+  `git log`.
+- Notes and doc edits ride with the work they describe. Amend them onto the
+  branch with `git commit --amend`. Start a second docs commit only after the
+  first is pushed and reviewed.
 
-A commit should be the smallest thing someone might want to revert or find with
-`git log`. `fix: --count 0 is falsy` earns its own line because a future reader
-searching for that bug will find it. Four separate edits to `TODO.md` in one
-afternoon do not — that's the same change, committed four times.
+`scripts/check-commit-hygiene.sh` enforces two rules:
 
-The rule that follows: **notes are one commit, amended.** Backlog and doc edits
-ride with the work they describe, or accumulate on one branch via
-`git commit --amend`. Reach for a second docs commit when the first has already
-been pushed and reviewed, not because a new thought arrived.
+1. Commits on `main`/`master` are blocked.
+2. A duplicate subject across `--all` is blocked. `HEAD` is excluded, so
+   `git commit --amend` never collides.
 
-Same for PRs. One PR per *concern*, which is not the same as one per commit —
-a notes-only change doesn't need its own PR when an open branch already covers
-that ground. What must not happen is a commit straight to `main`; that one is
-enforced, not requested.
-
-`scripts/check-commit-hygiene.sh` enforces the two failures that have actually
-happened here, and deliberately not the judgement call above:
-
-1. **Commits on `main`/`master` are blocked.** This was a sentence in this file
-   for months and got broken anyway.
-2. **A duplicate subject is blocked.** `docs: forwarded invites on the
-   backlog...` exists twice in this history — same message, same minute,
-   different hashes — because a commit landed on the wrong branch and was
-   re-applied. The scan covers `--all`, not just the current branch's ancestry,
-   since that's precisely the case that produced it. `HEAD` is excluded so
-   `git commit --amend` never collides with the commit it replaces.
-3. **Docs churn warns and never blocks.** A second docs-only commit on a branch
-   suggests `--amend`, then continues. How much to split a change is judgement,
-   and a hook guessing at it would be wrong more often than you are.
+A second docs-only commit on a branch warns and continues.
 
 ## First-time setup
 
-Install the pre-commit hook — one line, once per clone:
+Install the hooks — one line, once per clone:
 
 ```sh
 git config core.hooksPath .githooks
 ```
 
-That one line installs both hooks: `pre-commit` (branch check, then secrets,
-then the suite) and `commit-msg` (duplicate-subject check, which needs the
-message and so can't run any earlier). It's opt-in because git won't run
-repo-supplied hooks without it — and note that hooks live in the *working tree*,
-so checking out an older branch checks out that branch's hooks too.
+This installs `pre-commit` (branch check, secrets, test suite) and `commit-msg`
+(duplicate-subject check). Hooks live in the working tree, so an older branch
+checks out that branch's hooks.
 
 ## Sanity checks before opening a PR
-- `node --check bot.js` — must pass (no syntax errors).
+
+- `node --check bot.js` — no syntax errors.
 - `npm run check` — no personal files or secret-shaped content staged. The
-  pre-commit hook runs this for you if you did the setup above.
+  pre-commit hook runs this.
 - `npm test` — the suite under `test/` (node:test, no network, no real
-  credentials). The pre-commit hook runs it too, so a failing test blocks the
-  commit.
-- `npm run map:check` — `SYSTEM-MAP.md` still matches the tree. Not in the hook;
-  run it before opening the PR.
+  credentials). The pre-commit hook runs it.
+- `npm run map:check` — `SYSTEM-MAP.md` still matches the tree. Not in the hook.
 
 ## Never in git
 
-`.gitignore` keeps `.env`, `node_modules/` and `agent/var/` out, but a rule only
-protects what someone remembers to look at — and Alfred runs in this repo with
-`Bash`, `Write` and `--dangerously-skip-permissions`, so "nobody would do that"
-isn't a guarantee here. `scripts/check-no-secrets.sh` enforces it on the staged
-set instead:
+`.gitignore` keeps `.env`, `node_modules/`, and `agent/var/` out. Alfred runs in
+this repo with `Bash`, `Write`, and `--dangerously-skip-permissions`, so a rule
+alone is not enough. `scripts/check-no-secrets.sh` enforces it on the staged
+set:
 
-1. Anything under `agent/var/` or named `.env`, by path — so a weakened
-   `.gitignore` can't silently re-open the hole.
-2. Any gitignored file that reached the index anyway, i.e. `git add -f`.
-3. Secret-shaped content (private keys, `GOCSPX-`, `AIza…`, `ya29.`,
-   refresh tokens, GitHub/OpenAI tokens, Discord bot tokens) in added lines,
-   for credentials pasted into a file whose location is perfectly legitimate.
+1. Anything under `agent/var/` or named `.env`, by path.
+2. Any gitignored file added with `git add -f`.
+3. Secret-shaped content (private keys, `GOCSPX-`, `AIza…`, `ya29.`, refresh
+   tokens, GitHub/OpenAI tokens, Discord bot tokens) in added lines.
 4. Runtime state at the repo root (`var/`, `logs/`, `state.json`) — a warning,
-   not a block, since this one guesses.
+   not a block.
 
-`git commit --no-verify` bypasses it. If you need that, you almost certainly
-want to fix the staging instead.
+`git commit --no-verify` bypasses it. If you need that, fix the staging instead.
+
+## Simplified Technical English (required)
+
+When you talk with the user about this project and when you develop it, always
+write in Simplified Technical English (ASD-STE100). This applies to code
+comments, commit messages, PR and issue text, docs, error strings, and chat
+replies. It does not apply to Alfred's own persona output in `agent/` — that
+text has a voice on purpose.
+
+STE removes the two biggest sources of misreading: words with more than one
+meaning, and sentences with more than one possible structure. It keeps text
+short, active, and literal so an agent or a non-native reader cannot misparse it.
+
+### Structural rules — apply every time
+
+- **Active voice.** "The agent deletes the file", not "The file is deleted".
+- **No phrasal verbs.** "Remove the panel", "start the job" — not "take off the
+  panel", "spin up the job".
+- **One instruction per sentence.** "Open the file. Read line 3." — not "Open
+  the file and read line 3, then check it."
+- **Short sentences.** ≤20 words for instructions, ≤25 words for descriptions.
+- **No semicolons.** Split into separate sentences. The em dash is allowed but
+  often signals a sentence to split.
+- **Simple tenses only.** Infinitive, imperative, simple present, simple past,
+  simple future, past participle as adjective. Avoid present perfect ("we
+  received the report", not "we have received"). Keep the compound form only
+  when it carries information the simple form cannot — for example a hedge, "may
+  have failed".
+- **Keep modality.** Do not promote a hedge to a fact. "The request **may have**
+  failed" stays "may have". Never add a fact the source did not state.
+- **Noun clusters ≤3 words.** "fuel pump valve", not "high pressure fuel pump
+  inlet valve assembly".
+- **No ellipsis.** Keep the subject, verb, and article explicit.
+- **Lists for sequences.** Use a numbered or bulleted list for 3+ steps.
+- **One topic per paragraph**, ≤6 sentences.
+
+### Lexical rules — direction of travel
+
+- **One word, one meaning.** Pick one verb for one action and reuse it. Do not
+  rotate "check" / "verify" / "confirm" for the same action.
+- **Verb, not noun.** "Analyze the log", not "perform an analysis of the log".
+- **Domain terms.** Keep necessary technical terms. Define each once if it is
+  not common English.
+
+### Scan for these six habits
+
+1. **Synonym rotation** — the same thing gets several names ("the user", "the
+   customer", "the client"). Pick one name.
+2. **Hedge stacking** — "it is important to note that this may potentially
+   help". State the claim, or delete it.
+3. **Nominalization** — "perform an analysis of". Use the verb, "analyze".
+4. **Marketing adjectives** — seamless, robust, powerful, blazing-fast. Delete,
+   or replace with a measurement.
+5. **Run-on sentences** — several ideas joined by semicolons or em dashes. One
+   idea per sentence.
+6. **Soft phrasal verbs** — spin up, reach out, dive into, kick off. Use the
+   plain verb: start, contact, read, begin.
+
+Stop when the sentence is unambiguous, not when it is shortest. STE fixes the
+form of a text, not its substance. Source: the `asd-ste100` skill, which encodes
+the rule categories of ASD-STE100 Issue 9 (Jan 2025).
