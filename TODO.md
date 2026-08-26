@@ -100,42 +100,6 @@ risky jobs to small least-privilege agents instead of widening his reach.
       schema — what one workout row is — and nightly pull vs. on-demand. ("galin"
       in the ask; read as Garmin — correct if wrong.)
 
-### Voice
-
-- [ ] **Voice messages → text.** Discord voice notes are Ogg/Opus attachments.
-      The download primitive now exists (#40), so this reuses it and adds only its
-      own trigger (the `IsVoiceMessage` flag) and transcription. Transcribe
-      locally: audio is a different privacy category than text.
-
-      **Model: NVIDIA Parakeet-TDT-0.6B, via ONNX rather than NeMo** (Kuba,
-      2026-08-04). NeMo's dependency tree is built for GPU training; the int8
-      ONNX export is ~1 GB on `onnxruntime`.
-
-      *Whisper considered and not taken.* It is genuinely smaller — `tiny.en`
-      39 M, `base.en` 74 M, `small.en` 244 M against Parakeet's 600 M — and
-      `pip install faster-whisper` is far less install friction than community
-      ONNX exports. Three things outweighed that: RAM and disk aren't scarce
-      here (62 GB / 415 GB free), so a 1 GB model costs nothing; Whisper pads
-      every clip to a **fixed 30 s window**, so a 4-second note costs the same
-      as a 30-second one and the size advantage largely evaporates on exactly
-      the clips we'd send; and its silence-hallucination is worst at `tiny`/
-      `base`, which is the wrong failure mode for a transcript that *takes
-      actions*. Revisit only if the ONNX route proves unworkable — the
-      transcriber sits behind a `path -> text` call, so swapping it is cheap.
-
-      **This box is CPU-only** — no GPU, i7-8700 (6c/12t, AVX2, no VNNI), so
-      int8 buys ~1.5–2× not 4×: quantize for footprint, not speed. Estimated
-      RTF ~0.1 — 10 s note ≈ 1–2 s, 30 s ≈ 3–5 s, plus 1–2 s model load once
-      the file is in page cache. Unmeasured, and estimates on 2017 silicon run
-      optimistic; time it before designing around it. Either way it's small
-      next to a 10–30 s `claude -p` turn, so don't build streaming up front.
-
-      Needs `ffmpeg` (not installed) to decode Opus → 16 kHz mono PCM.
-
-      The transcript becomes the user message; Alfred never learns it was
-      spoken. One guard: echo what was heard when the turn takes an action — a
-      misheard "cancel Thursday's meeting" otherwise acts on the mishearing.
-
 ## Next
 
 ### Mail & calendar — the rest of the Pub/Sub arc
@@ -406,6 +370,22 @@ risky jobs to small least-privilege agents instead of widening his reach.
 
 ## Done
 
+- [x] ~~**Voice messages → text.**~~ A voice note (lone Opus attachment, the
+      `IsVoiceMessage` flag) is transcribed on-device and the transcript *becomes*
+      the user message, so everything downstream is blind to whether the turn was
+      typed or spoken. `voice/transcribe.js` → `voice/transcribe.py`: ffmpeg
+      decodes Opus → 16 kHz mono, then **Parakeet-TDT-0.6B int8** via onnx-asr on
+      onnxruntime, loaded from the HF cache with downloads off so a live turn
+      never touches the network. The predicted numbers were the risk the item
+      flagged ("time it before designing around it") — measured on this CPU-only
+      box they came in *better*: RTF ~0.06 (11 s note → 0.7 s) + ~2 s model load,
+      **630 MB** on disk after pruning the fp32 pair — under the ~1 GB estimate.
+      `ffmpeg` turned out to already be in the venv (a static build), so no sudo
+      after all. The bot echoes `🎙️ heard: …` before the turn — the action-echo
+      guard, done deterministically in `bot.js` rather than left to the model.
+      Whisper stays not-taken per the item's reasoning. `scripts/setup-voice.sh`
+      provisions deps + model; unset, a note draws a graceful reply and no turn.
+      Reuses the #40 download primitive. (PR pending)
 - [x] ~~**Read inbound attachments — and the day-folder + Eastern-date arc it
       pulled in.**~~ Alfred was send-only: a message with files but no caption hit
       `if (!userMessage) return` and was dropped, `msg.attachments` never read.
