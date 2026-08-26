@@ -78,70 +78,6 @@ risky jobs to small least-privilege agents instead of widening his reach.
 
 ## Next
 
-### Mail & calendar — the rest of the Pub/Sub arc
-
-- [ ] **Forwarded calendar invites add themselves.** Kuba gets invites at other
-      addresses; he forwards one here and it lands on the calendar. Rides the
-      Pub/Sub path above — same trigger, its own handler.
-
-      **Why this doesn't already happen.** Gmail auto-adds an invite when you're
-      in the `.ics` `ATTENDEE` list. Forwarding doesn't rewrite that list, so the
-      forwarded copy names the original invitees and Gmail correctly ignores it.
-      The gap is real, not a setting someone forgot to tick.
-
-      **One model path, not two — this supersedes the shipped `.ics` parser.**
-      The deterministic `.ics` branch (`ronnie/ics.js`, the `POST /calendar/import`
-      route) solved the prose case *twice*: a hand-rolled RFC-5545 parser **and** a
-      model fallback for the no-`.ics` Outlook forward. Since Ronnie already runs a
-      Haiku pass on every inbound message, the parser earns nothing. **Rip out
-      `ics.js` and the import route.** The handler becomes: hand the forwarded mail
-      — prose body or `.ics` text, the model doesn't care — to Ronnie's Haiku,
-      which extracts the event and drives the **same gcal CLI Alfred already uses**
-      (`bin/gcal.js`) to add or delete it. No bespoke parser, no bespoke route, no
-      UID bookkeeping. This is where the ⚠️ 2026-08-04 finding lands: an inline
-      Outlook forward arrives as plain `multipart/alternative` with no `.ics` at
-      all, so a model was always going to be needed — now it's the *only* path, and
-      the `.ics`, when it's there, is just richer text to read.
-
-      **Dedupe by looking, not by UID.** Before adding, the model lists the
-      calendar around that date (the gcal CLI's read path) and judges whether the
-      same event is already there — same title, same start. If it is, skip;
-      otherwise add. When it's ambiguous, **lean toward adding** — a stray
-      duplicate is a two-second delete, a missed meeting isn't. This drops the
-      whole `events.import` + `iCalUID` machinery: no reschedule-in-place
-      guarantee, but re-forwards and updated invites are caught by judgment
-      instead, which is good enough at one-user, hand-forwarded volume.
-
-      **Adds auto, deletes announced — both describe themselves in the channel.**
-      Same shape as the rest of Ronnie: an add runs automatically and Ronnie says
-      in the channel exactly what it added; a delete (a forwarded cancellation —
-      `Canceled:` / `METHOD:CANCEL` in the text, which the model reads like
-      anything else) is likewise announced, and undo is a reply. The post *is* the
-      safety net now, so it isn't optional — see the timezone trap.
-
-      **Only act on mail Kuba forwarded himself.** Unchanged, and still the one
-      security-critical decision: gate on the **DKIM-pass + DMARC-aligned** sender
-      Gmail computes (not the forgeable `From:` string) **and** an exact match on
-      one of Kuba's own addresses. Past the gate, containment is the broker —
-      Ronnie touches the calendar only through the gcal routes, so the worst a
-      malicious invite's text can do is inject a junk event: announced and
-      undoable, not a new capability.
-
-      **The one trap that outlives the parser is the timezone.** A zoneless `.ics`
-      `DTSTART` (or a bare "10:30 AM" in prose) is wall-clock and must be read as
-      Eastern; a model that takes it for UTC lands the event four to six hours out.
-      The parser used to guarantee this; now the prompt has to, and the same-day
-      channel post is what catches a miss before the meeting. **Test one real
-      forward end-to-end before trusting it.** All-day vs. timed and recurrence
-      ride along: the gcal CLI recurrence builder (`--days`/`--rrule`) already
-      shipped, so the model can set a weekly standup as recurring; per-occurrence
-      exceptions (`EXDATE` — a skipped holiday week) are the one thing the CLI
-      can't express yet, and they're rare enough to punt.
-
-      **Capability note:** dedupe means Ronnie now needs calendar *read* on top of
-      add/delete — a slightly wider broker surface than the old import/remove pair,
-      still nowhere near general mail or calendar access.
-
 ### Reliability — nightly jobs that fail at 3am
 
 - [ ] **Scheduled-job health — flag failures, and recycle where safe.** `bot.js`
@@ -215,6 +151,23 @@ risky jobs to small least-privilege agents instead of widening his reach.
 
 ## Done
 
+- [x] ~~**Forwarded calendar invites add themselves — one model path, no `.ics`
+      parser.**~~ Built as the redesign above described, and it deleted more than
+      it added: the hand-rolled RFC-5545 parser (`ronnie/ics.js`) and the
+      `POST /calendar/import` route are gone. Past the unchanged DKIM + owner gate,
+      a Haiku pass (`ronnie/invite.js`) reads the forward — prose or `.ics` — and
+      returns add / delete / none; an add is deduped by *reading* the day and
+      letting the model judge a match (leaning toward adding when unsure), then
+      created with the same `POST /calendar/events` insert `bin/gcal.js` uses; a
+      delete finds and removes the matching event; none triages as ordinary mail.
+      Ronnie's broker traded import/remove for the gcal trio — a read-only
+      `GET /calendar/events` (dedupe only) plus `POST`/`DELETE` — so its reach is
+      list/add/delete, no edit. The undo handle is the created event id. Handles
+      the inline-Outlook-forward case that has no `.ics` at all, which is what
+      made a model the *only* sensible path. The surviving trap — a zoneless time
+      is Eastern wall-clock — lives in the prompt now, with the same-day channel
+      post as the safety net. Still worth a real end-to-end forward before it's
+      trusted in the wild.
 - [x] ~~**Ronnie — the inbound-mail worker, and the separate-agent security
       half.**~~ The pub/sub arc's tier-2/3 runtime, split off from `bot.js` as its
       own broker client: it drains the pull subscription, prefilters and

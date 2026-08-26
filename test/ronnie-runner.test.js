@@ -62,17 +62,19 @@ test("enqueue → drain triages a queued message end to end (free stage, no Haik
   assert.deepEqual(label.body.removeLabels, ["INBOX"]); // bulk is archived
 });
 
-test("undo cal:<uid> removes the calendar event", async () => {
+test("undo cal:<eventId> deletes the calendar event by id", async () => {
   const calls = [];
   const fetchImpl = async (url, opts) => {
-    calls.push({ url, body: JSON.parse(opts.body || "{}") });
+    calls.push({ url, method: opts.method });
     return { ok: true, json: async () => ({}) };
   };
   const r = makeRonnie({ brokerUrl: "http://127.0.0.1:1", brokerToken: "T", fetchImpl });
-  const out = await r.undo("cal:inv-9");
-  assert.deepEqual(out, { kind: "calendar", uid: "inv-9" });
-  const call = calls.find((c) => c.url.endsWith("/calendar/remove"));
-  assert.equal(call.body.iCalUID, "inv-9");
+  const out = await r.undo("cal:evt-9");
+  assert.deepEqual(out, { kind: "calendar", id: "evt-9" });
+  // A DELETE on the shared events route, with the id in the query string.
+  const call = calls.find((c) => c.url.includes("/calendar/events"));
+  assert.equal(call.method, "DELETE");
+  assert.match(call.url, /[?&]id=evt-9\b/);
 });
 
 test("undo mail:<id> re-files a pinged message as bulk", async () => {
