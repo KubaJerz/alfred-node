@@ -14,6 +14,8 @@ import { gmailClient, PUBSUB_KEY_FILE } from "./google/auth.js";
 import { drainMailDigest } from "./google/gmail-buffer.js";
 import { RONNIE_ROUTES } from "./ronnie/broker-routes.js";
 import { makeRonnie } from "./ronnie/runner.js";
+import { resolveRonnieLabels } from "./ronnie/labels.js";
+import { ensureLabels } from "./google/gmail-labels.js";
 import { easternDate, dailyDir, dailyNotePath, attachmentName, buildAttachmentBlock } from "./dailies.js";
 import { parseClearCommand } from "./commands.js";
 import { transcribe, transcriptionAvailable } from "./voice/transcribe.js";
@@ -1104,7 +1106,29 @@ if (ronnieConfigured) {
   const ronnieBroker = await startBroker({ baseRoutes: {}, extraRoutes: RONNIE_ROUTES });
   sharedGmail = pushConfigured ? await gmailClient() : null;
   const enrichOne = sharedGmail ? (id) => enrich(sharedGmail, id) : undefined;
-  ronnie = makeRonnie({ brokerUrl: ronnieBroker.url, brokerToken: ronnieBroker.token, enrichOne });
+  // Resolve (and create-if-missing) the nested topic labels once at boot, from
+  // the two parent ids in env. Best-effort: if the client isn't up or Gmail
+  // hiccups, Ronnie runs with attention-only labels rather than not at all.
+  let labels;
+  if (sharedGmail) {
+    try {
+      // Priority is the newer top-level parent (the ping tier); Interesting/Bulk
+      // come from env. Ensure Priority exists, then resolve the nested children.
+      let priorityId = process.env.RONNIE_LABEL_PRIORITY;
+      if (!priorityId) priorityId = (await ensureLabels(["Priority"], { gmail: sharedGmail })).ids["Priority"];
+      labels = await resolveRonnieLabels({
+        gmail: sharedGmail,
+        priorityId,
+        interestingId: process.env.RONNIE_LABEL_INTERESTING,
+        bulkId: process.env.RONNIE_LABEL_BULK,
+        create: true,
+      });
+      if (labels.created?.length) console.log(`🏷️  created ${labels.created.length} topic label(s): ${labels.created.join(", ")}`);
+    } catch (err) {
+      console.error(`⚠️  Ronnie label resolution failed (topics disabled): ${err.message}`);
+    }
+  }
+  ronnie = makeRonnie({ brokerUrl: ronnieBroker.url, brokerToken: ronnieBroker.token, enrichOne, labels });
   console.log("🧰 Ronnie is on — inbound mail is queued, triaged, labelled, and pinged");
 
   if (ronnie && sharedGmail) {

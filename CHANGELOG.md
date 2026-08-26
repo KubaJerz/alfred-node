@@ -5,6 +5,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
 
 ## [Unreleased]
 ### Added
+- **Ronnie triage — three attention tiers + a nested topic axis.** Attention is
+  now three tiers by *urgency*, and is the label parent: **Priority** (interrupt
+  now — the only tier that pings — kept in the inbox), **Interesting** (keep +
+  read later, silent, kept in the inbox), **Bulk** (noise, archived out). A
+  *topic* is a child nested under the tier, so the same mail lands as
+  `Priority/Banking` (a fraud alert), `Interesting/Banking` (a "new external
+  account" confirmation), or `Bulk/Banking` (a rewards blast). Haiku's rubric now
+  returns the three-way level; only Priority pings, only Bulk archives. Three
+  topics are deterministic sender-domain rules (`entropy`, `banking`, `jobs`-boards
+  — `RONNIE_TOPIC_*_SENDERS`, `ronnie/topics.js`), matching a domain **or any
+  subdomain** of it (banks/boards mail from subdomains), and never the model's to
+  assert, so a prompt-injected email can't forge them; `taxes` and an active `jobs`
+  thread come from the Haiku call that already runs, and a domain rule wins over
+  Haiku. Cross-axis rules: `taxes` is always Interesting (kept, never a ping,
+  never Bulk); a job **board** is a listing (`Bulk/Jobs`) while an active thread is
+  `Interesting/Jobs`. Child labels — and the `Priority` parent — are resolved/
+  created by NAME at boot (`ronnie/labels.js` → `google/gmail-labels.js`), so the
+  only label id env vars are the two existing parents. A one-time **backfill**
+  (`scripts/ronnie-backfill.mjs`) relabels the existing inbox with the same live
+  primitives — credential screen → prefilter → domain topic → budgeted Haiku — as
+  a dry-run report first (`agent/var/ronnie-backfill-report.html`), then `--apply`
+  to label + archive + migrate the old flat `jobs`/`taxes` labels onto the tree
+  (and a one-pass sweep of a former employer's mail into `Bulk/UT`);
+  Haiku-budgeted, checkpointed/resumable, and it never labels withheld credential
+  mail.
 - **Forwarded calendar invites add themselves — one model path, no `.ics`
   parser.** A calendar invitation (or cancellation) that Kuba forwards to himself
   now lands on the calendar. The DKIM + owner-address gate (`sender-auth.js`) is

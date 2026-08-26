@@ -1,7 +1,7 @@
 // The cheap stages that run before Haiku ever sees a message. In order:
 //
 //   1. blocklist  — senders you've decided you never care about -> bulk, filed.
-//   2. allowlist  — senders you always want -> personal, pinged.
+//   2. allowlist  — senders you always want interrupted for -> priority, pinged.
 //   3. Gmail box  — Gmail already sorted it into Promotions or Social -> bulk,
 //                   filed for free. Updates is left OUT on purpose (it sweeps in
 //                   bank/sign-in/verify mail), so Updates, Primary and Forums all
@@ -52,7 +52,7 @@ function listed(address, list) {
  *
  * @param {{from?: string, subject?: string, headers?: object}} msg
  * @param {{block?: string[], allow?: string[]}} [opts]
- * @returns {{decision: "bulk"|"personal"|"undecided", reason: string}}
+ * @returns {{decision: "bulk"|"priority"|"undecided", reason: string}}
  */
 export function prefilter(msg = {}, opts = {}) {
   const block = opts.block || BLOCK;
@@ -61,8 +61,8 @@ export function prefilter(msg = {}, opts = {}) {
 
   // 1. blocklist wins first — it's the whole reason to check before spending.
   if (listed(address, block)) return { decision: "bulk", reason: "blocklist" };
-  // 2. allowlist next.
-  if (listed(address, allow)) return { decision: "personal", reason: "allowlist" };
+  // 2. allowlist next — a sender you always want interrupted for.
+  if (listed(address, allow)) return { decision: "priority", reason: "allowlist" };
   // 3. Gmail already sorted it into a non-Primary box we file.
   const cat = (msg.labelIds || []).find((l) => BULK_CATEGORIES.has(l));
   if (cat) return { decision: "bulk", reason: `gmail ${cat.replace("CATEGORY_", "").toLowerCase()}` };

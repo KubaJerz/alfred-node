@@ -11,16 +11,16 @@ test("blocklist sends a sender straight to bulk, before anything else", () => {
   assert.equal(prefilter({ from: "News <deals@krispykreme.com>" }, opts).decision, "bulk");
 });
 
-test("allowlist sends a sender straight to personal", () => {
-  assert.deepEqual(prefilter({ from: "Mom <mom@family.com>" }, opts), { decision: "personal", reason: "allowlist" });
-  assert.equal(prefilter({ from: "prof@advisor.edu" }, opts).decision, "personal");
+test("allowlist sends a sender straight to priority", () => {
+  assert.deepEqual(prefilter({ from: "Mom <mom@family.com>" }, opts), { decision: "priority", reason: "allowlist" });
+  assert.equal(prefilter({ from: "prof@advisor.edu" }, opts).decision, "priority");
 });
 
 test("blocklist beats the grep and the allowlist beats it too", () => {
   // A blocklisted sender that also looks bulk still resolves via the list (order).
   assert.equal(prefilter({ from: "community@boyd.org", headers: { "list-unsubscribe": "<u>" } }, opts).reason, "blocklist");
-  // An allowlisted sender that looks bulk is kept personal — your intent wins.
-  assert.equal(prefilter({ from: "mom@family.com", headers: { "list-unsubscribe": "<u>" } }, opts).decision, "personal");
+  // An allowlisted sender that looks bulk is kept priority — your intent wins.
+  assert.equal(prefilter({ from: "mom@family.com", headers: { "list-unsubscribe": "<u>" } }, opts).decision, "priority");
 });
 
 test("Gmail's Promotions/Social box -> bulk, before spending a Haiku call", () => {
@@ -32,7 +32,7 @@ test("Gmail's Promotions/Social box -> bulk, before spending a Haiku call", () =
   // Primary/uncategorised also goes to Haiku.
   assert.equal(prefilter({ from: "x@bank.com", labelIds: ["CATEGORY_PERSONAL"] }, opts).decision, "undecided");
   // But the allowlist still wins over the Gmail box.
-  assert.equal(prefilter({ from: "mom@family.com", labelIds: ["CATEGORY_PROMOTIONS"] }, opts).decision, "personal");
+  assert.equal(prefilter({ from: "mom@family.com", labelIds: ["CATEGORY_PROMOTIONS"] }, opts).decision, "priority");
 });
 
 test("no list match, but a list header -> bulk via grep (no Haiku)", () => {

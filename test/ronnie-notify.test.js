@@ -3,8 +3,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mailEmbed, inviteEmbed, post, notifyMail, COLORS } from "../ronnie/notify.js";
 
-test("mailEmbed colours personal green and bulk blue", () => {
-  assert.equal(mailEmbed({ from: "a@x", subject: "hi", category: "personal" }).color, COLORS.personal);
+test("mailEmbed colours priority green and bulk blue", () => {
+  assert.equal(mailEmbed({ from: "a@x", subject: "hi", category: "priority" }).color, COLORS.priority);
   assert.equal(mailEmbed({ from: "a@x", subject: "sale", category: "bulk" }).color, COLORS.bulk);
 });
 
@@ -20,8 +20,8 @@ test("mailEmbed fills sensible defaults for missing fields", () => {
   assert.equal(e.title, "(no subject)");
 });
 
-test("a personal mailEmbed carries a mail: undo handle; bulk does not", () => {
-  const personal = mailEmbed({ id: "m1", from: "a@x", subject: "hi", category: "personal" });
+test("a priority mailEmbed carries a mail: undo handle; bulk does not", () => {
+  const personal = mailEmbed({ id: "m1", from: "a@x", subject: "hi", category: "priority" });
   assert.match(personal.footer.text, /undo mail:m1/);
   const bulk = mailEmbed({ id: "m2", from: "a@x", subject: "sale", category: "bulk" });
   assert.equal(bulk.footer.text, "filed — bulk"); // no undo handle on silent filing
@@ -79,12 +79,12 @@ test("notifyMail builds one embed per entry", async () => {
   };
   await notifyMail(
     [
-      { from: "a@x", subject: "one", category: "personal" },
+      { from: "a@x", subject: "one", category: "priority" },
       { from: "n@brand", subject: "sale", category: "bulk" },
     ],
     { webhookUrl: "https://d/w", fetchImpl }
   );
   assert.equal(seen.embeds.length, 2);
-  assert.equal(seen.embeds[0].color, COLORS.personal);
+  assert.equal(seen.embeds[0].color, COLORS.priority);
   assert.equal(seen.embeds[1].color, COLORS.bulk);
 });

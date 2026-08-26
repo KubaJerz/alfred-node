@@ -86,7 +86,7 @@ test("undo mail:<id> re-files a pinged message as bulk", async () => {
   const r = makeRonnie({
     brokerUrl: "http://127.0.0.1:1",
     brokerToken: "T",
-    labels: { bulk: "L_BULK", interesting: "L_INT" },
+    labels: { priority: "L_PRI", bulk: "L_BULK", interesting: "L_INT" },
     fetchImpl,
   });
   const out = await r.undo("mail:m7");
@@ -94,5 +94,5 @@ test("undo mail:<id> re-files a pinged message as bulk", async () => {
   const call = calls.find((c) => c.url.endsWith("/mail/label"));
   assert.equal(call.body.id, "m7");
   assert.deepEqual(call.body.addLabels, ["L_BULK"]);
-  assert.deepEqual(call.body.removeLabels, ["INBOX", "L_INT"]); // archived + un-flagged
+  assert.deepEqual(call.body.removeLabels, ["INBOX", "L_PRI"]); // archived + un-flagged from Priority
 });
