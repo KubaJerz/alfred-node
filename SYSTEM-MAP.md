@@ -57,7 +57,9 @@ answers, it exits.
 ```mermaid
 flowchart TD
     U["Kuba · Discord"] -->|message| GATE{"authorized<br/>user?"}
-    GATE -->|yes| Q["enqueueTurn<br/>one turn at a time"]
+    GATE -->|"voice note"| TR["transcribe<br/>ffmpeg → Parakeet int8<br/>voice/transcribe.js"]
+    TR -->|"transcript = message"| Q
+    GATE -->|"text / files"| Q["enqueueTurn<br/>one turn at a time"]
     CTX["loadContext<br/>SOUL.md + USER.md + MEMORY.md + today's daily"] --> Q
     Q --> SPAWN["spawn: claude -p<br/>cwd = agent/"]
     SPAWN -.->|"skill matches"| SK["skills<br/>gmail · gcal · notion · intervals · strength"]
@@ -75,6 +77,16 @@ flowchart TD
     class BR gateway
     class SK,CLIS stack
 ```
+
+A **voice note** is the one message that isn't its own text: it arrives as a
+lone Opus attachment with the `IsVoiceMessage` flag. `voice/transcribe.js` runs
+it through ffmpeg (Opus → 16 kHz mono) and the on-device Parakeet-TDT int8 model
+(`voice/transcribe.py`, via onnx-asr) — audio is transcribed locally, never sent
+out — and the transcript *becomes* the user message, so everything downstream is
+blind to whether a turn was typed or spoken. The bot echoes `🎙️ heard: …` first,
+so a mishearing is visible before the turn acts on it. Provisioned once by
+`scripts/setup-voice.sh`; if it isn't set up, the note draws a graceful reply and
+no turn.
 
 The `bin/` CLIs are **never loaded into context** — the agent's tools are only
 `Bash,Read,Edit,Write`, and it *runs* the CLIs as subprocesses. `SOUL.md` (always

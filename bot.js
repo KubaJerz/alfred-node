@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { Client, GatewayIntentBits, Partials, AttachmentBuilder } from "discord.js";
+import { Client, GatewayIntentBits, Partials, AttachmentBuilder, MessageFlags } from "discord.js";
 import { spawn } from "child_process";
 import { readFile, writeFile, mkdir, appendFile } from "fs/promises";
 import { existsSync, openSync, statSync } from "fs";
@@ -16,6 +16,7 @@ import { RONNIE_ROUTES } from "./ronnie/broker-routes.js";
 import { makeRonnie } from "./ronnie/runner.js";
 import { easternDate, dailyDir, dailyNotePath, attachmentName, buildAttachmentBlock } from "./dailies.js";
 import { parseClearCommand } from "./commands.js";
+import { transcribe, transcriptionAvailable } from "./voice/transcribe.js";
 
 // ── Config ──────────────────────────────────────────────────────────────────
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
@@ -410,6 +411,14 @@ client.once("ready", () => {
   } else {
     console.log(`⚠️  No ALLOWED_USER_IDS set — responding to ALL users. Set this for safety!`);
   }
+  // One-time probe so the operator knows voice notes will work before the first
+  // one arrives. It's advisory only — the message handler still catches a failed
+  // transcribe — so a false negative here never blocks a turn.
+  console.log(
+    transcriptionAvailable()
+      ? "🎙️  Voice transcription ready (Parakeet int8 via onnx-asr)."
+      : "🎙️  Voice transcription unavailable — run scripts/setup-voice.sh to enable it."
+  );
 });
 
 // ── Connection watchdog ──────────────────────────────────────────────────────
@@ -515,6 +524,13 @@ function recordWorkoutNote(text) {
   }
 }
 
+// A Discord voice message carries the IsVoiceMessage flag; its lone attachment
+// is the Opus audio. The flag is how we tell a voice note from any other audio
+// file the user might drop in — only the former should be transcribed-as-speech.
+function isVoiceMessage(msg) {
+  return Boolean(msg.flags?.has?.(MessageFlags.IsVoiceMessage));
+}
+
 client.on("messageCreate", async (msg) => {
   // Ignore own messages and other bots
   if (msg.author.bot) return;
@@ -548,11 +564,39 @@ client.on("messageCreate", async (msg) => {
   }
 
   // Strip mention and trim whitespace from the message
-  const userMessage = msg.content.replace(/<@!?\d+>/g, "").trim();
+  let userMessage = msg.content.replace(/<@!?\d+>/g, "").trim();
 
   // Download any files first — a file sent with no caption arrives with empty
   // content and would otherwise be dropped by the guard below before it's seen.
-  const attachments = await saveInboundAttachments(msg);
+  let attachments = await saveInboundAttachments(msg);
+
+  // Voice notes: a Discord voice message is a single Opus attachment and no
+  // text. Transcribe it locally (voice/transcribe.js) and let the transcript BE
+  // the user message, so Alfred answers the words and never learns they were
+  // spoken — the same downstream path as typed text. The audio is not handed on
+  // as an attachment: Alfred can't read Opus, and the point is the text. Echo
+  // what was heard first, so a mishear ("cancel Thursday's meeting") is visible
+  // before the turn acts on it.
+  if (isVoiceMessage(msg) && attachments.length) {
+    const audioPath = attachments[0]; // a voice message carries exactly one file
+    await msg.channel.sendTyping().catch(() => {});
+    let transcript;
+    try {
+      transcript = await transcribe(audioPath);
+    } catch (err) {
+      console.error(`🎙️  Transcription failed: ${err.message}`);
+      await msg.reply("🎙️ Sorry — I couldn't transcribe that voice note.").catch(() => {});
+      return;
+    }
+    if (!transcript) {
+      await msg.reply("🎙️ I didn't catch any speech in that voice note.").catch(() => {});
+      return;
+    }
+    console.log(`🎙️  Voice note → "${transcript.slice(0, 100)}"`);
+    await msg.reply(`🎙️ heard: "${transcript}"`).catch(() => {});
+    userMessage = transcript;
+    attachments = []; // the transcript replaces the audio; don't inject the ogg
+  }
 
   if (!userMessage && attachments.length === 0) return;
 

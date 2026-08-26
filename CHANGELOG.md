@@ -5,6 +5,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
 
 ## [Unreleased]
 ### Added
+- **Voice messages → text, transcribed on-device.** A Discord voice note (a lone
+  Opus attachment with the `IsVoiceMessage` flag) is now transcribed locally and
+  its transcript *becomes* the user message — everything downstream is blind to
+  whether the turn was typed or spoken. `voice/transcribe.js` bridges to
+  `voice/transcribe.py`, which decodes Opus → 16 kHz mono with ffmpeg and runs
+  **NVIDIA Parakeet-TDT-0.6B int8** via onnx-asr on onnxruntime; the model loads
+  from the local Hugging Face cache with downloads disabled, so a live turn never
+  blocks on the network. Audio is transcribed on-device — a different privacy
+  category than text — and never leaves the box. The bot echoes `🎙️ heard: …`
+  before the turn runs, so a mishearing ("cancel Thursday's meeting") is visible
+  before Alfred acts on it. Measured on this CPU-only host: ~0.7s inference +
+  ~2s model load per short note (RTF ~0.06), ~630 MB on disk. Provisioned once by
+  `scripts/setup-voice.sh`; if it isn't set up, a voice note draws a graceful
+  reply and no turn. Reuses the inbound-attachment download primitive (#40).
 - **Strength load tracking — Garmin lifting → rolling per-muscle load.** A new
   `strength/` subsystem and `strength` skill turn Garmin strength workouts into
   progressive-overload signal. Reps and weight aren't in Intervals.icu's JSON
