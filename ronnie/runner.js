@@ -71,7 +71,7 @@ export function makeRonnie({
 
   // Poison fail-open: a message triage keeps choking on is surfaced, never lost.
   const surface = (msg) =>
-    notify([mailEmbed({ ...msg, category: "personal", summary: "Surfaced after repeated triage failures." })]);
+    notify([mailEmbed({ ...msg, category: "priority", summary: "Surfaced after repeated triage failures." })]);
 
   const consumer =
     typeof enrichOne === "function"
@@ -82,16 +82,18 @@ export function makeRonnie({
   // prefix so bot.js needn't know which is which:
   //   cal:<uid>  — remove the calendar event Ronnie imported from an invite.
   //   mail:<id>  — re-file a message Ronnie pinged as bulk (archive it), for
-  //                when Ronnie called a message personal and it wasn't.
+  //                when Ronnie called a message priority and it wasn't.
   const undo = async (token) => {
     const i = String(token).indexOf(":");
     const kind = i === -1 ? "cal" : token.slice(0, i);
     const arg = i === -1 ? token : token.slice(i + 1);
     if (kind === "mail") {
+      // Only priority mail is pinged, so an undo demotes a priority message to
+      // bulk: add Bulk, archive it, and drop the Priority parent it was under.
       await broker("POST /mail/label", {
         id: arg,
         addLabels: [labels?.bulk].filter(Boolean),
-        removeLabels: ["INBOX", labels?.interesting].filter(Boolean),
+        removeLabels: ["INBOX", labels?.priority].filter(Boolean),
       });
       return { kind: "mail", id: arg };
     }

@@ -16,8 +16,9 @@
 //      simply falls through to be triaged like any other mail.
 //
 //   2. Triage. Everything else runs the classify pipeline (blocklist → allowlist
-//      → grep → Haiku): bulk → a boring label and silence; personal → a watched
-//      label and a webhook ping carrying Haiku's one-sentence why.
+//      → grep → Haiku) into three tiers: priority → a label + a webhook ping
+//      carrying Haiku's one-sentence why; interesting → a label, kept in the inbox
+//      but silent (review later); bulk → a label + archived out, in silence.
 //
 // The message is *enriched* by the caller (bot.js), which holds the token and so
 // is the thing that can read the .ics part and the Authentication-Results header.
@@ -33,14 +34,15 @@ import { mailEmbed, inviteEmbed, post } from "./notify.js";
 // rest still runs), so a box that hasn't created the labels yet degrades to
 // "ping only" rather than erroring.
 const LABELS = {
-  bulk: process.env.RONNIE_LABEL_BULK || "",
+  priority: process.env.RONNIE_LABEL_PRIORITY || "",
   interesting: process.env.RONNIE_LABEL_INTERESTING || "",
+  bulk: process.env.RONNIE_LABEL_BULK || "",
   // The topic axis is nested UNDER attention: a child label per (tier, topic),
-  // e.g. topics.interesting.banking = the id of "INTURESTING/Banking". The real
-  // ids are resolved at boot (labels.js) from the Gmail sidebar and injected;
-  // this default is empty, so with nothing resolved a topic simply isn't applied
-  // (attention still is) rather than erroring.
-  topics: { interesting: {}, bulk: {} },
+  // e.g. topics.priority.banking = the id of "Priority/Banking". The real ids are
+  // resolved at boot (labels.js) from the Gmail sidebar and injected; this default
+  // is empty, so with nothing resolved a topic simply isn't applied (attention
+  // still is) rather than erroring.
+  topics: { priority: {}, interesting: {}, bulk: {} },
 };
 
 // A short human string for the invite embed's time line.
@@ -58,7 +60,7 @@ function whenOf(resource) {
  * @param {{
  *   broker: (routeKey: string, body: object) => Promise<any>,
  *   notify?: (embeds: any[]) => Promise<any>,
- *   labels?: {bulk: string, interesting: string, topics?: {interesting: object, bulk: object}},
+ *   labels?: {priority: string, interesting: string, bulk: string, topics?: object},
  *   owners?: string[],
  *   log?: (m: string) => void,
  * }} deps
@@ -104,32 +106,33 @@ export async function handleMessage(msg = {}, deps = {}) {
   }
 
   // ── 2. Triage path ────────────────────────────────────────────────────────
-  const { label, summary, reason, capped, usedHaiku, topic } = await classify(msg, { log });
-  const tier = label === "bulk" ? "bulk" : "interesting";
+  // label is the attention tier: priority | interesting | bulk.
+  const { label: tier, summary, reason, capped, usedHaiku, topic } = await classify(msg, { log });
   const labelId = labels[tier];
-  // The topic is a child of the tier: interesting/Banking vs bulk/Banking are
-  // different ids. Apply both the parent (so the parent view shows everything)
-  // and the child. An unresolved child id is skipped — attention still applies.
+  // The topic is a child of the tier: Priority/Banking, Interesting/Banking and
+  // Bulk/Banking are three different ids. Apply both the parent (so the parent
+  // view shows everything) and the child. An unresolved child id is skipped —
+  // attention still applies.
   const topicId = topic ? labels.topics?.[tier]?.[topic] || "" : "";
   const addLabels = [labelId, topicId].filter(Boolean);
   if (addLabels.length && msg.id) {
-    // Filed mail is *moved* — the BULK label plus archiving it out of the inbox
-    // (Gmail has no folders; a label + removing INBOX is the move). Interesting
-    // mail keeps its inbox spot and just gets the label + a ping. The topic
-    // label is added on either path without affecting the archive decision.
+    // Only Bulk is *moved* out of the inbox (Gmail has no folders; a label +
+    // removing INBOX is the archive). Priority and Interesting both keep their
+    // inbox spot — the difference between them is the ping, below, not the file.
     const body = { id: msg.id, addLabels };
-    if (label === "bulk") body.removeLabels = ["INBOX"];
+    if (tier === "bulk") body.removeLabels = ["INBOX"];
     await broker("POST /mail/label", body);
   }
-  // Tier 2: a personal message is worth a ping, carrying Haiku's one-liner; bulk
-  // is filed in silence.
-  if (label === "personal") {
-    await notify([mailEmbed({ ...msg, category: "personal", summary, topic })]);
+  // ONLY priority pings — it carries Haiku's one-liner. Interesting is kept in
+  // the inbox but silent (you review it later); bulk is filed in silence.
+  if (tier === "priority") {
+    await notify([mailEmbed({ ...msg, category: "priority", summary, topic })]);
   }
-  log(`✉️  ${label}${topic ? ` #${topic}` : ""} (${reason}) — ${msg.subject || "(no subject)"}`);
+  log(`✉️  ${tier}${topic ? ` #${topic}` : ""} (${reason}) — ${msg.subject || "(no subject)"}`);
   // capped is surfaced so the runner can post a one-time "hit the cap" notice;
   // usedHaiku tells the consumer whether to credit the breaker with a success.
-  return { action: label === "bulk" ? "filed" : "pinged", category: label, topic, reason, capped, usedHaiku };
+  const action = tier === "priority" ? "pinged" : tier === "bulk" ? "filed" : "kept";
+  return { action, category: tier, topic, reason, capped, usedHaiku };
 }
 
 /**

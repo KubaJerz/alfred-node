@@ -3,12 +3,13 @@
 //   blocklist -> allowlist -> grep   (prefilter.js, free)
 //   -> Haiku                          (haiku.js, paid, only when undecided)
 //
-// Returns { label: "personal"|"bulk", summary, reason }. summary is filled only
-// when Haiku judged it personal. reason names which stage decided, so a log or a
-// dry-run can show why — and how often the paid stage actually ran.
+// Returns { label: "priority"|"interesting"|"bulk", summary, reason, topic }.
+// summary is filled only when Haiku judged it priority (that's the ping text).
+// reason names which stage decided, so a log or a dry-run can show why — and how
+// often the paid stage actually ran.
 //
 // A daily cap guards the paid stage, counted in CALLS (a subscription has no
-// per-call bill): past the cap, an undecided message is surfaced as personal
+// per-call bill): past the cap, an undecided message is surfaced as priority
 // (never silently dropped), flagged `capped` so the runner can post a one-time
 // Discord notice, and no Haiku call is made — so a bad day can't run away.
 
@@ -30,11 +31,12 @@ export async function classify(msg = {}, opts = {}) {
     return finish(pre.decision, "", pre.reason, dTopic, false);
   }
 
-  // Undecided -> the paid stage, unless the daily call cap says stop.
+  // Undecided -> the paid stage, unless the daily call cap says stop. Past the
+  // cap, surface as priority (a ping) rather than bury anything.
   if (opts.capCalls && opts.meter) {
     const calls = await opts.meter.callsToday();
     if (calls >= opts.capCalls) {
-      return { ...finish("personal", "", "over daily cap", dTopic, false), capped: true };
+      return { ...finish("priority", "", "over daily cap", dTopic, false), capped: true };
     }
   }
 
@@ -47,10 +49,11 @@ export async function classify(msg = {}, opts = {}) {
 }
 
 // Assemble the verdict and apply the one cross-axis rule: taxes is ALWAYS the
-// interesting tier — a tax notice never files to bulk, whatever attention said.
+// interesting tier — a tax notice is worth keeping (never bulk) but is not a ping
+// (not priority); you review it at your leisure.
 function finish(label, summary, reason, topic, usedHaiku) {
-  if (topic === "taxes" && label === "bulk") {
-    return { label: "personal", summary, reason: `${reason} → taxes forces interesting`, topic, usedHaiku };
+  if (topic === "taxes" && label !== "interesting") {
+    return { label: "interesting", summary: "", reason: `${reason} → taxes forces interesting`, topic, usedHaiku };
   }
   return { label, summary, reason, topic, usedHaiku };
 }

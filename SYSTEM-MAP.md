@@ -173,10 +173,11 @@ flowchart TD
     PF -->|"undecided"| BR{"breaker.js<br/>Haiku up?"}
     BR -->|"ready"| HK["Haiku · haiku.js<br/>claude -p · meter.js · capped<br/>label + taxes/jobs topic"]
     BR -.->|"open → hold + back off 60s→30m"| Q
-    HK -->|"ok → success"| ACT{"attention<br/>+ topic"}
+    HK -->|"ok → success"| ACT{"tier<br/>+ topic"}
     HK -.->|"down → trip"| BR
-    ACT -->|"bulk → BULK (+topic) − INBOX"| RBR
-    ACT -->|"personal (+topic) → label"| PING["ping · notify.js"]
+    ACT -->|"bulk → Bulk/topic − INBOX"| RBR
+    ACT -->|"interesting → label, kept, silent"| RBR
+    ACT -->|"priority → label + ping"| PING["ping · notify.js"]
     RBR["Ronnie's broker · broker-routes.js<br/>3 routes · own token"] ==>|"label / import / remove"| GM["Gmail / Calendar"]
     PING --> DIS["Discord webhook · write-only"]
 
@@ -209,8 +210,8 @@ Seven properties, each a decision made on purpose:
   the cooldown grows exponentially (60s → 30 min), letting one probe through each
   time; any success closes it and the backlog drains. Only a *service* failure
   (`HaikuDownError`) does this — a junk verdict fails that one message open, and a
-  poison message that keeps throwing is surfaced as personal after 3 tries and
-  dropped, so one bad message can't wedge everything behind it.
+  poison message that keeps throwing is surfaced as priority (a ping) after 3
+  tries and dropped, so one bad message can't wedge everything behind it.
 - **Two paths, invite first.** An `.ics` from one of Kuba's own addresses that
   passes DKIM/DMARC (`sender-auth.js`) is the *only* thing that reaches the
   calendar routes (`ics.js` turns it into an import or a remove). Anything that
@@ -222,13 +223,17 @@ Seven properties, each a decision made on purpose:
   `undecided` spends one Haiku call (`haiku.js`), the way Alfred runs Claude —
   subscription, no API key. `meter.js` logs every call to `ronnie-usage.jsonl` and
   estimates cost at official token rates; past a daily **call** cap Ronnie
-  surfaces the rest as personal and posts a one-time notice. Bulk is *moved* (the
-  BULK label + `removeLabels: ["INBOX"]` is the archive); personal is *pinged*
-  with Haiku's one-sentence why (`notify.js`).
-- **Topic is a second axis, nested under attention** (`topics.js`, `labels.js`).
-  Attention (`Interesting`/`Bulk`) is the parent and decides *ping + archive*; a
-  topic is a child *under* it, so the same mail is **Interesting/Banking** (a fraud
-  alert) or **Bulk/Banking** (a rewards blast). `entropy`/`banking`/`jobs` are
+  surfaces the rest as priority and posts a one-time notice. Haiku sorts into
+  three tiers: **Bulk** is *moved* (the label + `removeLabels: ["INBOX"]` is the
+  archive); **Interesting** is labelled but kept in the inbox, silent; **Priority**
+  is labelled, kept, and *pinged* with Haiku's one-sentence why (`notify.js`).
+- **Attention is three tiers; topic is a second axis nested under it**
+  (`topics.js`, `labels.js`). The parent is the tier by *urgency*: **Priority**
+  (interrupt now — the only tier that pings — kept in the inbox), **Interesting**
+  (keep + read later, silent, kept in the inbox), **Bulk** (noise, archived out).
+  A topic is a child *under* the tier, so the same mail is **Priority/Banking** (a
+  fraud alert), **Interesting/Banking** (a "new external account" confirmation), or
+  **Bulk/Banking** (a rewards blast). `entropy`/`banking`/`jobs` are
   deterministic sender-domain rules — matching a domain **or any subdomain** of it,
   since banks and boards mail from subdomains — and are never the model's to
   assert, so injection can't forge them; `taxes` (and an active `jobs` thread that

@@ -1,17 +1,20 @@
 // Ronnie's label taxonomy, resolved to Gmail ids.
 //
-// Two axes, nested as one tree: ATTENTION is the parent (the existing
-// interesting/bulk labels, whatever they're named — "INTURESTING"/"BULK" here),
-// and TOPIC is a child under it. So a message is `<Interesting>/Banking` (a
-// fraud alert) or `<Bulk>/Banking` (a rewards blast). Taxes is the one topic
-// that only ever lives under the interesting parent — a tax notice is never bulk
-// (classify.js enforces the tier; this file just doesn't make a Bulk/Taxes).
+// Two axes, nested as one tree. ATTENTION is the parent — three tiers by urgency:
+//   Priority     interrupt now (the only tier that pings), stays in the inbox
+//   Interesting  keep + read later, no ping, stays in the inbox
+//   Bulk         noise, archived out of the inbox
+// TOPIC is a child under each, so a message is Priority/Banking (a fraud alert),
+// Interesting/Banking (a "new external account" confirmation), or Bulk/Banking (a
+// rewards blast). Taxes is interesting-only — worth keeping, never a ping and
+// never bulk (classify.js enforces the tier; this file just doesn't make a
+// Priority/Taxes or Bulk/Taxes).
 //
 // The child label NAME is `${parentName}/${Title}`, so it nests under the real
-// parent in Gmail's sidebar. We derive the parent names from their ids (the two
-// the live bot already has in env), then resolve — or, with { create: true },
-// create — each child and hand back a map keyed by tier then topic. `gmail` is
-// injectable so tests never hit the API.
+// parent in Gmail's sidebar. Interesting/Bulk parents come from the two ids the
+// live bot has in env; Priority is newer and is passed in the same way (bot.js
+// ensures it exists). With { create: true } the children are created; otherwise
+// only what exists is resolved. `gmail` is injectable so tests never hit the API.
 
 import { ensureLabels } from "../google/gmail-labels.js";
 
@@ -20,29 +23,37 @@ export const TOPIC_TITLES = { banking: "Banking", jobs: "Jobs", taxes: "Taxes", 
 
 // Which topics exist under each tier. Taxes is interesting-only, on purpose.
 export const TIER_TOPICS = {
+  priority: ["banking", "jobs", "entropy"],
   interesting: ["banking", "jobs", "taxes", "entropy"],
   bulk: ["banking", "jobs", "entropy"],
 };
 
+const TIERS = ["priority", "interesting", "bulk"];
+
 /**
- * @param {{gmail: object, interestingId: string, bulkId: string, create?: boolean}} o
+ * @param {{gmail: object, priorityId?: string, interestingId: string, bulkId: string, create?: boolean}} o
  * @returns {Promise<{
- *   interesting: string, bulk: string,
- *   topics: { interesting: Record<string,string>, bulk: Record<string,string> },
+ *   priority: string, interesting: string, bulk: string,
+ *   topics: { priority: Record<string,string>, interesting: Record<string,string>, bulk: Record<string,string> },
  *   created: string[]
  * }>}
  */
-export async function resolveRonnieLabels({ gmail, interestingId, bulkId, create = false } = {}) {
+export async function resolveRonnieLabels({ gmail, priorityId, interestingId, bulkId, create = false } = {}) {
   const list = await gmail.users.labels.list({ userId: "me" });
   const all = list.data?.labels || [];
   const id2name = new Map(all.map((l) => [l.id, l.name]));
   const name2id = new Map(all.map((l) => [l.name, l.id]));
 
-  const parentName = { interesting: id2name.get(interestingId), bulk: id2name.get(bulkId) };
+  const parentId = { priority: priorityId, interesting: interestingId, bulk: bulkId };
+  const parentName = {
+    priority: id2name.get(priorityId),
+    interesting: id2name.get(interestingId),
+    bulk: id2name.get(bulkId),
+  };
 
   // Every child name we want, tier by tier.
   const wanted = []; // { tier, topic, name }
-  for (const tier of ["interesting", "bulk"]) {
+  for (const tier of TIERS) {
     const pname = parentName[tier];
     if (!pname) continue; // parent id not found → skip that tier's children
     for (const topic of TIER_TOPICS[tier]) {
@@ -58,8 +69,8 @@ export async function resolveRonnieLabels({ gmail, interestingId, bulkId, create
     created = res.created;
   }
 
-  const topics = { interesting: {}, bulk: {} };
+  const topics = { priority: {}, interesting: {}, bulk: {} };
   for (const w of wanted) topics[w.tier][w.topic] = name2id.get(w.name) || "";
 
-  return { interesting: interestingId, bulk: bulkId, topics, created };
+  return { priority: priorityId || "", interesting: interestingId, bulk: bulkId, topics, created };
 }

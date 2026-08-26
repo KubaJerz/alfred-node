@@ -15,6 +15,7 @@ import { drainMailDigest } from "./google/gmail-buffer.js";
 import { RONNIE_ROUTES } from "./ronnie/broker-routes.js";
 import { makeRonnie } from "./ronnie/runner.js";
 import { resolveRonnieLabels } from "./ronnie/labels.js";
+import { ensureLabels } from "./google/gmail-labels.js";
 import { easternDate, dailyDir, dailyNotePath, attachmentName, buildAttachmentBlock } from "./dailies.js";
 import { parseClearCommand } from "./commands.js";
 
@@ -959,8 +960,13 @@ if (ronnieConfigured) {
   let labels;
   if (sharedGmail) {
     try {
+      // Priority is the newer top-level parent (the ping tier); Interesting/Bulk
+      // come from env. Ensure Priority exists, then resolve the nested children.
+      let priorityId = process.env.RONNIE_LABEL_PRIORITY;
+      if (!priorityId) priorityId = (await ensureLabels(["Priority"], { gmail: sharedGmail })).ids["Priority"];
       labels = await resolveRonnieLabels({
         gmail: sharedGmail,
+        priorityId,
         interestingId: process.env.RONNIE_LABEL_INTERESTING,
         bulkId: process.env.RONNIE_LABEL_BULK,
         create: true,

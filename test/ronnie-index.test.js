@@ -3,10 +3,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { handleMessage, makeBrokerClient } from "../ronnie/index.js";
 
-// A deterministic classify stub so unit tests never spawn `claude -p`.
+// A deterministic classify stub so unit tests never spawn `claude -p`. A
+// newsletter is bulk; a plain human message is priority (the ping tier).
 const stubClassify = async (m) => {
   const bulk = !!(m.headers?.["list-unsubscribe"] || m.headers?.["list-id"] || /newsletter|news@/i.test(m.from || ""));
-  return { label: bulk ? "bulk" : "personal", summary: bulk ? "" : "why" };
+  return { label: bulk ? "bulk" : "priority", summary: bulk ? "" : "why" };
 };
 
 // A fake broker + notify that record what Ronnie tried to do.
@@ -26,9 +27,11 @@ function harness() {
         return { posted: true };
       },
       labels: {
-        bulk: "L_BULK",
+        priority: "L_PRI",
         interesting: "L_INT",
+        bulk: "L_BULK",
         topics: {
+          priority: { banking: "LP_BANK", jobs: "LP_JOB", entropy: "LP_ENT" },
           interesting: { banking: "LI_BANK", jobs: "LI_JOB", taxes: "LI_TAX", entropy: "LI_ENT" },
           bulk: { banking: "LB_BANK", jobs: "LB_JOB", entropy: "LB_ENT" },
         },
@@ -58,41 +61,51 @@ const REQUEST = [
   "END:VCALENDAR",
 ].join("\r\n");
 
-test("a personal message is labelled interesting and pinged", async () => {
+test("a priority message is labelled Priority, kept in inbox, and pinged", async () => {
   const h = harness();
   const r = await handleMessage({ id: "m1", from: "jane@gmail.com", subject: "coffee?" }, h.deps);
   assert.equal(r.action, "pinged");
-  assert.deepEqual(h.calls[0], { routeKey: "POST /mail/label", body: { id: "m1", addLabels: ["L_INT"] } });
+  assert.deepEqual(h.calls[0], { routeKey: "POST /mail/label", body: { id: "m1", addLabels: ["L_PRI"] } });
+  assert.equal(h.calls[0].body.removeLabels, undefined); // priority stays in inbox
   assert.equal(h.posts.length, 1); // pinged
 });
 
-test("an interesting topic nests under the interesting parent (child id)", async () => {
+test("a priority topic nests under the Priority parent (child id) and pings", async () => {
   const h = harness();
-  h.deps.classify = async () => ({ label: "personal", summary: "Interview.", topic: "jobs" });
+  h.deps.classify = async () => ({ label: "priority", summary: "Interview.", topic: "jobs" });
   const r = await handleMessage({ id: "m3", from: "recruiter@acme.io", subject: "offer" }, h.deps);
   assert.equal(r.action, "pinged");
-  assert.equal(r.topic, "jobs");
-  assert.deepEqual(h.calls[0].body.addLabels, ["L_INT", "LI_JOB"]); // parent + interesting/jobs
-  assert.equal(h.calls[0].body.removeLabels, undefined); // interesting stays in inbox
+  assert.deepEqual(h.calls[0].body.addLabels, ["L_PRI", "LP_JOB"]); // parent + priority/jobs
+  assert.equal(h.calls[0].body.removeLabels, undefined); // stays in inbox
   assert.match(h.posts[0][0].author.name, /#jobs/); // topic shown on the ping
 });
 
-test("the SAME topic picks a different child under the bulk parent", async () => {
+test("an interesting message is kept in the inbox but NOT pinged", async () => {
+  const h = harness();
+  h.deps.classify = async () => ({ label: "interesting", summary: "", topic: "banking" });
+  const r = await handleMessage({ id: "m3b", from: "alerts@chase.com", subject: "new external account added" }, h.deps);
+  assert.equal(r.action, "kept");
+  assert.deepEqual(h.calls[0].body.addLabels, ["L_INT", "LI_BANK"]); // Interesting/Banking
+  assert.equal(h.calls[0].body.removeLabels, undefined); // stays in inbox
+  assert.equal(h.posts.length, 0); // NO ping — review later
+});
+
+test("the SAME topic picks a different child under the bulk parent, archived + silent", async () => {
   const h = harness();
   h.deps.classify = async () => ({ label: "bulk", summary: "", topic: "entropy" });
   const r = await handleMessage({ id: "m4", from: "news@entrpy.co", subject: "digest" }, h.deps);
   assert.equal(r.action, "filed");
   assert.deepEqual(h.calls[0].body.addLabels, ["L_BULK", "LB_ENT"]); // parent + bulk/entropy
-  assert.deepEqual(h.calls[0].body.removeLabels, ["INBOX"]); // still archived
-  assert.equal(h.posts.length, 0); // bulk is silent, topic or not
+  assert.deepEqual(h.calls[0].body.removeLabels, ["INBOX"]); // archived out
+  assert.equal(h.posts.length, 0); // bulk is silent
 });
 
 test("an unresolved child id degrades to attention-only (no crash)", async () => {
   const h = harness();
-  h.deps.labels = { bulk: "L_BULK", interesting: "L_INT", topics: { interesting: { jobs: "" }, bulk: {} } };
-  h.deps.classify = async () => ({ label: "personal", summary: "x", topic: "jobs" });
+  h.deps.labels = { priority: "L_PRI", interesting: "L_INT", bulk: "L_BULK", topics: { priority: { jobs: "" }, interesting: {}, bulk: {} } };
+  h.deps.classify = async () => ({ label: "priority", summary: "x", topic: "jobs" });
   const r = await handleMessage({ id: "m5", from: "a@b", subject: "s" }, h.deps);
-  assert.deepEqual(h.calls[0].body.addLabels, ["L_INT"]); // child id blank → skipped
+  assert.deepEqual(h.calls[0].body.addLabels, ["L_PRI"]); // child id blank → skipped
   assert.equal(r.topic, "jobs");
 });
 
@@ -108,10 +121,10 @@ test("a bulk message is labelled bulk and NOT pinged", async () => {
   assert.equal(h.posts.length, 0); // filed in silence
 });
 
-test("a personal message keeps its inbox spot (not archived)", async () => {
+test("a priority message keeps its inbox spot (not archived)", async () => {
   const h = harness();
   await handleMessage({ id: "m3", from: "jane@gmail.com", subject: "coffee?" }, h.deps);
-  assert.equal(h.calls[0].body.addLabels[0], "L_INT");
+  assert.equal(h.calls[0].body.addLabels[0], "L_PRI");
   assert.equal(h.calls[0].body.removeLabels, undefined); // stays in the inbox
 });
 
