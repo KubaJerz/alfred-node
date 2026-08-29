@@ -285,6 +285,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
   invite anyone" holds even if Alfred asks for it or never read the rules.
 
 ### Fixed
+- **Voice notes were dropped on the workout-log channel.** The workout-log
+  branch ran before transcription and read `msg.content`, which is empty for a
+  voice message. So a spoken workout note logged nothing, and the branch
+  returned before the transcriber could run. Transcription now runs first, for
+  every channel: a voicemail becomes its transcript before any channel routing.
+  A spoken note is logged the same as a typed one, and voice works on any
+  channel input. (#57)
 - **The daily note keyed on two different dates.** `loadContext` computed
   "today" in UTC while `dream.sh` used the box's local time, so near midnight
   they could pick different notes — a turn seeded with one day's note while the
