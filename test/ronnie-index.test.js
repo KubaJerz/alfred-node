@@ -82,7 +82,7 @@ test("a priority topic nests under the Priority parent (child id) and pings", as
   h.deps.classify = async () => ({ label: "priority", summary: "Interview.", topic: "jobs" });
   const r = await handleMessage({ id: "m3", from: "recruiter@acme.io", subject: "offer" }, h.deps);
   assert.equal(r.action, "pinged");
-  assert.deepEqual(h.calls[0].body.addLabels, ["L_PRI", "LP_JOB"]); // parent + priority/jobs
+  assert.deepEqual(h.calls[0].body.addLabels, ["LP_JOB"]); // priority/jobs child only
   assert.equal(h.calls[0].body.removeLabels, undefined); // stays in inbox
   assert.match(h.posts[0][0].author.name, /#jobs/); // topic shown on the ping
 });
@@ -92,7 +92,7 @@ test("an interesting message is kept in the inbox but NOT pinged", async () => {
   h.deps.classify = async () => ({ label: "interesting", summary: "", topic: "banking" });
   const r = await handleMessage({ id: "m3b", from: "alerts@chase.com", subject: "new external account added" }, h.deps);
   assert.equal(r.action, "kept");
-  assert.deepEqual(h.calls[0].body.addLabels, ["L_INT", "LI_BANK"]); // Interesting/Banking
+  assert.deepEqual(h.calls[0].body.addLabels, ["LI_BANK"]); // Interesting/Banking only
   assert.equal(h.calls[0].body.removeLabels, undefined); // stays in inbox
   assert.equal(h.posts.length, 0); // NO ping — review later
 });
@@ -102,7 +102,7 @@ test("the SAME topic picks a different child under the bulk parent, archived + s
   h.deps.classify = async () => ({ label: "bulk", summary: "", topic: "entropy" });
   const r = await handleMessage({ id: "m4", from: "news@entrpy.co", subject: "digest" }, h.deps);
   assert.equal(r.action, "filed");
-  assert.deepEqual(h.calls[0].body.addLabels, ["L_BULK", "LB_ENT"]); // parent + bulk/entropy
+  assert.deepEqual(h.calls[0].body.addLabels, ["LB_ENT"]); // bulk/entropy only
   assert.deepEqual(h.calls[0].body.removeLabels, ["INBOX"]); // archived out
   assert.equal(h.posts.length, 0); // bulk is silent
 });

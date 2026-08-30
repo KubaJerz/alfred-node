@@ -185,11 +185,14 @@ export async function handleMessage(msg = {}, deps = {}) {
   const { label: tier, summary, reason, capped, usedHaiku, topic } = await classify(msg, { log });
   const labelId = labels[tier];
   // The topic is a child of the tier: Priority/Banking, Interesting/Banking and
-  // Bulk/Banking are three different ids. Apply both the parent (so the parent
-  // view shows everything) and the child. An unresolved child id is skipped —
-  // attention still applies.
+  // Bulk/Banking are three different ids. Apply exactly one label. Use the
+  // nested topic child when it resolved. Use the bare tier otherwise. Each
+  // message then shows a single chip. A topic'd message lives only under its
+  // sub-label. So the tier parent view lists only untopiced mail. An unresolved
+  // or absent topic falls back to the tier. Only Bulk removes INBOX; that logic
+  // is unchanged and lives just below.
   const topicId = topic ? labels.topics?.[tier]?.[topic] || "" : "";
-  const addLabels = [labelId, topicId].filter(Boolean);
+  const addLabels = [topicId || labelId].filter(Boolean);
   if (addLabels.length && msg.id) {
     // Only Bulk is *moved* out of the inbox (Gmail has no folders; a label +
     // removing INBOX is the archive). Priority and Interesting both keep their
