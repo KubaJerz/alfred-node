@@ -79,10 +79,14 @@ CREATE TABLE IF NOT EXISTS cardio (
 -- Not FK'd to a workout — the interpreter matches it by time + content, because
 -- at arrival the workout may be unsynced and a day can hold two.
 CREATE TABLE IF NOT EXISTS workout_note (
-  id          INTEGER PRIMARY KEY AUTOINCREMENT,
-  received_at TEXT NOT NULL,               -- ISO timestamp the message arrived
-  note_date   TEXT NOT NULL,               -- local date, for coarse matching
-  text        TEXT NOT NULL
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  received_at      TEXT NOT NULL,          -- ISO timestamp the message arrived
+  note_date        TEXT NOT NULL,          -- local date the message arrived (kept for record)
+  text             TEXT NOT NULL,
+  activity_id      TEXT REFERENCES workout(id),  -- routed target; NULL until placed
+  routed_at        TEXT,                   -- ISO when routing settled it; NULL = pending
+  route_confidence REAL,                   -- the model's confidence in the placement
+  route_attempts   INTEGER NOT NULL DEFAULT 0    -- unmatched routing passes so far
 );
 
 -- Config: exercise -> muscle contribution. Seeded once, then editable in place.
@@ -123,8 +127,29 @@ export function openDb(dbPath = defaultDbPath()) {
   db.exec("PRAGMA foreign_keys = ON;");
   if (dbPath !== ":memory:") db.exec("PRAGMA journal_mode = WAL;");
   db.exec(SCHEMA);
+  migrate(db);
   seedConfig(db);
   return db;
+}
+
+// Bring an existing database up to the current schema. `CREATE TABLE IF NOT
+// EXISTS` never adds a column to a table that already exists, so the routing
+// columns on workout_note (added after the table shipped) need an explicit
+// ALTER on databases created before them. Each add is guarded by a column check,
+// so this is a no-op on a fresh DB (SCHEMA already made the columns) and on an
+// already-migrated one. The DB is derived data, but re-interpreting all history
+// is many model calls, so migrating in place beats rebuilding.
+function migrate(db) {
+  const cols = new Set(db.prepare("PRAGMA table_info(workout_note)").all().map((c) => c.name));
+  const adds = [
+    ["activity_id",      "ALTER TABLE workout_note ADD COLUMN activity_id TEXT REFERENCES workout(id)"],
+    ["routed_at",        "ALTER TABLE workout_note ADD COLUMN routed_at TEXT"],
+    ["route_confidence", "ALTER TABLE workout_note ADD COLUMN route_confidence REAL"],
+    ["route_attempts",   "ALTER TABLE workout_note ADD COLUMN route_attempts INTEGER NOT NULL DEFAULT 0"],
+  ];
+  for (const [name, sql] of adds) if (!cols.has(name)) db.exec(sql);
+  // Safe now that activity_id is guaranteed to exist.
+  db.exec("CREATE INDEX IF NOT EXISTS idx_note_activity ON workout_note(activity_id)");
 }
 
 // Seed config without clobbering edits made in the DB. Templates seed only when
