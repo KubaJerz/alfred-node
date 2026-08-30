@@ -363,8 +363,13 @@ flowchart TD
     ICU["Intervals.icu"] -->|"pull: nightly + on-command"| FITD["FIT decode<br/>intervals/fit.js"]
     FITD --> RAW[("raw_set<br/>immutable")]
     NOTEIN["#workout-log msg"] -->|"bot.js"| NOTE[("workout_note<br/>immutable")]
+    NOTE --> ROUTE{{"note routing<br/>strength/notes.js"}}
+    RAW --> ROUTE
+    ROUTE -->|"activity_id"| NOTE
     RAW --> HAIKU{{"Haiku interpreter<br/>strength/digest.js"}}
-    NOTE --> HAIKU
+    NOTE -->|"by activity_id"| HAIKU
+    MODEL["headless Haiku<br/>strength/model.js"] -.-> ROUTE
+    MODEL -.-> HAIKU
     CFG["templates + factor map<br/>strength/config.js"] --> HAIKU
     HAIKU -->|"validated write"| LIFT[("lift_set + set_muscle")]
     LIFT --> VIEWS["rolling views<br/>strength/views.js"]
@@ -374,15 +379,20 @@ flowchart TD
 The layers mirror the design in `docs/strength-load-design.md`. The SQLite store
 (`strength/db.js`, at `agent/var/strength.db`, gitignored) holds the schema and
 the config seed; `strength/ingest.js` walks the activity window and lands each
-workout (lifting → `raw_set`, else the cardio table); `strength/digest.js` runs a
-headless Haiku over the raw sets to write the interpreted `lift_set`, and applies
-the muscle factor map itself so the numbers stay exact; `strength/views.js`
-derives the 7-/28-day ACWR and 14-day trend; `strength/plot.js` renders the
-figure Alfred sends. The pull needs the key, so it runs broker-side through the
-`fit-sets` route on-command, and in-process via `strength/nightly.js` (from
-`dream.sh`) overnight. The `strength` skill and `bin/strength.js` are Alfred's
-read surface; the DB itself is local state, so those reads don't cross the broker.
-The one thing the broker still gates is the FIT download and decode.
+workout (lifting → `raw_set`, else the cardio table). A digest first runs
+`strength/notes.js` — one model call routes every pending free-text note to the
+session it describes and records the placement on `workout_note` — then
+`strength/digest.js` runs a headless Haiku over each workout's raw sets (reading
+its routed note by `activity_id`) to write the interpreted `lift_set`, applying
+the muscle factor map itself so the numbers stay exact. Both model steps share
+the spawner in `strength/model.js`. `strength/views.js` derives the 7-/28-day
+ACWR and 14-day trend; `strength/plot.js` renders the figure Alfred sends. The
+pull needs the key, so it runs broker-side through the `fit-sets` route
+on-command, and in-process via `strength/nightly.js` (from `dream.sh`) overnight.
+The `strength` skill and `bin/strength.js` are Alfred's read surface (the latter
+also maps a new exercise via `exercise add`); the DB itself is local state, so
+those reads don't cross the broker. The one thing the broker still gates is the
+FIT download and decode.
 
 ## Memory
 

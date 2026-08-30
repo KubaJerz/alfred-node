@@ -1,7 +1,17 @@
 # Workout note routing — spec
 
-Status: **design agreed, not implemented.** Written 2026-08-30 for whoever picks
-this up. Companion to `docs/strength-load-design.md`.
+Status: **implemented** on `feat/workout-note-routing` (2026-08-30). Written as a
+spec, kept as the design record. Companion to `docs/strength-load-design.md`.
+
+What shipped vs. this spec: the schema (§3), the `routeNotes` step (§4) in
+`strength/notes.js`, pending/abandon handling (§5), the interpret lookup by
+`activity_id` and the optional misroute check (§6) all landed as described. Two
+refinements were made during the build: routing carries a **recency prior**
+(default to the day the note was said; map back in time only on wording like
+"the last arms" / "two days ago"), and abandoned notes are encoded as
+`routed_at` set with `activity_id` NULL and surfaced once in the digest output.
+The §8 CLI (`strength.js exercise …`) also shipped. The `recentSessions` helper
+(§4's candidate content) landed earlier on `fix/strength-interpret-and-seed`.
 
 Scope: make a free-text workout note reach the interpretation of the workout it
 actually describes, including when the note arrives days late or before the
@@ -238,3 +248,105 @@ alongside this work. All 262 tests pass with them in.
   base and therefore today's ACWR. Agreed this is correct behaviour, but the digest
   should *report* it ("re-interpreted 8/20; legs 28d base 738 → 812") so a shift in
   old numbers is never silent.
+
+---
+
+## 9. Edge cases handled
+
+Note attachment has to cope with notes that arrive out of order, out of time, or
+about nothing at all. Each case below is listed as **the fit** (where in the flow
+it shows up and why it's a real concern) and **the solution** (how the code
+handles it, in `strength/notes.js` unless noted).
+
+**The note beats the sync — the common case.**
+*Fit:* the note is spoken right after training, before Intervals has uploaded the
+workout, so there is nothing to attach to at arrival.
+*Solution:* routing runs at digest time, after `syncStrength` and before the
+interpret loop (`digest.js`), not at arrival — by then the day's workout is a
+candidate. If it still isn't synced, the note stays pending (see abandonment).
+
+**A late or retrospective note ("the last arms", "two days ago").**
+*Fit:* "last"/"yesterday"/"two days ago" is relative to when the note was *said*,
+which may be days after the session.
+*Solution:* the candidate window is anchored to the note's `received_at`, not the
+clock — `from = earliest pending note − CANDIDATE_WINDOW_DAYS` (14). The prompt
+carries a recency prior: default to the day the note was said, and map back in
+time only on wording that points back, resolved against the said-time.
+
+**A note lands on an already-interpreted workout.**
+*Fit:* the highest-value case — 8/28 was interpreted days ago without the note.
+*Solution:* on a confident route, if the target's `interpreted_at` is set,
+`routeNotes` nulls it and records the id in `reinterpret`. Because routing runs
+before the interpret loop in the same pass, that workout re-interprets in the
+same digest — the note re-shapes it now, not a run later. Safe because
+`interpretWorkout` rebuilds `lift_set`/`set_muscle` wholesale.
+
+**Ambiguous or low-confidence match.**
+*Fit:* the note is vague, or two sessions fit equally well.
+*Solution:* a confidence floor, `ROUTE_CONFIDENCE_MIN` (0.6). Below it nothing is
+written; the note bumps `route_attempts` and stays pending for a later pass, when
+the session may have gained interpreted content to match against.
+
+**A hallucinated `activity_id`.**
+*Fit:* the model returns an id it was never shown.
+*Solution:* every returned id is checked against the candidate set actually put in
+the prompt (`candById`). An unknown id is treated as no match — never written —
+so a bad foreign key can't reach the database.
+
+**A note that matches nothing, or genuine chatter.**
+*Fit:* a #workout-log message about no session, or a note whose workout never
+syncs.
+*Solution:* it stays pending and retries each digest, bounded by
+`ABANDON_ATTEMPTS` (5) or `ABANDON_AGE_MS` (7 days), whichever trips first. On
+abandon it is marked terminal (`routed_at` set, `activity_id` NULL) and returned
+in `abandoned`, which the digest surfaces once for Kuba to place — neither
+retried forever nor dropped silently.
+
+**Two notes, two different sessions, one pass.**
+*Fit:* two queued notes describe two different days.
+*Solution:* all pending notes go in one prompt keyed `n1, n2, …`; the model
+returns a route per note and is told two notes rarely describe the same session.
+The shared view is what lets it avoid handing both to the same workout.
+
+**Two notes about the same session.**
+*Fit:* Kuba adds a second clarification about one workout on a later day.
+*Solution:* both get the same `activity_id`; interpret reads notes
+`WHERE activity_id = ? ORDER BY received_at`, so both reach the prompt in the
+order spoken. (`workout.note_id` stays NULL when there is more than one; the notes
+are still reachable through `activity_id`.)
+
+**The uninterpreted session that most needs a note.**
+*Fit:* the session a note describes has not been interpreted yet, so it has no
+style or exercise content to match on — exactly the session that most needs the
+note.
+*Solution:* `routingCandidates` describes an uninterpreted workout by its
+active-set count plus a provisional style — `provisionalStyle` tallies the watch
+categories into a best guess (null on empty or tie) — enough for the model to
+place a note on it.
+
+**A misroute discovered at interpretation.**
+*Fit:* routing placed the note on the wrong day; the interpreter, seeing both the
+note and the sets, notices they describe different work.
+*Solution:* a cheap second opinion — the interpret prompt lets the model return
+`note_fits:false`, on which `interpretWorkout` unlinks the note (`activity_id` and
+`routed_at` → NULL, `route_attempts` bumped) so the next digest routes it
+elsewhere. The workout is still stamped interpreted: it is labelled correctly, it
+just no longer claims a note that was never its. Bounded by the same attempt cap.
+
+**No candidates at all.**
+*Fit:* a note is pending but no lifting workouts are synced in the window yet.
+*Solution:* `routeNotes` skips the model call entirely when the candidate list is
+empty and lets the note age through the pending/abandon path — no wasted call in
+the note-beats-sync window.
+
+**Routing itself fails (model timeout, bad JSON).**
+*Fit:* the routing model call throws mid-digest.
+*Solution:* `digest` wraps `routeNotes` in its own try/catch (`routingError`),
+mirroring the sync guard — routing failure logs and the interpret loop still
+runs. One broken step never sinks the pass.
+
+The deterministic cases — hallucinated id, abandonment bounds, no-candidates,
+double-assignment, provisional style, misroute mechanics — are covered in
+`test/strength-notes.test.js` and `test/strength-digest.test.js`. The two model
+*judgments* (which candidate, and whether a note fits) are pinned mechanically in
+those tests and demonstrated on live data by the 8/30 note re-interpretation.

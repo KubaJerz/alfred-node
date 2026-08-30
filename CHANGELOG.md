@@ -298,6 +298,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
   key added later never reached an existing database; it now inserts any absent
   key and leaves existing mappings — hand edits included — untouched. Adds
   `upsertExercise`, `listExercises`, and `unmappedSets`.
+- **Strength: workout notes route to the session they describe.** A free-text
+  note from #workout-log used to reach an interpretation only if the workout was
+  logged the same calendar day the note was spoken — so late or pre-sync notes
+  were invisible, and `workout.note_id` was NULL on every row. A new digest step
+  (`strength/notes.js` `routeNotes`, run after sync and before interpret) shows
+  one model call every pending note against every candidate session at once —
+  each described by content (an interpreted session by its top exercises, an
+  uninterpreted one by a watch-tallied provisional style) — and records the
+  placement on `workout_note` (`activity_id`, `routed_at`, `route_confidence`,
+  `route_attempts`; a migration adds them to existing DBs). A note carries a
+  recency prior — it defaults to the day it was said and maps back in time only
+  on wording like "the last arms" or "two days ago". Placing a note on an
+  already-interpreted session re-opens it, so the note re-shapes that
+  interpretation in the same pass; the interpreter now reads its note by
+  `activity_id` and can flag a misroute, which unlinks the note and re-pends it.
+  A note that matches nothing stays pending and is retried next digest, then
+  abandoned after 5 tries or 7 days and surfaced once for Kuba to place. Also
+  adds `strength.js exercise <list | add | unmapped>` so an exercise a note names
+  can be mapped on the spot. The Haiku spawner moved to `strength/model.js`,
+  shared by interpret and routing.
 
 ### Changed
 - **Dailies are one folder per day, not one file.** `dailies/YYYY-MM-DD.md`
