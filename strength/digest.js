@@ -20,24 +20,48 @@ import { kgToLb } from "./config.js";
 
 const HAIKU_MODEL = "claude-haiku-4-5-20251001";
 
+// One interpretation is a whole-session reasoning call; observed runs land at
+// 100-170s, so the old 120s cap was inside the noise. Overridable per-run.
+const INTERPRET_TIMEOUT_MS = parseInt(process.env.STRENGTH_INTERPRET_TIMEOUT_MS || "240000");
+
 // Spawn a headless Haiku and return the model's text. Mirrors bot.js's runClaude
 // envelope handling: --output-format json wraps the reply as {result: "..."}.
-function spawnHaiku(prompt, { timeoutMs = 120000 } = {}) {
+//
+// We own the timer rather than using spawn's `timeout` option, for one reason:
+// when that option fires, `claude` catches the SIGTERM and exits 143 with a NULL
+// signal, indistinguishable from an ordinary non-zero exit. Worse, if the model
+// had already flushed part of its JSON, the old code took the partial text as a
+// success — a timeout could silently produce a half-labelled workout. A timeout
+// is now always an error, loudly, whatever made it to stdout.
+function spawnHaiku(prompt, { timeoutMs = INTERPRET_TIMEOUT_MS } = {}) {
   return new Promise((resolve, reject) => {
     const proc = spawn(
       "claude",
       ["-p", prompt, "--model", HAIKU_MODEL, "--output-format", "json"],
       // Prompt rides in on `-p`; the child never reads stdin. Point it at
       // /dev/null so the CLI doesn't stall 3s waiting for piped input and then
-      // emit "no stdin data received in 3s" into stderr (which, with the timeout
-      // firing, killed the digest — SIGTERM 143). See bot.js runClaude.
-      { env: process.env, timeout: timeoutMs, stdio: ["ignore", "pipe", "pipe"] }
+      // emit "no stdin data received in 3s" into stderr. See bot.js runClaude.
+      { env: process.env, stdio: ["ignore", "pipe", "pipe"] }
     );
-    let out = "", err = "";
+    let out = "", err = "", timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      proc.kill("SIGTERM");
+      // Backstop: if it ignores SIGTERM, take it out hard a moment later.
+      setTimeout(() => proc.kill("SIGKILL"), 5000).unref();
+    }, timeoutMs);
     proc.stdout.on("data", (d) => (out += d));
     proc.stderr.on("data", (d) => (err += d));
-    proc.on("error", reject);
+    proc.on("error", (e) => { clearTimeout(timer); reject(e); });
     proc.on("close", (code) => {
+      clearTimeout(timer);
+      if (timedOut) {
+        return reject(new Error(
+          `interpreter TIMED OUT after ${Math.round(timeoutMs / 1000)}s — ` +
+          `${out.length} bytes of partial output discarded rather than trusted. ` +
+          `Raise STRENGTH_INTERPRET_TIMEOUT_MS if this repeats.`
+        ));
+      }
       if (code !== 0 && !out.trim()) {
         return reject(new Error(`claude exited ${code}: ${err.slice(0, 300)}`));
       }
