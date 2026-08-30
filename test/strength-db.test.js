@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   openDb, upsertWorkout, upsertRawSet, insertNote,
-  getExerciseMap, getTemplates, rawSetsForWorkout,
+  getExerciseMap, getTemplates, rawSetsForWorkout, recentSessions,
 } from "../strength/db.js";
 
 let dir, dbPath;
@@ -63,5 +63,30 @@ test("a workout note stores immutably and returns its id", () => {
   const row = db.prepare("SELECT * FROM workout_note WHERE id = ?").get(id);
   assert.equal(row.text, "leg day, skipped RDLs");
   assert.equal(row.note_date, "2026-08-23");
+  db.close();
+});
+
+test("recentSessions returns recent interpreted sessions, newest first, with content", () => {
+  const db = openDb(":memory:");
+  // Two interpreted sessions and one that is NOT interpreted (must be excluded),
+  // plus the target day itself (must be excluded by the `before` bound).
+  const interp = (id, date, style, sets) => {
+    upsertWorkout(db, { id, date, type: "WeightTraining", is_lifting: true });
+    db.prepare("UPDATE workout SET style = ?, interpreted_at = ? WHERE id = ?").run(style, date + "T20:00:00Z", id);
+    const ins = db.prepare("INSERT INTO lift_set (activity_id, set_idx, exercise, reps, weight_lb) VALUES (?,?,?,?,?)");
+    sets.forEach(([ex, reps, w], i) => ins.run(id, i, ex, reps, w));
+  };
+  interp("w_29", "2026-08-29", "chest_back", [["lat_pulldown_wide", 8, 209], ["lat_pulldown_wide", 8, 220], ["machine_row_wide", 10, 280]]);
+  interp("w_28", "2026-08-28", "arms", [["rope_curl", 12, 44], ["rope_curl", 10, 70]]);
+  upsertWorkout(db, { id: "w_26", date: "2026-08-26", type: "WeightTraining", is_lifting: true }); // uninterpreted
+  interp("w_30", "2026-08-30", "leg", [["back_squat", 5, 275]]); // the target day — excluded by `before`
+
+  const out = recentSessions(db, { before: "2026-08-30", excludeId: "w_30" });
+  assert.deepEqual(out.map((s) => s.id), ["w_29", "w_28"], "newest first; uninterpreted and target excluded");
+  // top exercise carries a weight range when the sets differ, a single value when they match
+  const pull = out[0].top.find((e) => e.exercise === "lat_pulldown_wide");
+  assert.equal(pull.weight, "209-220");
+  const row = out[0].top.find((e) => e.exercise === "machine_row_wide");
+  assert.equal(row.weight, "280");
   db.close();
 });

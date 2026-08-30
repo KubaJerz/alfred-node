@@ -15,7 +15,7 @@
 
 import { spawn } from "node:child_process";
 import { syncStrength } from "./ingest.js";
-import { getExerciseMap, getTemplates, rawSetsForWorkout } from "./db.js";
+import { getExerciseMap, getTemplates, rawSetsForWorkout, recentSessions } from "./db.js";
 import { kgToLb } from "./config.js";
 
 const HAIKU_MODEL = "claude-haiku-4-5-20251001";
@@ -92,7 +92,7 @@ function catGuess(watch_category) {
   } catch { return []; }
 }
 
-function buildPrompt({ rawSets, templates, vocabulary, notes }) {
+function buildPrompt({ rawSets, templates, vocabulary, notes, recent = [] }) {
   const active = rawSets
     .filter((r) => r.set_type === "active")
     .map((r) => JSON.stringify({
@@ -114,11 +114,24 @@ function buildPrompt({ rawSets, templates, vocabulary, notes }) {
     ? notes.map((n) => `- ${n.text}`).join("\n")
     : "(no note for this day)";
 
+  const recentBlock = recent.length
+    ? recent
+        .map((s) => {
+          const top = s.top.map((e) => `${e.exercise} ${e.weight}`).join(", ");
+          return `${s.date}  ${s.style}  ${top || "(no labelled sets)"}`;
+        })
+        .join("\n")
+    : "(no recent sessions on record)";
+
   return [
     "You are labelling one strength workout. Decide which exercise each working set was.",
     "",
     "The three programs this person repeats (canonical exercise keys, in order):",
     tpl,
+    "",
+    "Their recent sessions (most recent first) — what each style actually looks",
+    "like lately (drift and substitutions included), and the order they came in:",
+    recentBlock,
     "",
     "Allowed exercise keys (use ONLY these, or \"unknown\" if you truly can't tell):",
     vocabulary.join(", "),
@@ -130,13 +143,19 @@ function buildPrompt({ rawSets, templates, vocabulary, notes }) {
     "category for that set; `reps`/`weight_kg` are ground truth:",
     active || "(none)",
     "",
-    "Pick the style FIRST, from the watch guesses. Any single guess is noisy, but",
-    "tallied across the session they are strong evidence: pullUp/row/flye/benchPress",
-    "point to chest_back, curl/tricepsExtension/lateralRaise to arms, and",
-    "squat/deadlift/lunge/hipRaise to leg. If one style clearly dominates the tally,",
-    "take it and do NOT let the weight/rep pattern argue you out of it — a heavy",
-    "machine pulldown and a heavy barbell squat are indistinguishable in these",
-    "numbers, so the category is the only thing that separates them.",
+    "Pick the style FIRST, then label exercises within it. Weigh three things —",
+    "do not decide on any one alone:",
+    "  1. The watch guesses, TALLIED across the session. A single guess is noisy,",
+    "     but a tally is strong: pullUp/row/flye/benchPress point to chest_back,",
+    "     curl/tricepsExtension/lateralRaise to arms, squat/deadlift/lunge/hipRaise",
+    "     to leg.",
+    "  2. Whether the exercises, weights and rest match the recent sessions of a",
+    "     style above. Reps and weight ALONE cannot separate a machine pulldown",
+    "     from a squat — both are heavy and low-rep — so never decide on the",
+    "     numbers alone; but when the content clearly matches one style's recent",
+    "     sessions, that is strong evidence, even against the watch tally.",
+    "  3. The same style rarely runs two sessions back-to-back, so a style done in",
+    "     the most recent session is a little less likely today (not impossible).",
     "",
     "Then, WITHIN that style, reason over the whole session: pick the matching",
     "program, allow for skipped or substituted exercises, and use the weight/rep",
@@ -156,8 +175,9 @@ export async function interpretWorkout({ db, activityId, runModel = spawnHaiku }
   const workout = db.prepare("SELECT * FROM workout WHERE id = ?").get(activityId);
   if (!workout) throw new Error(`no such workout: ${activityId}`);
   const notes = db.prepare("SELECT * FROM workout_note WHERE note_date = ? ORDER BY received_at").all(workout.date);
+  const recent = recentSessions(db, { before: workout.date, excludeId: activityId });
 
-  const prompt = buildPrompt({ rawSets: raw, templates: getTemplates(db), vocabulary: Object.keys(map), notes });
+  const prompt = buildPrompt({ rawSets: raw, templates: getTemplates(db), vocabulary: Object.keys(map), notes, recent });
   const result = extractJson(await runModel(prompt));
 
   // Idempotent: a re-interpret replaces this workout's rows wholesale.

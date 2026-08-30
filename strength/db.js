@@ -256,3 +256,41 @@ export function getTemplates(db) {
 export function rawSetsForWorkout(db, activityId) {
   return db.prepare("SELECT * FROM raw_set WHERE activity_id = ? ORDER BY set_idx").all(activityId);
 }
+
+/**
+ * Recent interpreted lifting sessions strictly before `before`, most recent
+ * first, each with its style and top exercises (by set count) and the weight
+ * range worked. Context the interpreter weighs — what each style actually looks
+ * like lately, and the order sessions came in — and the raw material for note
+ * routing's candidate list. Uses recent history, not the static template, so it
+ * tracks drift and substitutions. `before` is a workout date (or ISO datetime).
+ */
+export function recentSessions(db, { before, days = 14, limit = 8, excludeId = null, topN = 4 } = {}) {
+  const sessions = db.prepare(`
+    SELECT id, date, style FROM workout
+    WHERE is_lifting = 1 AND interpreted_at IS NOT NULL
+      AND date < ? AND date >= date(?, '-' || ? || ' days')
+      ${excludeId ? "AND id != ?" : ""}
+    ORDER BY date DESC
+    LIMIT ?
+  `).all(...(excludeId ? [before, before, days, excludeId, limit] : [before, before, days, limit]));
+
+  const topSql = db.prepare(`
+    SELECT exercise, COUNT(*) AS sets,
+           CAST(MIN(weight_lb) AS INT) AS lo, CAST(MAX(weight_lb) AS INT) AS hi
+    FROM lift_set
+    WHERE activity_id = ? AND exercise <> 'unknown'
+    GROUP BY exercise
+    ORDER BY sets DESC, hi DESC
+    LIMIT ?
+  `);
+  return sessions.map((s) => ({
+    id: s.id,
+    date: s.date,
+    style: s.style,
+    top: topSql.all(s.id, topN).map((e) => ({
+      exercise: e.exercise,
+      weight: e.lo === e.hi ? `${e.hi}` : `${e.lo}-${e.hi}`,
+    })),
+  }));
+}

@@ -411,8 +411,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
   it.** The prompt (`strength/digest.js`) called the watch guess "often wrong"
   and treated reps and weight as ground truth, so the model relabelled a
   chest/back session as Bulgarian split squats and inflated leg load. It now
-  tallies the watch categories to pick the style first, then labels exercises
-  only within that style.
+  picks the style first, weighing three signals rather than the numbers alone:
+  the watch categories tallied across the session, whether the exercises and
+  weights match the person's *recent* sessions of each style (a new
+  `recentSessions` helper in `strength/db.js` renders the last ~14 days as
+  context, so it tracks drift and substitutions), and the fact that the same
+  style rarely runs two sessions back-to-back. Re-interpreting 8/28 and 8/29
+  against the live data holds `arms` and `chest_back` under the new prompt.
 - **Strength: an interpreter timeout could pass a half-labelled workout.**
   `spawnHaiku` used spawn's `timeout` option; when it fired, `claude` caught the
   SIGTERM and exited 143, and the old guard accepted partial output as success.
