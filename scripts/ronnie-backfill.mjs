@@ -292,9 +292,10 @@ async function main() {
 
         if (APPLY) {
           const parentId = labels[tier];
-          // UT is a backfill-only child (Bulk/UT); other topics use the resolved tree.
+          // One label per message, like the live handler: the child topic when it
+          // resolved, else the bare tier. UT is a backfill-only child (Bulk/UT).
           const childId = d.topic === "ut" ? utId : d.topic ? labels.topics[tier]?.[d.topic] || "" : "";
-          const addLabelIds = [parentId, childId].filter(Boolean);
+          const addLabelIds = [childId || parentId].filter(Boolean);
           const removeLabelIds = [
             ...(tier === "bulk" ? ["INBOX"] : []),
             // Strip any old flat label as we migrate the message onto the tree.

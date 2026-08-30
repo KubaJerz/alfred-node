@@ -18,9 +18,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
   read later, silent, kept in the inbox), **Bulk** (noise, archived out). A
   *topic* is a child nested under the tier, so the same mail lands as
   `Priority/Banking` (a fraud alert), `Interesting/Banking` (a "new external
-  account" confirmation), or `Bulk/Banking` (a rewards blast). Haiku's rubric now
-  returns the three-way level; only Priority pings, only Bulk archives. Three
-  topics are deterministic sender-domain rules (`entropy`, `banking`, `jobs`-boards
+  account" confirmation), or `Bulk/Banking` (a rewards blast). Each message
+  carries exactly one label. It is the nested topic when one applies. It is the
+  bare tier otherwise. A row shows a single chip. A topic'd message lives only
+  in its sub-label. Haiku's rubric now returns the three-way level; only
+  Priority pings, only Bulk archives. Three topics are deterministic
+  sender-domain rules (`entropy`, `banking`, `jobs`-boards
   — `RONNIE_TOPIC_*_SENDERS`, `ronnie/topics.js`), matching a domain **or any
   subdomain** of it (banks/boards mail from subdomains), and never the model's to
   assert, so a prompt-injected email can't forge them; `taxes` and an active `jobs`
