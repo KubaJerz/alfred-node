@@ -112,30 +112,28 @@ claude -p "<user message>" \
 
 ## Inbound mail (Pub/Sub)
 
-The second way something enters the system — and unlike a turn, no agent runs.
-Gmail publishes a change notification, `bot.js` pulls it, and the result is only
-a line in a buffer that the *next* new session reads. Mail arriving decides what
-a turn already knows; it never causes a turn. This is "tier 1" in `TODO.md`.
+The second way something enters the system. Gmail publishes a change
+notification, `bot.js` pulls it, re-reads the new message ids from its own
+cursor, and enqueues them for Ronnie (next section). No Alfred turn runs, and no
+content rests here — this path stores ids only. Mail arriving decides what Ronnie
+does; it never causes a turn.
 
 ```mermaid
 flowchart TD
     G["Gmail · INBOX"] -->|"users.watch() · 7-day expiry, renewed daily"| T["Pub/Sub topic<br/>gmail-push"]
     T -->|"notification — a trigger, not data"| L["gmail-push.js<br/>pull subscriber in bot.js"]
-    L -.->|"re-fetch from own cursor<br/>history.list · messageAdded only"| G
-    L -->|"every message"| C{"classify()<br/>mail-filter.js"}
-    C -->|"safe → sender + subject"| BUF["pending-mail.jsonl<br/>gmail-buffer.js · capped"]
-    C -->|"login code → marker only"| BUF
-    BUF -.->|"next new session · drained + cleared"| CTX["loadContext digest<br/>before the User Message trailer"]
+    L -.->|"re-fetch ids from own cursor<br/>history.list · messageAdded only"| G
+    L -->|"enqueue new ids"| Q["mail-queue.jsonl<br/>Ronnie's work queue · ids only"]
     KEY["pubsub-sa.json<br/>drains the subscription · can't read mail"] -->|"auth"| L
     classDef external fill:#d6e2f2,stroke:#1f5fb8,color:#123f7d
-    classDef gateway fill:#d8ebe2,stroke:#1b6b52,color:#12503c
+    classDef store fill:#e7e7e7,stroke:#888,color:#333
     classDef secret fill:#ece0f5,stroke:#7a4fb0,color:#4a2d70
     class G,T external
-    class C gateway
+    class Q store
     class KEY secret
 ```
 
-Four properties this path is built to hold, each matching a way it fails silently
+Three properties this path is built to hold, each matching a way it fails silently
 if you get it wrong (`TODO.md` spells out the failure modes):
 
 - **The notification is a trigger, not data.** Its payload is never trusted; on
@@ -143,31 +141,24 @@ if you get it wrong (`TODO.md` spells out the failure modes):
   (`agent/var/google/gmail-sync.json`, its own writer — never `state.json`). A
   lost or duplicated notification costs nothing, because the next drain still
   sees everything since the cursor.
-- **`classify()` is the same chokepoint the read path uses** (green — a
-  guarantee, in `mail-filter.js`, run here via `screen()`). A login code is
-  reduced to a "withheld" marker *before* it ever reaches the buffer — the whole
-  reason the push path exists is that a buffered code would land in a Claude
-  session `.jsonl`, outside `agent/var/`, `.gitignore` and the memory funnel at
-  once. Safe mail keeps only sender + subject; the snippet is dropped before it
-  rests on disk.
 - **`messageAdded`-only history** is what stops a phone-side "mark all read" from
-  flooding the buffer with mail that isn't new — label churn is filtered out at
-  the source, not coalesced after.
+  flooding the queue with mail that isn't new — label churn is filtered out at
+  the source, not coalesced after. This path stores only ids, so the credential
+  screen runs downstream in the consumer (see Ronnie), before anything is read.
 - **Two credentials, two jobs** (see below). Reaching the *mailbox* is OAuth as
   the user; draining the *subscription* — our own cloud resource — is a service
   account (`agent/var/google/pubsub-sa.json`), which by construction cannot read
-  mail. A stale cursor 404s → resync to the current historyId with a gap marker;
-  an expired watch just goes quiet → the daily renewal is what keeps it alive.
+  mail. A stale cursor 404s → resync to the current historyId, and the mail in
+  the gap stays in Gmail for a search to find; an expired watch just goes quiet →
+  the daily renewal is what keeps it alive.
 
-The buffer surfaces **only on a new session** — a resumed conversation re-injects
-nothing (see Memory), so mail waits for the next `/clear`, dream, or first
-message of the day. The digest rides inside `finalMessage`, which `runClaude`
-never logs, so it can't reach `messages.jsonl` or anything downstream of it.
+Ronnie is the only consumer of this path. Without it, `startMailListener` does
+not start — inbound mail stays in Gmail, unread and safe, and nothing is lost.
 
 ## Ronnie — inbound-mail triage (tier 2)
 
-The Pub/Sub path above buffers mail for a *later* turn. Ronnie is the fork that
-*acts* on it as it lands — but still, no Alfred turn runs. The drain no longer
+The Pub/Sub path above enqueues new mail ids. Ronnie is the consumer that
+*acts* on them as they land — but still, no Alfred turn runs. The drain no longer
 processes mail inline: it **enqueues the new message ids** into a durable work
 queue, and a separate consumer pulls from it, triages, and removes an id only
 once it's handled. Gmail holds the content; the queue holds only ids, so nothing
@@ -180,7 +171,7 @@ flowchart TD
     T["Pub/Sub nudge · 60s sweep"] -.->|"drain()"| C
     Q -->|"pop id"| C["consumer.js<br/>runner.js assembles it"]
     C -->|"enrich() by id"| SC{"screen()<br/>mail-filter.js"}
-    SC -.->|"login code → marker"| BUF["pending-mail.jsonl<br/>digest: markers only"]
+    SC -.->|"login code → dropped"| X["screened out<br/>id removed · nothing kept"]
     SC -->|"safe"| H["handleMessage · index.js"]
     H -->|"DKIM forward · sender-auth.js · invite.js (model)"| RBR
     H -->|"else · classify.js → prefilter.js<br/>block/allow/category/list-header (mail-triage.js)<br/>+ topics.js: domain → entropy/banking/jobs"| PF{"decided?"}
@@ -203,7 +194,7 @@ flowchart TD
     class GM,DIS external
     class SC,RBR gateway
     class HK agent
-    class Q,BUF store
+    class Q,X store
 ```
 
 Seven properties, each a decision made on purpose:
@@ -216,9 +207,9 @@ Seven properties, each a decision made on purpose:
   enqueues and consumes, serialized through an in-memory mutex.
 - **The credential screen is upstream of triage, unchanged** (green — the same
   guarantee as the read path). The consumer runs `screen()` right after the fetch
-  and before triage, so a login code becomes a content-free marker in the digest
-  and Ronnie — and Haiku — never see it. A "verify"/"sign-in" notice that trips
-  that filter is withheld too; making those *ping* is a change to `mail-filter.js`,
+  and before triage, so a login code is dropped — the id leaves the queue and
+  nothing is kept — and Ronnie, and Haiku, never see it. A "verify"/"sign-in"
+  notice that trips that filter is withheld too; making those *ping* is a change to `mail-filter.js`,
   the shared chokepoint, not to Ronnie.
 - **Haiku down trips a circuit breaker, not a retry storm** (`breaker.js`). Two
   consecutive `claude -p` failures and it opens: the queue piles up untouched and
@@ -283,9 +274,9 @@ or re-file a mistaken ping as bulk; and `/ronnie-metrics` runs `scripts/ronnie-d
 over `ronnie-usage.jsonl`, posts a self-contained HTML cost dashboard, and drops it in
 today's daily folder for Alfred to surface. Both are gated on Ronnie being configured.
 
-Turning Ronnie off (drop the config) collapses this whole section: `drainHistory`
-falls back to buffering sender + subject for the digest, exactly the Pub/Sub path
-above, with nothing lost.
+Turning Ronnie off (drop the config) collapses this whole section. Ronnie is the
+only mail consumer, so `startMailListener` does not start — inbound mail stays in
+Gmail, unread and safe, and nothing is lost.
 
 ## Credentials
 

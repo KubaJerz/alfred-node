@@ -13,7 +13,8 @@ and move to **Done** with the PR number. Anything with a GitHub issue links to i
 ### Keeping context live
 
 - [ ] **A change bus — everything publishes, Alfred subscribes and drains per
-      turn.** _Top priority._ Alfred's context is a snapshot taken **once**, at
+      turn.** _Deprioritized 2026-08-30 — see **Status** below. Kept for when it
+      actually bites._ Alfred's context is a snapshot taken **once**, at
       fresh-session start: `loadContext` injects `MEMORY.md` + today's daily note
       (+ mail) only on the new-session branch of `handleTurn`; a **resumed**
       session re-injects nothing (`finalMessage = messageBody`). So anything that
@@ -21,9 +22,9 @@ and move to **Done** with the PR number. Anything with a GitHub issue links to i
       just wrote, a freshly-appended memory line, exercise data — is invisible to
       the live thread until it restarts (`/clear`, a dream, or the day's first
       message). Throwing away the conversation just to see a new file is the whole
-      annoyance. Proof it already bites: `drainMailDigest()` runs only on the
-      fresh branch, so tier-1 mail waits for a restart even though it was *meant*
-      to surface on the next real turn.
+      annoyance. The original proof was tier-1 mail: `drainMailDigest()` ran only
+      on the fresh branch, so buffered mail waited for a restart. That proof is
+      gone now (see **Status**), which is why this item dropped down the list.
 
       **The design is an internal pub/sub — the same shape as the Gmail one, one
       layer in.** Everything that can change *publishes* a small event to one
@@ -61,6 +62,24 @@ and move to **Done** with the PR number. Anything with a GitHub issue links to i
       and becomes the first producer on the bus. **Traps:** coalesce bursts (a
       cron that writes ten files is one event, not ten); never emit an empty block;
       and keep the payload a delta, never the whole world.
+
+      **Status (2026-08-30).** The flagship use case — tier-1 mail waiting for a
+      restart — is gone. Ronnie already surfaces mail live: Priority pings Discord
+      over a webhook, the rest lands in Gmail labels. So the mail buffer became
+      near-empty and was removed (v2.12.0); mail no longer needs the bus. What
+      remains are the *quieter* cases — a file a command wrote, a memory line, new
+      exercise data. Alfred resets every night (the dream forces a fresh session),
+      so the blindness window is at most one day, and "go look for it" covers most
+      of these. Not worth building yet. Revisit if the quiet cases start to annoy.
+
+      **Phase two, when this comes back — point at Gmail, don't build a store.**
+      The robust "more context on that email" path is *notify by path* aimed at
+      Gmail: teach the `gmail` skill the Ronnie label convention (`Priority` =
+      pinged, `Interesting`, `Bulk`, plus topic children), so "that email Ronnie
+      flagged" is a `label:Priority newer_than:Nd` search, newest first. Gmail is
+      the live, always-current store; Alfred already reads it; the ping already
+      carries the message id. Do **not** build a "recent pings" file — that just
+      re-creates the buffer we removed, as a stale copy of what Gmail holds live.
 
 ### Security — isolate Alfred, and push risky work onto their own agents
 

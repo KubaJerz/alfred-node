@@ -28,7 +28,6 @@
  *   enrichOne: (id: string) => Promise<object|null>, // full fetch by id (null = gone)
  *   screen: (msgs: object[]) => object[],            // mail-filter screen()
  *   handle: (msg: object) => Promise<object>,        // handleMessage, bound + strict
- *   digest: (entries: object[]) => Promise<any>,     // appendPending — withheld markers
  *   surface?: (msg: object) => Promise<any>,         // poison fail-open ping
  *   poisonCap?: number,
  *   log?: (m: string) => void,
@@ -40,7 +39,6 @@ export function makeConsumer({
   enrichOne,
   screen,
   handle,
-  digest,
   surface,
   poisonCap = 3,
   log = () => {},
@@ -93,10 +91,10 @@ export function makeConsumer({
         }
 
         // The credential screen, now at consume time (same chokepoint). A code is
-        // reduced to a content-free marker in the digest and never reaches triage.
+        // dropped here: the id leaves the queue and nothing is kept. Triage —
+        // and Haiku — never see it.
         const screened = screen([msg])[0];
         if (screened.withheld) {
-          await digest([screened]);
           await queue.remove(id);
           stats.withheld++;
           continue;

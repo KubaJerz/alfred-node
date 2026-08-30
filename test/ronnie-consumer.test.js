@@ -23,7 +23,6 @@ const screen = (msgs) => msgs.map((m) => (m.code ? { id: m.id, ts: m.ts, withhel
 
 // Build a consumer with sensible fakes; override any piece per test.
 function harness({ queue, breaker, msgs = {}, handle, poisonCap = 3 }) {
-  const digested = [];
   const surfaced = [];
   const c = makeConsumer({
     queue,
@@ -35,11 +34,10 @@ function harness({ queue, breaker, msgs = {}, handle, poisonCap = 3 }) {
     },
     screen,
     handle: handle || (async () => ({ usedHaiku: true, action: "pinged" })),
-    digest: async (entries) => digested.push(...entries),
     surface: async (m) => surfaced.push(m),
     poisonCap,
   });
-  return { c, digested, surfaced };
+  return { c, surfaced };
 }
 
 test("a normal message is handled, removed, and credits the breaker", async () => {
@@ -57,10 +55,10 @@ test("a normal message is handled, removed, and credits the breaker", async () =
   assert.equal(queue.has("a"), false); // removed
 });
 
-test("a withheld message goes to the digest, never to triage", async () => {
+test("a withheld message is dropped, never reaches triage", async () => {
   const queue = await seededQueue(["a"]);
   let handled = 0;
-  const { c, digested } = harness({
+  const { c } = harness({
     queue,
     msgs: { a: { id: "a", ts: 9, code: true } },
     handle: async () => (handled++, { usedHaiku: true }),
@@ -68,8 +66,7 @@ test("a withheld message goes to the digest, never to triage", async () => {
   const stats = await c.drain();
   assert.equal(stats.withheld, 1);
   assert.equal(handled, 0); // triage never saw it
-  assert.equal(digested[0].withheld, true);
-  assert.equal(queue.has("a"), false);
+  assert.equal(queue.has("a"), false); // dropped from the queue, nothing kept
 });
 
 test("a gone message (null fetch) is dropped", async () => {
