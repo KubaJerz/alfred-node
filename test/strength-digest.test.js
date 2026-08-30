@@ -105,6 +105,32 @@ test("digest interprets already-synced workouts even when sync fails (no broker)
   assert.equal(out.errors.length, 0);
 });
 
+test("the prompt carries recent-session context and weighs three signals", async () => {
+  const db = openDb(":memory:");
+  seedWorkout(db); // target w1 on 2026-08-24
+  // An interpreted session two days earlier, so recentSessions has content to render.
+  upsertWorkout(db, { id: "w0", date: "2026-08-22", type: "WeightTraining", is_lifting: true });
+  db.prepare("UPDATE workout SET style = ?, interpreted_at = ? WHERE id = ?").run("chest_back", "2026-08-22T20:00:00Z", "w0");
+  db.prepare("INSERT INTO lift_set (activity_id, set_idx, exercise, reps, weight_lb) VALUES (?,?,?,?,?)")
+    .run("w0", 0, "lat_pulldown_wide", 8, 209);
+
+  let seen = "";
+  const capture = async (prompt) => {
+    seen = prompt;
+    return JSON.stringify({ style: "chest_back", sets: [] });
+  };
+  await interpretWorkout({ db, activityId: "w1", runModel: capture });
+
+  // The recent session's content is rendered for the model to match against.
+  assert.match(seen, /2026-08-22\s+chest_back\s+lat_pulldown_wide 209/);
+  // The softened rubric: three weighed signals, not one hard override.
+  assert.match(seen, /Weigh three things/);
+  assert.match(seen, /rarely runs two sessions back-to-back/);
+  // The old absolute clause is gone.
+  assert.doesNotMatch(seen, /do NOT let the weight\/rep pattern argue you out of it/);
+  db.close();
+});
+
 test("extractJson tolerates fences and surrounding prose", () => {
   assert.deepEqual(extractJson('```json\n{"a":1}\n```'), { a: 1 });
   assert.deepEqual(extractJson('Sure! {"style":"leg","sets":[]} — done'), { style: "leg", sets: [] });

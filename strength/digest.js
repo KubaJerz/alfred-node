@@ -15,29 +15,53 @@
 
 import { spawn } from "node:child_process";
 import { syncStrength } from "./ingest.js";
-import { getExerciseMap, getTemplates, rawSetsForWorkout } from "./db.js";
+import { getExerciseMap, getTemplates, rawSetsForWorkout, recentSessions } from "./db.js";
 import { kgToLb } from "./config.js";
 
 const HAIKU_MODEL = "claude-haiku-4-5-20251001";
 
+// One interpretation is a whole-session reasoning call; observed runs land at
+// 100-170s, so the old 120s cap was inside the noise. Overridable per-run.
+const INTERPRET_TIMEOUT_MS = parseInt(process.env.STRENGTH_INTERPRET_TIMEOUT_MS || "240000");
+
 // Spawn a headless Haiku and return the model's text. Mirrors bot.js's runClaude
 // envelope handling: --output-format json wraps the reply as {result: "..."}.
-function spawnHaiku(prompt, { timeoutMs = 120000 } = {}) {
+//
+// We own the timer rather than using spawn's `timeout` option, for one reason:
+// when that option fires, `claude` catches the SIGTERM and exits 143 with a NULL
+// signal, indistinguishable from an ordinary non-zero exit. Worse, if the model
+// had already flushed part of its JSON, the old code took the partial text as a
+// success — a timeout could silently produce a half-labelled workout. A timeout
+// is now always an error, loudly, whatever made it to stdout.
+function spawnHaiku(prompt, { timeoutMs = INTERPRET_TIMEOUT_MS } = {}) {
   return new Promise((resolve, reject) => {
     const proc = spawn(
       "claude",
       ["-p", prompt, "--model", HAIKU_MODEL, "--output-format", "json"],
       // Prompt rides in on `-p`; the child never reads stdin. Point it at
       // /dev/null so the CLI doesn't stall 3s waiting for piped input and then
-      // emit "no stdin data received in 3s" into stderr (which, with the timeout
-      // firing, killed the digest — SIGTERM 143). See bot.js runClaude.
-      { env: process.env, timeout: timeoutMs, stdio: ["ignore", "pipe", "pipe"] }
+      // emit "no stdin data received in 3s" into stderr. See bot.js runClaude.
+      { env: process.env, stdio: ["ignore", "pipe", "pipe"] }
     );
-    let out = "", err = "";
+    let out = "", err = "", timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      proc.kill("SIGTERM");
+      // Backstop: if it ignores SIGTERM, take it out hard a moment later.
+      setTimeout(() => proc.kill("SIGKILL"), 5000).unref();
+    }, timeoutMs);
     proc.stdout.on("data", (d) => (out += d));
     proc.stderr.on("data", (d) => (err += d));
-    proc.on("error", reject);
+    proc.on("error", (e) => { clearTimeout(timer); reject(e); });
     proc.on("close", (code) => {
+      clearTimeout(timer);
+      if (timedOut) {
+        return reject(new Error(
+          `interpreter TIMED OUT after ${Math.round(timeoutMs / 1000)}s — ` +
+          `${out.length} bytes of partial output discarded rather than trusted. ` +
+          `Raise STRENGTH_INTERPRET_TIMEOUT_MS if this repeats.`
+        ));
+      }
       if (code !== 0 && !out.trim()) {
         return reject(new Error(`claude exited ${code}: ${err.slice(0, 300)}`));
       }
@@ -68,7 +92,7 @@ function catGuess(watch_category) {
   } catch { return []; }
 }
 
-function buildPrompt({ rawSets, templates, vocabulary, notes }) {
+function buildPrompt({ rawSets, templates, vocabulary, notes, recent = [] }) {
   const active = rawSets
     .filter((r) => r.set_type === "active")
     .map((r) => JSON.stringify({
@@ -90,11 +114,24 @@ function buildPrompt({ rawSets, templates, vocabulary, notes }) {
     ? notes.map((n) => `- ${n.text}`).join("\n")
     : "(no note for this day)";
 
+  const recentBlock = recent.length
+    ? recent
+        .map((s) => {
+          const top = s.top.map((e) => `${e.exercise} ${e.weight}`).join(", ");
+          return `${s.date}  ${s.style}  ${top || "(no labelled sets)"}`;
+        })
+        .join("\n")
+    : "(no recent sessions on record)";
+
   return [
     "You are labelling one strength workout. Decide which exercise each working set was.",
     "",
     "The three programs this person repeats (canonical exercise keys, in order):",
     tpl,
+    "",
+    "Their recent sessions (most recent first) — what each style actually looks",
+    "like lately (drift and substitutions included), and the order they came in:",
+    recentBlock,
     "",
     "Allowed exercise keys (use ONLY these, or \"unknown\" if you truly can't tell):",
     vocabulary.join(", "),
@@ -102,13 +139,27 @@ function buildPrompt({ rawSets, templates, vocabulary, notes }) {
     "Their note for this day (may say what they did, or what they skipped):",
     noteBlock,
     "",
-    "The working sets, one JSON object per line. `guess` is the watch's rough",
-    "category (often wrong or empty); `reps`/`weight_kg` are ground truth:",
+    "The working sets, one JSON object per line. `guess` is the watch's own",
+    "category for that set; `reps`/`weight_kg` are ground truth:",
     active || "(none)",
     "",
-    "Reason over the WHOLE session: pick the matching program, allow for skipped or",
-    "substituted exercises, and use the weight/rep pattern and rest to group sets",
-    "into exercises. Then return ONLY this JSON (no prose):",
+    "Pick the style FIRST, then label exercises within it. Weigh three things —",
+    "do not decide on any one alone:",
+    "  1. The watch guesses, TALLIED across the session. A single guess is noisy,",
+    "     but a tally is strong: pullUp/row/flye/benchPress point to chest_back,",
+    "     curl/tricepsExtension/lateralRaise to arms, squat/deadlift/lunge/hipRaise",
+    "     to leg.",
+    "  2. Whether the exercises, weights and rest match the recent sessions of a",
+    "     style above. Reps and weight ALONE cannot separate a machine pulldown",
+    "     from a squat — both are heavy and low-rep — so never decide on the",
+    "     numbers alone; but when the content clearly matches one style's recent",
+    "     sessions, that is strong evidence, even against the watch tally.",
+    "  3. The same style rarely runs two sessions back-to-back, so a style done in",
+    "     the most recent session is a little less likely today (not impossible).",
+    "",
+    "Then, WITHIN that style, reason over the whole session: pick the matching",
+    "program, allow for skipped or substituted exercises, and use the weight/rep",
+    "pattern and rest to group sets into exercises. Return ONLY this JSON (no prose):",
     '{"style":"leg|arms|chest_back|other","sets":[{"set_idx":<int>,"exercise":"<key or unknown>","confidence":<0..1>}]}',
     "Include every working set. Do not include rest sets. Do not invent numbers.",
   ].join("\n");
@@ -124,8 +175,9 @@ export async function interpretWorkout({ db, activityId, runModel = spawnHaiku }
   const workout = db.prepare("SELECT * FROM workout WHERE id = ?").get(activityId);
   if (!workout) throw new Error(`no such workout: ${activityId}`);
   const notes = db.prepare("SELECT * FROM workout_note WHERE note_date = ? ORDER BY received_at").all(workout.date);
+  const recent = recentSessions(db, { before: workout.date, excludeId: activityId });
 
-  const prompt = buildPrompt({ rawSets: raw, templates: getTemplates(db), vocabulary: Object.keys(map), notes });
+  const prompt = buildPrompt({ rawSets: raw, templates: getTemplates(db), vocabulary: Object.keys(map), notes, recent });
   const result = extractJson(await runModel(prompt));
 
   // Idempotent: a re-interpret replaces this workout's rows wholesale.
