@@ -36,10 +36,14 @@ const db = openDb();
 try {
   const out = await digest({ db, call });
   const s = out.sync;
+  const rt = out.routing;
   console.log(
     `strength nightly: ${s.lifting} lifting / ${s.cardio} cardio in ${s.window.from}→${s.window.to}; ` +
-      `interpreted ${out.interpreted.length}, ${out.errors.length} error(s).`
+      `routed ${rt ? rt.routed.length : 0}, interpreted ${out.interpreted.length}, ${out.errors.length} error(s).`
   );
+  if (rt?.reinterpret.length) console.log(`  ↻ re-interpreted (note landed): ${rt.reinterpret.join(", ")}`);
+  for (const a of rt?.abandoned ?? [])
+    console.log(`  🤷 unplaced note (asked ${a.attempts}×) — needs Kuba: "${a.text}"`);
   for (const e of out.errors) console.log(`  ⚠️  ${e.activityId}: ${e.error}`);
 } finally {
   db.close();

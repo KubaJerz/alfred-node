@@ -15,10 +15,11 @@
 // is normally run nightly in the background; the others are instant DB reads.
 
 import { parseFlags, fail, help, wantsHelp, flaggedHelp, call } from "./lib/broker-client.js";
-import { openDb } from "../strength/db.js";
+import { openDb, upsertExercise, listExercises, unmappedSets } from "../strength/db.js";
 import { digest } from "../strength/digest.js";
 import { currentLoad } from "../strength/views.js";
 import { renderLoadPlot } from "../strength/plot.js";
+import { MUSCLES } from "../strength/config.js";
 
 const [action, ...args] = process.argv.slice(2);
 const { flags, rest } = parseFlags(args);
@@ -75,6 +76,20 @@ const HELP = {
       "and strips the token.",
     ],
   },
+  exercise: {
+    use: "exercise <list | add <key> <muscle:factor,...> | unmapped>",
+    detail: [
+      "Inspect and extend the exercise→muscle map the interpreter labels against.",
+      "",
+      "  list      every mapped exercise and its muscle split.",
+      "  add       add or replace one: `exercise add dip triceps:1.0,chest:0.5`.",
+      "            Factor 1.0 = primary/isolation mover, 0.5 = compound assist.",
+      "            Muscles must be from: " + MUSCLES.join(", ") + ".",
+      "  unmapped  the queue of interpreted sets with no muscle credit — an",
+      "            `unknown` label or a key the map is missing. Add the key with",
+      "            `add`, then re-run `digest` to re-interpret and credit them.",
+    ],
+  },
 };
 
 const NOTES = [
@@ -107,11 +122,72 @@ async function main() {
       } else {
         console.log(`⚠️  Sync skipped (${out.syncError}); interpreting already-synced workouts only.`);
       }
-      for (const r of out.interpreted)
-        console.log(`  ${r.activityId}: ${r.style ?? "?"} — ${r.written} sets${r.flagged ? `, ${r.flagged} unmapped` : ""}${r.misfires ? `, ${r.misfires} misfires dropped` : ""}`);
+      // Note routing ran before interpretation: report what it placed, what it
+      // re-opened for re-interpretation, and anything it gave up on.
+      const rt = out.routing;
+      if (rt) {
+        for (const r of rt.routed)
+          console.log(`  📝 routed note → ${r.activityId} (${Math.round(r.confidence * 100)}%${r.why ? `: ${r.why}` : ""})`);
+        if (rt.reinterpret.length)
+          console.log(`  ↻ re-interpreting ${rt.reinterpret.join(", ")} — a note landed on an already-labelled session.`);
+        for (const a of rt.abandoned)
+          console.log(`  🤷 can't place this note after ${a.attempts} tries — ask Kuba which session: "${a.text}"`);
+      } else if (out.routingError) {
+        console.log(`  ⚠️  note routing skipped: ${out.routingError}`);
+      }
+
+      for (const r of out.interpreted) {
+        const tags = [];
+        if (r.flagged) tags.push(`${r.flagged} unmapped`);
+        if (r.misfires) tags.push(`${r.misfires} misfires dropped`);
+        if (r.misrouted) tags.push(`note unlinked as a misroute${r.misrouted.why ? ` (${r.misrouted.why})` : ""}`);
+        console.log(`  ${r.activityId}: ${r.style ?? "?"} — ${r.written} sets${tags.length ? `, ${tags.join(", ")}` : ""}`);
+      }
       for (const e of out.errors) console.log(`  ⚠️  ${e.activityId}: ${e.error}`);
-      if (!out.interpreted.length && !out.errors.length) console.log("  (nothing new to interpret)");
+      const quiet = !out.interpreted.length && !out.errors.length && !(rt && (rt.routed.length || rt.abandoned.length));
+      if (quiet) console.log("  (nothing new to interpret)");
       db.close();
+      break;
+    }
+
+    case "exercise": {
+      const sub = rest[0];
+      const db = openDb();
+      try {
+        if (sub === "list") {
+          const map = listExercises(db);
+          const keys = Object.keys(map).sort();
+          console.log(`${keys.length} mapped exercises:`);
+          for (const k of keys)
+            console.log(`  ${k.padEnd(24)} ${map[k].map(([m, f]) => `${m}:${f}`).join(", ")}`);
+        } else if (sub === "add") {
+          const key = rest[1];
+          const spec = rest[2];
+          if (!key || !spec) fail("usage: exercise add <key> <muscle:factor,...>   e.g. exercise add dip triceps:1.0,chest:0.5");
+          const contribs = spec.split(",").map((p) => {
+            const [m, f] = p.split(":");
+            return [m, Number(f)];
+          });
+          const bad = contribs.filter(([, f]) => !Number.isFinite(f));
+          if (bad.length) fail(`bad factor in "${spec}" — use muscle:factor, e.g. triceps:1.0,chest:0.5`);
+          const r = upsertExercise(db, key, contribs);
+          const fmt = (rows) => rows.length ? rows.map((x) => `${x.muscle}:${x.factor}`).join(", ") : "(new)";
+          console.log(`${r.exercise}: ${fmt(r.before)} → ${fmt(r.after)}`);
+          console.log(`(allowed muscles: ${MUSCLES.join(", ")})`);
+        } else if (sub === "unmapped") {
+          const rows = unmappedSets(db);
+          if (!rows.length) { console.log("No unmapped sets — every interpreted set has a muscle mapping."); }
+          else {
+            console.log(`${rows.length} set(s) the map can't credit, newest first:`);
+            for (const r of rows)
+              console.log(`  ${r.date}  ${r.activity_id}  set ${r.set_idx}: ${r.reps} × ${n(r.weight_lb)} lb  (${r.style ?? "?"})`);
+          }
+        } else {
+          fail("usage: exercise <list | add <key> <muscle:factor,...> | unmapped>");
+        }
+      } finally {
+        db.close();
+      }
       break;
     }
 
