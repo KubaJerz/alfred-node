@@ -19,6 +19,7 @@ import { ensureLabels } from "./google/gmail-labels.js";
 import { easternDate, dailyDir, dailyNotePath, attachmentName, buildAttachmentBlock } from "./dailies.js";
 import { parseClearCommand } from "./commands.js";
 import { transcribe, transcriptionAvailable } from "./voice/transcribe.js";
+import { isVoiceInput } from "./voice/detect.js";
 
 // ── Config ──────────────────────────────────────────────────────────────────
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
@@ -551,11 +552,18 @@ function recordWorkoutNote(text) {
   }
 }
 
-// A Discord voice message carries the IsVoiceMessage flag; its lone attachment
-// is the Opus audio. The flag is how we tell a voice note from any other audio
-// file the user might drop in — only the former should be transcribed-as-speech.
-function isVoiceMessage(msg) {
+// A Discord voice note carries the IsVoiceMessage flag; its lone attachment is
+// the Opus audio. This is one of the two voice shapes isVoiceInput() accepts —
+// the other is a plain audio file dropped in with no caption (voice/detect.js).
+function isVoiceNote(msg) {
   return Boolean(msg.flags?.has?.(MessageFlags.IsVoiceMessage));
+}
+
+// The attachments as the plain shape voice/detect.js reads — content-type and
+// name only, so the decision stays testable without a discord.js object.
+function attachmentMeta(msg) {
+  if (!msg.attachments) return [];
+  return [...msg.attachments.values()].map((a) => ({ contentType: a.contentType, name: a.name }));
 }
 
 client.on("messageCreate", async (msg) => {
@@ -583,32 +591,33 @@ client.on("messageCreate", async (msg) => {
   // content and would otherwise be dropped by the guard below before it's seen.
   let attachments = await saveInboundAttachments(msg);
 
-  // Voice notes: a Discord voice message is a single Opus attachment and no
-  // text. Transcribe it locally (voice/transcribe.js) and let the transcript BE
-  // the user message, so Alfred answers the words and never learns they were
-  // spoken — the same downstream path as typed text. The audio is not handed on
-  // as an attachment: Alfred can't read Opus, and the point is the text. Echo
-  // what was heard first, so a mishear ("cancel Thursday's meeting") is visible
-  // before the turn acts on it.
-  if (isVoiceMessage(msg) && attachments.length) {
-    const audioPath = attachments[0]; // a voice message carries exactly one file
+  // Voice input: a native Discord voice note, OR a lone audio file dropped in
+  // with no caption (a voice memo recorded elsewhere). Either way the message IS
+  // the audio, so transcribe it locally (voice/transcribe.js) and let the
+  // transcript BE the user message — the same downstream path as typed text.
+  // Alfred never learns it was spoken. The audio is not handed on as an
+  // attachment: Alfred can't read it, and the point is the text. Echo what was
+  // heard first, so a mishear ("cancel Thursday's meeting") is visible before
+  // the turn acts on it.
+  if (isVoiceInput({ atts: attachmentMeta(msg), isVoiceNote: isVoiceNote(msg), caption: userMessage }) && attachments.length) {
+    const audioPath = attachments[0]; // voice input carries exactly one file
     await msg.channel.sendTyping().catch(() => {});
     let transcript;
     try {
       transcript = await transcribe(audioPath);
     } catch (err) {
       console.error(`🎙️  Transcription failed: ${err.message}`);
-      await msg.reply("🎙️ Sorry — I couldn't transcribe that voice note.").catch(() => {});
+      await msg.reply("🎙️ Sorry — I couldn't transcribe that voice message.").catch(() => {});
       return;
     }
     if (!transcript) {
-      await msg.reply("🎙️ I didn't catch any speech in that voice note.").catch(() => {});
+      await msg.reply("🎙️ I didn't catch any speech in that voice message.").catch(() => {});
       return;
     }
-    console.log(`🎙️  Voice note → "${transcript.slice(0, 100)}"`);
+    console.log(`🎙️  Voice message → "${transcript.slice(0, 100)}"`);
     await msg.reply(`🎙️ heard: "${transcript}"`).catch(() => {});
     userMessage = transcript;
-    attachments = []; // the transcript replaces the audio; don't inject the ogg
+    attachments = []; // the transcript replaces the audio; don't inject the file
   }
 
   // Workout-log channel: a message here is a training note, not a turn for

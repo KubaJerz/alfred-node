@@ -5,6 +5,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
 
 ## [Unreleased]
 ### Added
+- **Voice messages on every channel, not just native voice notes.** Alfred now
+  transcribes a lone audio file dropped in with no caption (a voice memo
+  recorded in another app), the same way it already handled a Discord voice
+  note. Both shapes become their transcript before any channel routing, so a
+  spoken message works on every channel — a turn, the workout log, a Ronnie
+  undo. A caption next to the audio keeps it a normal turn. The decision is a
+  pure, unit-tested module (`voice/detect.js`). (#59)
 - **Ronnie triage — three attention tiers + a nested topic axis.** Attention is
   now three tiers by *urgency*, and is the label parent: **Priority** (interrupt
   now — the only tier that pings — kept in the inbox), **Interesting** (keep +
