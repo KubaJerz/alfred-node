@@ -289,6 +289,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
   keeps deleted events in a Trash for 30 days and restores them intact. Gmail
   deletion stays absent because it needs the scope that empties Trash for good.
   The line is reversibility, not the verb.
+- **Strength: ~40 common exercises added to the interpreter's map.** Leg
+  machines, presses, rows, curl variants, and `dip` now have keys in
+  `EXERCISE_MAP` (`strength/config.js`), so an ordinary substitution earns
+  muscle credit instead of falling back to `unknown` — reps kept, no muscles.
+- **Strength: the exercise map seeds per key, and gains edit helpers.**
+  `seedConfig` (`strength/db.js`) ran only when the map table was empty, so a
+  key added later never reached an existing database; it now inserts any absent
+  key and leaves existing mappings — hand edits included — untouched. Adds
+  `upsertExercise`, `listExercises`, and `unmappedSets`.
 
 ### Changed
 - **Dailies are one folder per day, not one file.** `dailies/YYYY-MM-DD.md`
@@ -398,6 +407,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
   It now stamps `agent/var/last-dream` instead, and the bot starts a fresh
   session on the next message when a dream has run since the last turn — which
   is what forcing a reset was actually for: picking up rewritten memory.
+- **Strength: the interpreter picked a style from the rep pattern and misread
+  it.** The prompt (`strength/digest.js`) called the watch guess "often wrong"
+  and treated reps and weight as ground truth, so the model relabelled a
+  chest/back session as Bulgarian split squats and inflated leg load. It now
+  tallies the watch categories to pick the style first, then labels exercises
+  only within that style.
+- **Strength: an interpreter timeout could pass a half-labelled workout.**
+  `spawnHaiku` used spawn's `timeout` option; when it fired, `claude` caught the
+  SIGTERM and exited 143, and the old guard accepted partial output as success.
+  It now owns its timer and rejects loudly whatever reached stdout, and the
+  default is 120s → 240s via `STRENGTH_INTERPRET_TIMEOUT_MS`.
 
 ### Added
 - `bootstrap()` creates `agent/var/` and seeds `USER.md` (from the new tracked
