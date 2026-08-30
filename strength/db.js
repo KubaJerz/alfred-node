@@ -12,7 +12,7 @@
 import { DatabaseSync } from "node:sqlite";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { EXERCISE_MAP, PROGRAM_TEMPLATES } from "./config.js";
+import { EXERCISE_MAP, MUSCLES, PROGRAM_TEMPLATES } from "./config.js";
 
 const SCHEMA = `
 -- Master row per activity, lifting or not. The spine everything hangs off.
@@ -127,12 +127,20 @@ export function openDb(dbPath = defaultDbPath()) {
   return db;
 }
 
-// Seed config only when empty, so re-opening never clobbers edits made in the DB.
+// Seed config without clobbering edits made in the DB. Templates seed only when
+// the table is empty; the exercise map seeds per *exercise*, so a key added to
+// EXERCISE_MAP later lands on an existing database while every mapping already
+// there — including ones edited by hand — is left exactly as it is. (The trade:
+// deleting a seeded exercise from the DB alone won't stick, since the next open
+// re-adds it. Remove it from EXERCISE_MAP too, or keep it and stop using it.)
 function seedConfig(db) {
-  if (db.prepare("SELECT COUNT(*) AS c FROM exercise_map").get().c === 0) {
-    const ins = db.prepare("INSERT INTO exercise_map(exercise, muscle, factor) VALUES(?,?,?)");
-    for (const [ex, contribs] of Object.entries(EXERCISE_MAP))
-      for (const [muscle, factor] of contribs) ins.run(ex, muscle, factor);
+  const known = new Set(
+    db.prepare("SELECT DISTINCT exercise FROM exercise_map").all().map((r) => r.exercise)
+  );
+  const ins = db.prepare("INSERT INTO exercise_map(exercise, muscle, factor) VALUES(?,?,?)");
+  for (const [ex, contribs] of Object.entries(EXERCISE_MAP)) {
+    if (known.has(ex)) continue;
+    for (const [muscle, factor] of contribs) ins.run(ex, muscle, factor);
   }
   if (db.prepare("SELECT COUNT(*) AS c FROM program_template").get().c === 0) {
     const ins = db.prepare("INSERT INTO program_template(style, position, exercise, sets, note) VALUES(?,?,?,?,?)");
@@ -192,6 +200,41 @@ export function insertNote(db, { received_at, note_date, text }) {
   return db.prepare(
     "INSERT INTO workout_note (received_at, note_date, text) VALUES (?,?,?)"
   ).run(received_at, note_date, text).lastInsertRowid;
+}
+
+/** Add or replace one exercise's muscle contributions. Wholesale per exercise,
+ *  so re-adding with a different split converges rather than accumulating.
+ *  contribs: [[muscle, factor], ...] — factor 1.0 primary, 0.5 compound assist. */
+export function upsertExercise(db, exercise, contribs) {
+  const bad = contribs.filter(([m]) => !MUSCLES.includes(m)).map(([m]) => m);
+  if (bad.length) throw new Error(`unknown muscle(s): ${bad.join(", ")} (allowed: ${MUSCLES.join(", ")})`);
+  if (!contribs.length) throw new Error("an exercise needs at least one muscle");
+  const before = db.prepare("SELECT muscle, factor FROM exercise_map WHERE exercise = ? ORDER BY muscle").all(exercise);
+  db.prepare("DELETE FROM exercise_map WHERE exercise = ?").run(exercise);
+  const ins = db.prepare("INSERT INTO exercise_map(exercise, muscle, factor) VALUES(?,?,?)");
+  for (const [muscle, factor] of contribs) ins.run(exercise, muscle, factor);
+  return { exercise, before, after: contribs.map(([muscle, factor]) => ({ muscle, factor })) };
+}
+
+/** Every exercise the interpreter is allowed to use, with its muscle split. */
+export function listExercises(db) {
+  const out = {};
+  for (const r of db.prepare("SELECT exercise, muscle, factor FROM exercise_map ORDER BY exercise, muscle").all())
+    (out[r.exercise] ??= []).push([r.muscle, r.factor]);
+  return out;
+}
+
+/** Sets the interpreter couldn't name, newest first — the queue of exercises
+ *  the map is still missing. */
+export function unmappedSets(db, limit = 50) {
+  return db.prepare(`
+    SELECT l.activity_id, w.date, w.style, l.set_idx, l.reps, l.weight_lb
+    FROM lift_set l JOIN workout w ON w.id = l.activity_id
+    WHERE l.exercise = 'unknown'
+       OR l.exercise NOT IN (SELECT DISTINCT exercise FROM exercise_map)
+    ORDER BY w.date DESC, l.set_idx
+    LIMIT ?
+  `).all(limit);
 }
 
 // ---- reads ------------------------------------------------------------------
