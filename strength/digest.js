@@ -13,77 +13,16 @@
 // runModel is injected so the DB/validation logic is tested without spawning a
 // model; the default spawns `claude -p` the way bot.js does.
 
-import { spawn } from "node:child_process";
 import { syncStrength } from "./ingest.js";
 import { getExerciseMap, getTemplates, rawSetsForWorkout, recentSessions } from "./db.js";
+import { routeNotes } from "./notes.js";
 import { kgToLb } from "./config.js";
+import { spawnHaiku, extractJson } from "./model.js";
 
-const HAIKU_MODEL = "claude-haiku-4-5-20251001";
-
-// One interpretation is a whole-session reasoning call; observed runs land at
-// 100-170s, so the old 120s cap was inside the noise. Overridable per-run.
-const INTERPRET_TIMEOUT_MS = parseInt(process.env.STRENGTH_INTERPRET_TIMEOUT_MS || "240000");
-
-// Spawn a headless Haiku and return the model's text. Mirrors bot.js's runClaude
-// envelope handling: --output-format json wraps the reply as {result: "..."}.
-//
-// We own the timer rather than using spawn's `timeout` option, for one reason:
-// when that option fires, `claude` catches the SIGTERM and exits 143 with a NULL
-// signal, indistinguishable from an ordinary non-zero exit. Worse, if the model
-// had already flushed part of its JSON, the old code took the partial text as a
-// success — a timeout could silently produce a half-labelled workout. A timeout
-// is now always an error, loudly, whatever made it to stdout.
-function spawnHaiku(prompt, { timeoutMs = INTERPRET_TIMEOUT_MS } = {}) {
-  return new Promise((resolve, reject) => {
-    const proc = spawn(
-      "claude",
-      ["-p", prompt, "--model", HAIKU_MODEL, "--output-format", "json"],
-      // Prompt rides in on `-p`; the child never reads stdin. Point it at
-      // /dev/null so the CLI doesn't stall 3s waiting for piped input and then
-      // emit "no stdin data received in 3s" into stderr. See bot.js runClaude.
-      { env: process.env, stdio: ["ignore", "pipe", "pipe"] }
-    );
-    let out = "", err = "", timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      proc.kill("SIGTERM");
-      // Backstop: if it ignores SIGTERM, take it out hard a moment later.
-      setTimeout(() => proc.kill("SIGKILL"), 5000).unref();
-    }, timeoutMs);
-    proc.stdout.on("data", (d) => (out += d));
-    proc.stderr.on("data", (d) => (err += d));
-    proc.on("error", (e) => { clearTimeout(timer); reject(e); });
-    proc.on("close", (code) => {
-      clearTimeout(timer);
-      if (timedOut) {
-        return reject(new Error(
-          `interpreter TIMED OUT after ${Math.round(timeoutMs / 1000)}s — ` +
-          `${out.length} bytes of partial output discarded rather than trusted. ` +
-          `Raise STRENGTH_INTERPRET_TIMEOUT_MS if this repeats.`
-        ));
-      }
-      if (code !== 0 && !out.trim()) {
-        return reject(new Error(`claude exited ${code}: ${err.slice(0, 300)}`));
-      }
-      // The last valid JSON line is the result envelope; unwrap it to the text.
-      let text = out;
-      for (const line of out.trim().split("\n").reverse()) {
-        try { text = JSON.parse(line).result ?? text; break; } catch { /* keep looking */ }
-      }
-      resolve(text);
-    });
-  });
-}
-
-// Pull the JSON object out of the model's text, tolerant of ```json fences and
-// surrounding prose.
-export function extractJson(text) {
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-  const body = fenced ? fenced[1] : text;
-  const start = body.indexOf("{"), end = body.lastIndexOf("}");
-  if (start === -1 || end === -1) throw new Error("no JSON object in model output");
-  return JSON.parse(body.slice(start, end + 1));
-}
+// The model spawner and JSON extractor moved to model.js so notes.js can share
+// them without importing this module. Re-exported so callers and tests that
+// reach extractJson through digest keep working.
+export { extractJson };
 
 function catGuess(watch_category) {
   try {
@@ -161,6 +100,15 @@ function buildPrompt({ rawSets, templates, vocabulary, notes, recent = [] }) {
     "program, allow for skipped or substituted exercises, and use the weight/rep",
     "pattern and rest to group sets into exercises. Return ONLY this JSON (no prose):",
     '{"style":"leg|arms|chest_back|other","sets":[{"set_idx":<int>,"exercise":"<key or unknown>","confidence":<0..1>}]}',
+    ...(notes.length
+      ? [
+          "",
+          "The note above was routed to THIS session as its description. You can see",
+          "both now. If the note plainly describes different work than these sets show",
+          '(a misroute — wrong day), add "note_fits":false with a one-line "why". If it',
+          'fits, or you are unsure, omit them (default is that it fits).',
+        ]
+      : []),
     "Include every working set. Do not include rest sets. Do not invent numbers.",
   ].join("\n");
 }
@@ -174,7 +122,9 @@ export async function interpretWorkout({ db, activityId, runModel = spawnHaiku }
   const map = getExerciseMap(db);
   const workout = db.prepare("SELECT * FROM workout WHERE id = ?").get(activityId);
   if (!workout) throw new Error(`no such workout: ${activityId}`);
-  const notes = db.prepare("SELECT * FROM workout_note WHERE note_date = ? ORDER BY received_at").all(workout.date);
+  // Notes reach a workout through routing (workout_note.activity_id), not the old
+  // same-day date guess — so a late or pre-sync note lands on the right session.
+  const notes = db.prepare("SELECT * FROM workout_note WHERE activity_id = ? ORDER BY received_at").all(activityId);
   const recent = recentSessions(db, { before: workout.date, excludeId: activityId });
 
   const prompt = buildPrompt({ rawSets: raw, templates: getTemplates(db), vocabulary: Object.keys(map), notes, recent });
@@ -210,13 +160,29 @@ export async function interpretWorkout({ db, activityId, runModel = spawnHaiku }
     }
   }
 
-  // Coarse note match: a single same-day note attaches; two-a-day stays unlinked
-  // (the note text still shaped the interpretation via the prompt).
-  const noteId = notes.length === 1 ? notes[0].id : null;
+  // Misroute check (cheap second opinion): the interpreter saw both the note and
+  // the sets. If it says the note describes different work, the route was wrong —
+  // unlink the note(s) and re-pend them so the next digest routes them elsewhere.
+  // interpreted_at is still stamped: this session is labelled correctly, it just
+  // no longer claims a note that never belonged to it.
+  let misrouted = null;
+  if (notes.length && result.note_fits === false) {
+    const ids = notes.map((n) => n.id);
+    db.prepare(
+      `UPDATE workout_note SET activity_id = NULL, routed_at = NULL, route_attempts = route_attempts + 1
+       WHERE id IN (${ids.map(() => "?").join(",")})`
+    ).run(...ids);
+    misrouted = { noteIds: ids, why: result.note_mismatch || null };
+  }
+
+  // The reverse link on the workout row: a single routed note attaches; two notes
+  // stay unlinked here (both still shaped the prompt, and both remain reachable
+  // through workout_note.activity_id).
+  const noteId = !misrouted && notes.length === 1 ? notes[0].id : null;
   db.prepare("UPDATE workout SET style = ?, interpreted_at = ?, note_id = ? WHERE id = ?")
     .run(result.style ?? null, new Date().toISOString(), noteId, activityId);
 
-  return { activityId, style: result.style ?? null, written, flagged, misfires, unknowns };
+  return { activityId, style: result.style ?? null, written, flagged, misfires, unknowns, misrouted };
 }
 
 /**
@@ -238,6 +204,19 @@ export async function digest({ db, call, runModel, from, to } = {}) {
     syncError = err.message;
     console.error(`⚠️  strength sync skipped (${err.message}); interpreting already-synced workouts only`);
   }
+
+  // Route pending notes to their sessions BEFORE interpreting, in this same pass:
+  // a note that lands on an already-interpreted workout nulls its interpreted_at,
+  // so the re-interpretation that the note triggers happens in the loop below
+  // rather than a pass later. A routing failure must not sink the interpret loop.
+  let routing = null, routingError = null;
+  try {
+    routing = await routeNotes({ db, runModel });
+  } catch (err) {
+    routingError = err.message;
+    console.error(`⚠️  note routing skipped (${err.message}); interpreting without it`);
+  }
+
   const pending = db.prepare("SELECT id FROM workout WHERE is_lifting = 1 AND interpreted_at IS NULL").all();
   const interpreted = [], errors = [];
   for (const { id } of pending) {
@@ -247,5 +226,5 @@ export async function digest({ db, call, runModel, from, to } = {}) {
       errors.push({ activityId: id, error: err.message });
     }
   }
-  return { sync, syncError, interpreted, errors };
+  return { sync, syncError, routing, routingError, interpreted, errors };
 }

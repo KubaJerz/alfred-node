@@ -3,6 +3,7 @@
 // real. Nothing here reaches Intervals.icu or the network.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { DatabaseSync } from "node:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -89,4 +90,28 @@ test("recentSessions returns recent interpreted sessions, newest first, with con
   const row = out[0].top.find((e) => e.exercise === "machine_row_wide");
   assert.equal(row.weight, "280");
   db.close();
+});
+
+test("openDb migrates the routing columns onto a pre-routing database", () => {
+  const p = path.join(dir, "old-schema.db");
+  // Build a workout_note the way it shipped before routing — no routing columns.
+  const raw = new DatabaseSync(p);
+  raw.exec(`CREATE TABLE workout(id TEXT PRIMARY KEY, date TEXT, is_lifting INT, interpreted_at TEXT, style TEXT, note_id INT);
+            CREATE TABLE workout_note(id INTEGER PRIMARY KEY AUTOINCREMENT, received_at TEXT, note_date TEXT, text TEXT);`);
+  raw.prepare("INSERT INTO workout_note(received_at,note_date,text) VALUES(?,?,?)").run("2026-08-30T14:00:00Z", "2026-08-30", "pre-routing note");
+  raw.close();
+
+  const db = openDb(p); // runs migrate()
+  const cols = new Set(db.prepare("PRAGMA table_info(workout_note)").all().map((c) => c.name));
+  for (const c of ["activity_id", "routed_at", "route_confidence", "route_attempts"])
+    assert.ok(cols.has(c), `migrate added ${c}`);
+  const row = db.prepare("SELECT text, activity_id, route_attempts FROM workout_note").get();
+  assert.equal(row.text, "pre-routing note", "existing note preserved");
+  assert.equal(row.activity_id, null);
+  assert.equal(row.route_attempts, 0, "new NOT NULL column defaults to 0");
+  db.close();
+  // Idempotent: opening again does not error on the already-present columns.
+  const db2 = openDb(p);
+  assert.equal(db2.prepare("SELECT COUNT(*) c FROM workout_note").get().c, 1);
+  db2.close();
 });

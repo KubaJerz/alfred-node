@@ -67,12 +67,33 @@ test("re-interpreting replaces rather than duplicating", async () => {
   assert.equal(db.prepare("SELECT COUNT(*) AS c FROM set_muscle WHERE activity_id='w1'").get().c, 2);
 });
 
-test("a single same-day note is linked to the workout", async () => {
+test("a single routed note is linked to the workout by activity_id", async () => {
   const db = openDb(":memory:");
   seedWorkout(db);
+  // The note reaches the workout through routing (activity_id), not the arrival date.
   const noteId = insertNote(db, { received_at: "2026-08-24T19:00:00Z", note_date: "2026-08-24", text: "back day, felt strong" });
+  db.prepare("UPDATE workout_note SET activity_id = 'w1', routed_at = '2026-08-24T20:00:00Z' WHERE id = ?").run(noteId);
   await interpretWorkout({ db, activityId: "w1", runModel: fakeModel });
   assert.equal(db.prepare("SELECT note_id FROM workout WHERE id='w1'").get().note_id, noteId);
+});
+
+test("the misfire check unlinks a note the interpreter says does not fit", async () => {
+  const db = openDb(":memory:");
+  seedWorkout(db);
+  const noteId = insertNote(db, { received_at: "2026-08-24T19:00:00Z", note_date: "2026-08-24", text: "leg day, heavy squats" });
+  db.prepare("UPDATE workout_note SET activity_id = 'w1', routed_at = '2026-08-24T20:00:00Z' WHERE id = ?").run(noteId);
+  // Model labels the session but flags the note as describing different work.
+  const mismatchModel = async () => JSON.stringify({
+    style: "chest_back", note_fits: false, note_mismatch: "note is legs, session is pulls",
+    sets: [{ set_idx: 0, exercise: "lat_pulldown_wide", confidence: 0.9 }],
+  });
+  const r = await interpretWorkout({ db, activityId: "w1", runModel: mismatchModel });
+  assert.ok(r.misrouted, "expected a misroute to be reported");
+  const note = db.prepare("SELECT activity_id, routed_at, route_attempts FROM workout_note WHERE id = ?").get(noteId);
+  assert.equal(note.activity_id, null, "note unlinked");
+  assert.equal(note.routed_at, null, "note re-pended");
+  assert.equal(note.route_attempts, 1, "attempt counted");
+  assert.equal(db.prepare("SELECT note_id FROM workout WHERE id='w1'").get().note_id, null);
 });
 
 test("digest only interprets not-yet-interpreted lifting workouts", async () => {
@@ -128,6 +149,35 @@ test("the prompt carries recent-session context and weighs three signals", async
   assert.match(seen, /rarely runs two sessions back-to-back/);
   // The old absolute clause is gone.
   assert.doesNotMatch(seen, /do NOT let the weight\/rep pattern argue you out of it/);
+  db.close();
+});
+
+test("digest routes a pending note, then re-interprets its target in the same pass", async () => {
+  const db = openDb(":memory:");
+  // An already-interpreted arms session with a raw set to rebuild from.
+  upsertWorkout(db, { id: "i28", date: "2026-08-28", type: "WeightTraining", is_lifting: true });
+  upsertRawSet(db, { activity_id: "i28", set_idx: 0, set_type: "active", watch_category: { category: ["curl"] }, reps: 12, weight_kg: 30, rest_sec: 90 });
+  db.prepare("UPDATE workout SET style='arms', interpreted_at='2026-08-28T20:00:00Z' WHERE id='i28'").run();
+  db.prepare("INSERT INTO lift_set (activity_id,set_idx,exercise,reps,weight_lb) VALUES ('i28',0,'rope_curl',12,66)").run();
+  // A pending note that belongs to i28.
+  const noteId = insertNote(db, { received_at: "2026-08-30T14:00:00Z", note_date: "2026-08-30", text: "the last arms, added dips" });
+
+  // One model, two jobs: routing when it sees candidates, interpreting otherwise.
+  const dual = async (prompt) =>
+    prompt.includes("Candidate sessions")
+      ? JSON.stringify({ routes: [{ note: "n1", activity_id: "i28", confidence: 0.9, why: "arms" }] })
+      : JSON.stringify({ style: "arms", sets: [{ set_idx: 0, exercise: "rope_curl", confidence: 0.9 }] });
+
+  const call = async () => { throw new Error("no broker in test"); }; // skip sync, keep the pass
+  const out = await digest({ db, call, runModel: dual });
+
+  assert.equal(out.routing.routed.length, 1, "the note was routed");
+  assert.deepEqual(out.routing.reinterpret, ["i28"], "its interpreted target was re-opened");
+  assert.equal(out.interpreted.length, 1, "and re-interpreted in this same pass");
+  assert.equal(out.interpreted[0].activityId, "i28");
+  // The note is now linked, and the workout is interpreted again.
+  assert.equal(db.prepare("SELECT activity_id FROM workout_note WHERE id=?").get(noteId).activity_id, "i28");
+  assert.ok(db.prepare("SELECT interpreted_at FROM workout WHERE id='i28'").get().interpreted_at);
   db.close();
 });
 
