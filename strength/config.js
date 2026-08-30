@@ -29,6 +29,58 @@ export const EXERCISE_MAP = {
   lat_pulldown_wide:        [["back", 1.0], ["biceps", 0.5]],
   lat_pulldown_supinated:   [["back", 1.0], ["biceps", 0.5]],
   machine_row_wide:         [["back", 1.0], ["biceps", 0.5]],
+
+  // Common gym movements beyond the three programs — seeded so the interpreter
+  // has a name for the ordinary substitution instead of falling back to
+  // `unknown` (which keeps the reps but earns no muscle credit). Same factor
+  // convention: 1.0 primary, 0.5 compound assist.
+  // legs
+  front_squat:              [["legs", 1.0]],
+  goblet_squat:             [["legs", 1.0]],
+  hack_squat:               [["legs", 1.0]],
+  leg_press:                [["legs", 1.0]],
+  leg_extension:            [["legs", 1.0]],
+  leg_curl:                 [["legs", 1.0]],
+  walking_lunge:            [["legs", 1.0]],
+  hip_thrust:               [["legs", 1.0]],
+  calf_raise:               [["legs", 1.0]],
+  conventional_deadlift:    [["legs", 1.0], ["back", 0.5]],
+  sumo_deadlift:            [["legs", 1.0], ["back", 0.5]],
+  good_morning:             [["legs", 1.0], ["back", 0.5]],
+  // back
+  pull_up:                  [["back", 1.0], ["biceps", 0.5]],
+  chin_up:                  [["back", 1.0], ["biceps", 0.5]],
+  barbell_row:              [["back", 1.0], ["biceps", 0.5]],
+  db_row:                   [["back", 1.0], ["biceps", 0.5]],
+  t_bar_row:                [["back", 1.0], ["biceps", 0.5]],
+  seated_cable_row:         [["back", 1.0], ["biceps", 0.5]],
+  machine_row_narrow:       [["back", 1.0], ["biceps", 0.5]],
+  lat_pulldown_narrow:      [["back", 1.0], ["biceps", 0.5]],
+  straight_arm_pulldown:    [["back", 1.0]],
+  // chest
+  barbell_bench_press:      [["chest", 1.0], ["triceps", 0.5], ["shoulders", 0.5]],
+  db_bench_press:           [["chest", 1.0], ["triceps", 0.5], ["shoulders", 0.5]],
+  machine_incline_press:    [["chest", 1.0], ["triceps", 0.5], ["shoulders", 0.5]],
+  cable_flye:               [["chest", 1.0]],
+  pec_deck:                 [["chest", 1.0]],
+  // shoulders
+  db_shoulder_press:        [["shoulders", 1.0], ["triceps", 0.5]],
+  front_raise:              [["shoulders", 1.0]],
+  cable_lateral_raise:      [["shoulders", 1.0]],
+  rear_delt_flye:           [["shoulders", 1.0], ["back", 0.5]],
+  face_pull:                [["shoulders", 1.0], ["back", 0.5]],
+  upright_row:              [["shoulders", 1.0], ["biceps", 0.5]],
+  // arms
+  dip:                      [["triceps", 1.0], ["chest", 0.5], ["shoulders", 0.5]],
+  bench_dip:                [["triceps", 1.0]],
+  close_grip_bench:         [["triceps", 1.0], ["chest", 0.5]],
+  skullcrusher:             [["triceps", 1.0]],
+  db_overhead_extension:    [["triceps", 1.0]],
+  barbell_curl:             [["biceps", 1.0]],
+  ez_bar_curl:              [["biceps", 1.0]],
+  cable_curl:               [["biceps", 1.0]],
+  incline_db_curl:          [["biceps", 1.0]],
+  concentration_curl:       [["biceps", 1.0]],
 };
 
 // The three programs, ordered. Context the interpreter reasons against — this is
