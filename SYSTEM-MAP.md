@@ -57,7 +57,7 @@ answers, it exits.
 ```mermaid
 flowchart TD
     U["Kuba · Discord"] -->|message| GATE{"authorized<br/>user?"}
-    GATE -->|"voice note"| TR["transcribe<br/>ffmpeg → Parakeet int8<br/>voice/transcribe.js"]
+    GATE -->|"voice note / audio file"| TR["transcribe<br/>ffmpeg → Parakeet int8<br/>voice/transcribe.js"]
     TR -->|"transcript = message"| Q
     GATE -->|"text / files"| Q["enqueueTurn<br/>one turn at a time"]
     CTX["loadContext<br/>SOUL.md + USER.md + MEMORY.md + today's daily"] --> Q
@@ -78,9 +78,12 @@ flowchart TD
     class SK,CLIS stack
 ```
 
-A **voice note** is the one message that isn't its own text: it arrives as a
-lone Opus attachment with the `IsVoiceMessage` flag. `voice/transcribe.js` runs
-it through ffmpeg (Opus → 16 kHz mono) and the on-device Parakeet-TDT int8 model
+A **voice message** is the one input that isn't its own text. It takes two
+shapes, both meaning "the message is the audio": a native Discord voice note
+(the `IsVoiceMessage` flag), or a lone audio file dropped in with no caption — a
+voice memo recorded in another app. `voice/detect.js` decides (a caption next to
+the audio keeps it a normal turn). `voice/transcribe.js` runs the file through
+ffmpeg (→ 16 kHz mono) and the on-device Parakeet-TDT int8 model
 (`voice/transcribe.py`, via onnx-asr) — audio is transcribed locally, never sent
 out — and the transcript *becomes* the user message, so everything downstream is
 blind to whether a turn was typed or spoken. The bot echoes `🎙️ heard: …` first,
