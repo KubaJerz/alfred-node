@@ -9,9 +9,8 @@ import { startBroker } from "./google/broker.js";
 import { NOTION_ROUTES } from "./notion/broker.js";
 import { INTERVALS_ROUTES } from "./intervals/broker.js";
 import { openDb as openStrengthDb, insertNote } from "./strength/db.js";
-import { startMailListener, migrateBacklogToQueue, enrich } from "./google/gmail-push.js";
+import { startMailListener, enrich } from "./google/gmail-push.js";
 import { gmailClient, PUBSUB_KEY_FILE } from "./google/auth.js";
-import { drainMailDigest } from "./google/gmail-buffer.js";
 import { RONNIE_ROUTES } from "./ronnie/broker-routes.js";
 import { makeRonnie } from "./ronnie/runner.js";
 import { resolveRonnieLabels } from "./ronnie/labels.js";
@@ -787,10 +786,9 @@ async function handleTurn(msg, userMessage, attachments = []) {
 
     // Files the user sent ride with THIS message, not the session context, so
     // they reach the turn on a resumed session too (a photo dropped mid-chat is
-    // the common case). Unlike the mail digest below — which is a fresh-session
-    // concern and lives in loadContext — the attachment block attaches to the
-    // message body. When there's no caption, give the turn a short placeholder
-    // so it isn't handed an empty string.
+    // the common case). The attachment block attaches to the message body. When
+    // there's no caption, give the turn a short placeholder so it isn't handed
+    // an empty string.
     const attachBlock = buildAttachmentBlock(attachments);
     const messageBody = attachBlock
       ? `${attachBlock}\n\n${userMessage || "(The user sent the file(s) above with no other text.)"}`
@@ -802,14 +800,7 @@ async function handleTurn(msg, userMessage, attachments = []) {
     } else {
       if (dreamed) console.log("🌙 A dream pass ran since the last turn — starting fresh to load new memory");
       console.log(`🆕 Starting new session - loading context...`);
-      // Tier-1 mail: drain the buffer (reads + clears it) and fold it into the
-      // context of this fresh session. Only new sessions surface it — a resumed
-      // conversation re-injects nothing, so buffered mail waits for the next
-      // fresh start (a /clear, a dream, or a first message of the day). The
-      // digest goes into finalMessage, which runClaude never logs, so it can't
-      // reach messages.jsonl or the memory funnel downstream of it.
-      const digest = await drainMailDigest();
-      const context = await loadContext(digest);
+      const context = await loadContext();
       finalMessage = context + messageBody;
     }
 
@@ -955,7 +946,7 @@ async function strengthFollowupTurn(msg, { ok, out, err }) {
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
-async function loadContext(digest = "") {
+async function loadContext() {
   const today = easternDate();
 
   // SOUL lives with the agent's tracked config; the rest is personal state.
@@ -982,9 +973,6 @@ async function loadContext(digest = "") {
     }
   }
   context += "\n=== SYSTEM CONTEXT END ===\n";
-  // Buffered mail rides between the system context and the user's message — a
-  // delimited block the turn can read but that is clearly not the user talking.
-  if (digest) context += `\n${digest}\n`;
   context += "\nUser Message: ";
   return context;
 }
@@ -1146,13 +1134,9 @@ if (ronnieConfigured) {
   console.log("🧰 Ronnie is on — inbound mail is queued, triaged, labelled, and pinged");
 
   if (ronnie && sharedGmail) {
-    // Load the durable work queue, then migrate anything left in the old digest
-    // buffer into it (one-time, dedup-safe). Runs before the listener so it can't
-    // race a live drain.
+    // Load the durable work queue. Runs before the listener so it can't race a
+    // live drain.
     await ronnie.queue.load();
-    await migrateBacklogToQueue({ queue: ronnie.queue }).catch((err) =>
-      console.error(`⚠️  Ronnie backlog migration failed: ${err.message}`)
-    );
 
     // A periodic sweep is what re-probes held mail during a Haiku outage — the
     // breaker's cooldown only matters if something calls drain() again. A no-op
@@ -1168,8 +1152,9 @@ if (ronnieConfigured) {
 // subscription / service-account key it logs that it's off and returns null,
 // so a box without the cloud setup runs exactly as before. A failure to start
 // (bad key, unreachable Pub/Sub) is logged and swallowed — mail is an add-on,
-// not a reason to take the whole bot down. When Ronnie is on, each drain enqueues
-// new ids and kicks the consumer; when off, the drain buffers for the digest.
+// not a reason to take the whole bot down. Ronnie is the only consumer: with it
+// off the listener does not start, so each drain enqueues new ids and kicks the
+// consumer.
 startMailListener({ gmail: sharedGmail, enqueue: ronnie?.enqueue, onDrained: ronnie?.drain }).catch((err) =>
   console.error(`⚠️  Gmail push listener failed to start: ${err.message}`)
 );

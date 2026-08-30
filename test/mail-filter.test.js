@@ -24,7 +24,7 @@ const MUST_SUPPRESS = [
   { snippet: "Enter the code 903112 to log in" },
 ];
 
-// Ordinary mail must survive, or the digest is useless.
+// Ordinary mail must survive the screen, or triage gets nothing.
 const MUST_PASS = [
   { from: "no-reply@amex.com", subject: "Your statement is ready" },
   { from: "sarah@example.com", subject: "Re: Thursday" },

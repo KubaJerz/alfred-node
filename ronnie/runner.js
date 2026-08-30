@@ -24,7 +24,6 @@ import { makeQueue } from "./queue.js";
 import { makeBreaker } from "./breaker.js";
 import { makeConsumer } from "./consumer.js";
 import { screen } from "../google/mail-filter.js";
-import { appendPending } from "../google/gmail-buffer.js";
 
 /**
  * Assemble Ronnie. Returns { meter, queue, breaker, enqueue, drain }, or null
@@ -86,7 +85,7 @@ export function makeRonnie({
 
   const consumer =
     typeof enrichOne === "function"
-      ? makeConsumer({ queue, breaker, enrichOne, screen, handle, digest: appendPending, surface, poisonCap, log })
+      ? makeConsumer({ queue, breaker, enrichOne, screen, handle, surface, poisonCap, log })
       : null;
 
   // Reverse an action from a Discord "undo <token>" reply. Two forms, keyed by a

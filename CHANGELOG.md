@@ -4,6 +4,23 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [SemVer](https://semver.org/).
 
 ## [Unreleased]
+### Removed
+- **The tier-1 mail buffer and its digest.** `google/gmail-buffer.js`,
+  `pending-mail.jsonl`, and the `drainMailDigest()` that fed a new session's
+  context are gone. Ronnie made the buffer near-empty: triaged mail lands in
+  Gmail labels and (for Priority) a Discord ping, so the only thing left in the
+  buffer was a content-free "withheld credential" marker. A withheld message now
+  drops at the consumer — the id leaves the queue and nothing is kept. The
+  credential *screen* (`mail-filter.js`) is unchanged, so no code ever reaches
+  disk. Also removed the one-time `migrateBacklogToQueue` boot step, now moot.
+
+### Changed
+- **Inbound mail requires Ronnie.** Ronnie is the only mail consumer now. Without
+  it, `startMailListener` does not start, so mail stays in Gmail and nothing is
+  lost. A history-gap resync (404) no longer writes a digest marker — the gap is
+  logged and the mail stays in Gmail for a search to find. If a drain runs with
+  no consumer, it holds the Gmail cursor and logs, so no arrival is skipped.
+
 ### Added
 - **Voice messages on every channel, not just native voice notes.** Alfred now
   transcribes a lone audio file dropped in with no caption (a voice memo
