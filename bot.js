@@ -572,25 +572,11 @@ client.on("messageCreate", async (msg) => {
     return;
   }
 
-  // Workout-log channel: a message here is a training note, not a turn for
-  // Alfred. Store it immutably (keyed by the local date, so it lines up with the
-  // workout's own date) for the strength interpreter, ack it, and stop. Off
-  // unless STRENGTH_LOG_CHANNEL is set.
-  if (STRENGTH_LOG_CHANNEL && msg.channelId === STRENGTH_LOG_CHANNEL) {
-    const note = msg.content.trim();
-    if (note) {
-      try {
-        recordWorkoutNote(note);
-        msg.react("💪").catch(() => {}); // best-effort ack
-      } catch (err) {
-        console.error(`🏋️  Failed to log workout note: ${err.message}`);
-        msg.react("⚠️").catch(() => {});
-      }
-    }
-    return;
-  }
-
-  // Strip mention and trim whitespace from the message
+  // Resolve the message text before any channel routing. Strip a mention, then
+  // download attachments, then — for a voice note — transcribe it so the
+  // transcript BECOMES the message. This runs first so a voicemail works on
+  // every channel: whatever a channel does next (a turn, a workout-log record,
+  // a Ronnie undo) then operates on words, never an Opus blob.
   let userMessage = msg.content.replace(/<@!?\d+>/g, "").trim();
 
   // Download any files first — a file sent with no caption arrives with empty
@@ -623,6 +609,25 @@ client.on("messageCreate", async (msg) => {
     await msg.reply(`🎙️ heard: "${transcript}"`).catch(() => {});
     userMessage = transcript;
     attachments = []; // the transcript replaces the audio; don't inject the ogg
+  }
+
+  // Workout-log channel: a message here is a training note, not a turn for
+  // Alfred. Store it immutably (keyed by the local date, so it lines up with the
+  // workout's own date) for the strength interpreter, ack it, and stop. Off
+  // unless STRENGTH_LOG_CHANNEL is set. A voicemail reaches here as its
+  // transcript, so a spoken note is logged the same as a typed one.
+  if (STRENGTH_LOG_CHANNEL && msg.channelId === STRENGTH_LOG_CHANNEL) {
+    const note = userMessage.trim();
+    if (note) {
+      try {
+        recordWorkoutNote(note);
+        msg.react("💪").catch(() => {}); // best-effort ack
+      } catch (err) {
+        console.error(`🏋️  Failed to log workout note: ${err.message}`);
+        msg.react("⚠️").catch(() => {});
+      }
+    }
+    return;
   }
 
   if (!userMessage && attachments.length === 0) return;
