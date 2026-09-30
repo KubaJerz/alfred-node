@@ -19,6 +19,7 @@ import { easternDate, dailyDir, dailyNotePath, attachmentName, buildAttachmentBl
 import { parseClearCommand } from "./commands.js";
 import { transcribe, transcriptionAvailable } from "./voice/transcribe.js";
 import { isVoiceInput } from "./voice/detect.js";
+import { browserEnv } from "./browser.js";
 
 // ── Config ──────────────────────────────────────────────────────────────────
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
@@ -323,6 +324,7 @@ function runClaude(message, sessionId) {
         HOME: process.env.HOME,
         ALFRED_BROKER: broker.url,
         ALFRED_BROKER_TOKEN: broker.token,
+        ...BROWSER_ENV,
       },
       // The prompt rides in on `-p`, so the child never reads stdin. Leaving it
       // an open, unwritten pipe makes the CLI wait 3s for piped input and then
@@ -1082,6 +1084,13 @@ await bootstrap();
 // and Intervals.icu routes mount alongside Google's on the one loopback server,
 // reached with the same token — one gateway, never a server per service.
 const broker = await startBroker({ extraRoutes: { ...NOTION_ROUTES, ...INTERVALS_ROUTES } });
+
+// The browser's PATH and user agent (browser.js), read once at startup. If Chrome
+// updates while the bot runs, the user agent is one version old until the next
+// restart. That signal is small. "HeadlessChrome" is the signal sites block.
+const BROWSER_ENV = browserEnv(REPO_DIR);
+// agent-browser saves to the path Alfred gives it but never makes the folder.
+await mkdir(path.join(AGENT_DIR, "var", "screenshots"), { recursive: true });
 
 // Ronnie: a second, narrow broker (its own port and token, only the label +
 // calendar-import/remove routes) plus the queue + consumer that triage inbound

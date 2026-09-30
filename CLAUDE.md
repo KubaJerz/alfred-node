@@ -14,8 +14,8 @@ Four kinds of files, deliberately kept apart:
 | path | what | in git? |
 |---|---|---|
 | repo root | the app + dev process — `bot.js`, `CLAUDE.md`, `CONTRIBUTING.md`, `TODO.md` | yes |
-| `agent/` | Alfred's config — `SOUL.md`, `CLAUDE.md`, `memory-prompt.md`. Also its cwd. | yes |
-| `agent/.claude/skills/` | per-capability instructions Claude Code loads on its own (`gmail`, `gcal`) | yes |
+| `agent/` | Alfred's config — `SOUL.md`, `CLAUDE.md`, `memory-prompt.md`, `agent-browser.json`. Also its cwd. | yes |
+| `agent/.claude/skills/` | per-capability instructions Claude Code loads on its own (`gmail`, `gcal`, `browser`, …) | yes |
 | `agent/var/` | Alfred's state — memories, transcripts, `state.json`, logs, `USER.md` | **never** |
 
 `agent/var/` is personal data. One `.gitignore` rule covers the whole tree;

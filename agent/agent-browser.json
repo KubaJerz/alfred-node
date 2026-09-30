@@ -1,0 +1,7 @@
+{
+  "executablePath": "/opt/google/chrome/chrome",
+  "args": "--disable-blink-features=AutomationControlled",
+  "profile": "var/browser-profile",
+  "screenshotDir": "var/screenshots",
+  "idleTimeout": "10m"
+}

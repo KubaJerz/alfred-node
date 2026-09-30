@@ -97,6 +97,23 @@ risky jobs to small least-privilege agents instead of widening his reach.
 
 ## Next
 
+### Remote access to the box
+
+- [ ] **Reach the machine from anywhere — Tailscale + SSH.** Kuba often works
+      from another device through a remote Claude Code session. That session
+      cannot run `sudo`, and Kuba has no SSH access. So any step that needs root
+      waits until he is at the machine. The first case was the Chrome install for
+      the browser skill (#69). `sshd` is installed but inactive. Tailscale is not
+      installed.
+
+      Do it at the machine, once:
+      1. Install Tailscale and log in. Tailscale SSH (`tailscale up --ssh`) needs
+         no open port and no `sshd`.
+      2. Or enable `sshd` with key-only login, reachable only over the tailnet.
+      3. Install Tailscale on the phone and the laptop.
+
+      Keep `sudo` behind a password. Remote access is for Kuba, not for Alfred.
+
 ### Reliability — nightly jobs that fail at 3am
 
 - [ ] **Scheduled-job health — flag failures, and recycle where safe.** `bot.js`
