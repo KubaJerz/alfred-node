@@ -35,19 +35,31 @@ only if it helps. Use a specific selector (`.infobox img`, `#main-image`) or a
 @ref from a `snapshot` taken on this page load — refs reset when a page opens.
 A bare `img` often hits a hidden image and fails with "0 width".
 
+## Go easy on strict sites
+
+Walmart, Target, and CVS watch for bots, and they count visits from this
+connection. Walmart and Target share one checker, so a visit to either counts
+against both. Every page you open there spends trust, and when the trust runs
+out, both sites block you for hours or days, for every question Kuba asks.
+
+- One question, one visit. Open the one page that answers it. If you have
+  the product URL, go straight there, not through search results.
+- Don't browse around: no opening five products to compare, no paging
+  through results, no reloading to check again.
+- For a price or stock question, a site that seldom blocks often has the same
+  answer: Google Shopping, the brand's own site, or a price tracker. Use one
+  of those when the store itself is not the point.
+
 ## When a site blocks you
 
-Some sites refuse automated browsers no matter what — CVS returns "Access
-Denied". Walmart and Target share one bot checker ("Robot or human?", "Press &
-hold"). It lets a few visits through, then blocks both sites for a while.
-Retries make it worse.
+The signs are "Access Denied", "Robot or human?", or a "Press & hold" button.
 When that happens:
 
 - Say which site blocked you, and send the screenshot of the block so Kuba
   sees it too.
-- Try the next-best page once: a product page instead of search results, or
-  another store.
-- Then give him links. Don't retry in a loop.
+- Get the answer from a source that seldom blocks (see above), once.
+- Then give him links. Don't retry the blocked site, and don't switch between
+  Walmart and Target, because one checker covers both.
 
 Don't try to get around a block — no CAPTCHA solving, no press-and-hold, no
 proxies, no other browser. A block is the site's answer.
