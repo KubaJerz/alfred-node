@@ -61,9 +61,11 @@ subject="$(sed -e '/^#/d' -e '/^$/d' "$MSG_FILE" | head -1)"
 # commit it's replacing — amending is what we want people reaching for.
 head_hash="$(git rev-parse --quiet --verify HEAD || true)"
 if [ -n "$head_hash" ]; then
+  # grep exits 1 when it prints nothing, for example when no commit is in the
+  # 30-day window is empty. Under pipefail that failed the hook with no message.
   duplicate="$(
     git log --all --since="30 days ago" --pretty=$'%H\t%s' 2>/dev/null |
-      grep -v "^${head_hash}"$'\t' |
+      { grep -v "^${head_hash}"$'\t' || true; } |
       awk -F'\t' -v s="$subject" '$2 == s { print $1; exit }'
   )"
   if [ -n "$duplicate" ]; then
