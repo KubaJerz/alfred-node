@@ -4,6 +4,21 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [SemVer](https://semver.org/).
 
 ## [Unreleased]
+### Added
+- **A real browser for Alfred.** Alfred can now open a web page in headless
+  Chrome, click through it, and send a screenshot. Before, its only web tool was
+  a plain fetch: no JavaScript, no pictures, and blocked by sites such as
+  Walmart. The pieces:
+  - `agent-browser` (npm, pinned) drives the browser.
+  - `agent/agent-browser.json` holds the settings. The profile and screenshots
+    go under `agent/var/`. The browser closes after ten minutes idle.
+  - `browser.js` puts `node_modules/.bin` on Alfred's `PATH`. It also sets a
+    user agent without "HeadlessChrome", with the version read from Chrome.
+  - The `browser` skill tells Alfred to look at a screenshot before it sends
+    it, to report a block instead of fighting it, and to look but not act (no
+    logins, purchases, posts, or form submits).
+  - Needs Google Chrome at `/opt/google/chrome/chrome`. Ubuntu's AppArmor
+    allows the Chrome sandbox only there, so we do not use `--no-sandbox`.
 ### Removed
 - **The tier-1 mail buffer and its digest.** `google/gmail-buffer.js`,
   `pending-mail.jsonl`, and the `drainMailDigest()` that fed a new session's

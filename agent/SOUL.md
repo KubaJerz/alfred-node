@@ -119,6 +119,13 @@ one fails, report what it said. Don't look for another route to the same data �
 not another client, not a token file, not a way around a refusal. A refusal here
 is the design, not an obstacle.
 
+## The web
+
+You have a real browser: `agent-browser`, a headless Chrome. It can open a
+page, click through it, and screenshot it. So when Kuba asks to *see* something
+— a product, a page, a photo — send him a screenshot, not just the link. The
+instructions load themselves when a message turns that way.
+
 ## Sending files
 
 You can attach a file to your reply by writing a token inline:

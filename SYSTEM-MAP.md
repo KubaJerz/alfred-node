@@ -62,20 +62,22 @@ flowchart TD
     GATE -->|"text / files"| Q["enqueueTurn<br/>one turn at a time"]
     CTX["loadContext<br/>SOUL.md + USER.md + MEMORY.md + today's daily"] --> Q
     Q --> SPAWN["spawn: claude -p<br/>cwd = agent/"]
-    SPAWN -.->|"skill matches"| SK["skills<br/>gmail · gcal · notion · intervals · strength"]
+    SPAWN -.->|"skill matches"| SK["skills<br/>gmail · gcal · notion · intervals · strength · browser"]
     SK -.->|"names cmd + rules"| CLIS["CLIs · bin/ · run via Bash<br/>gmail.js · gcal.js · notion.js · intervals.js · strength.js · broker-client.js"]
     CLIS ==>|"asks"| BR["broker.js<br/>127.0.0.1 + bearer token"]
     BR --> G["Google Mail + Calendar"]
     BR --> N["Notion"]
     BR --> I["Intervals.icu<br/>(Garmin data)"]
+    SK -.->|"browser skill"| AB["agent-browser · headless Chrome<br/>agent-browser.json · browser.js"]
+    AB --> WEB["the open web"]
     SPAWN -->|"stdout JSON"| R["reply → Discord"]
     R --> U
     classDef external fill:#d6e2f2,stroke:#1f5fb8,color:#123f7d
     classDef gateway fill:#d8ebe2,stroke:#1b6b52,color:#12503c
     classDef stack fill:#f5e8d5,stroke:#b07a2a,color:#6e4a12
-    class U,G,N,I external
+    class U,G,N,I,WEB external
     class BR gateway
-    class SK,CLIS stack
+    class SK,CLIS,AB stack
 ```
 
 A **voice message** is the one input that isn't its own text. It takes two
@@ -98,6 +100,15 @@ injected) names them; a matching skill body adds the rules `--help` can't expres
 instructions name a command → the agent runs it via `Bash` → the CLI asks the
 broker. The CLI is downstream and executed, not a thing that sits in the prompt.
 
+The **browser** is the one reach that skips the broker. `agent-browser` (an npm
+dependency) drives a headless Google Chrome. Chrome must be at
+`/opt/google/chrome/chrome`, because Ubuntu's AppArmor allows the Chrome sandbox
+only there. `agent/agent-browser.json` holds the static settings. The profile
+and screenshots go under `agent/var/`. `browser.js` adds two env values at boot:
+`node_modules/.bin` on `PATH`, and a user agent without "HeadlessChrome", with
+the version read from Chrome. The browser holds no logins. "Look, don't act" is
+a rule in the skill body only, so it is guidance, not a guarantee.
+
 The spawn, in full — the token reaches the agent through the environment, never
 disk:
 
@@ -108,6 +119,7 @@ claude -p "<user message>" \
   --dangerously-skip-permissions \
   --resume <sessionId>
 # cwd = agent/    env: ALFRED_BROKER=<loopback url>  ALFRED_BROKER_TOKEN=<per-boot secret>
+#                      PATH=node_modules/.bin:…  AGENT_BROWSER_USER_AGENT=<Chrome UA>
 ```
 
 ## Inbound mail (Pub/Sub)
@@ -442,7 +454,7 @@ from cwd.
 | path | holds | in git? |
 |---|---|---|
 | repo root | the app + dev process — `bot.js`, `google/`, `notion/`, `intervals/`, `strength/`, `bin/`, `test/` | yes |
-| `agent/` | Alfred's config — `SOUL.md`, `memory-prompt.md`, `.claude/skills/` | yes |
+| `agent/` | Alfred's config — `SOUL.md`, `memory-prompt.md`, `agent-browser.json`, `.claude/skills/` | yes |
 | `agent/var/` | Alfred's state — memories, transcripts, `state.json`, tokens | **never** |
 
 Skill discovery walks *up* from `agent/`, so a `.claude/skills/` at the repo
