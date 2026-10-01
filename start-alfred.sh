@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
-# Launcher: keeps the bot alive under tmux. Started at boot from cron.
+# Launcher: keeps the bot alive under tmux. Started at boot from cron:
+#
+#   @reboot /usr/bin/tmux new-session -d -s alfred-bot '/home/koob/agents/alfred-node/start-alfred.sh'
+#
+# The session is "alfred-bot", not "alfred". A Claude Code session took the name
+# "alfred", and tmux refuses a name that exists, so the bot did not start (#72).
 
 # Derive paths from this script's location so the repo can move without
 # editing hardcoded paths here. The log is runtime state, so it lives in the
@@ -8,6 +13,15 @@ REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 LOG_DIR="$REPO_DIR/agent/var/logs"
 LOG="$LOG_DIR/alfred.log"
 mkdir -p "$LOG_DIR"
+
+# One supervisor only. Two would run two bots, and both would reply to every
+# message. The lock stays held while the supervisor or its bot runs. A second
+# copy writes one line and exits.
+exec 9>"$LOG_DIR/supervisor.lock"
+if ! flock -n 9; then
+  echo "=== $(date): another supervisor holds $LOG_DIR/supervisor.lock; exiting ===" >> "$LOG"
+  exit 0
+fi
 
 # Keep one generation back. Rotation runs before every launch rather than only
 # at boot, because this script normally runs for months at a stretch.

@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [SemVer](https://semver.org/).
 
 ## [Unreleased]
+### Fixed
+- **The bot did not start when a Claude session used the tmux name `alfred`.**
+  The bot's tmux session is now `alfred-bot`. `start-alfred.sh` holds the cron
+  line. It also takes a lock in `agent/var/logs/`, so a second supervisor exits
+  and does not start a second bot (#72).
 ### Added
 - **A real browser for Alfred.** Alfred can now open a web page in headless
   Chrome, click through it, and send a screenshot. Before, its only web tool was
