@@ -467,7 +467,7 @@ Two entries, and that's the whole of what runs on a schedule.
 
 | when | runs | does |
 |---|---|---|
-| `@reboot` | `tmux` → `start-alfred.sh` | supervisor: waits for DNS, rotates the log, keeps `bot.js` up — restarts on crash with 5s→300s backoff |
+| `@reboot` | `tmux` session `alfred-bot` → `start-alfred.sh` | supervisor: holds a lock so only one runs, waits for DNS, rotates the log, keeps `bot.js` up — restarts on crash with 5s→300s backoff |
 | `0 3 * * *` (3 AM daily) | `dream.sh` | consolidates the day's notes into `MEMORY.md` |
 
 The supervisor restarts on **crash only** — a healthy process keeps running the
