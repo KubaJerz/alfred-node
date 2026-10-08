@@ -186,6 +186,7 @@ flowchart TD
     SC -.->|"login code → dropped"| X["screened out<br/>id removed · nothing kept"]
     SC -->|"safe"| H["handleMessage · index.js"]
     H -->|"DKIM forward · sender-auth.js · invite.js (model)"| RBR
+    H -.->|"Fw: + .ics fails the gate → notice, then triage"| PING
     H -->|"else · classify.js → prefilter.js<br/>block/allow/category/list-header (mail-triage.js)<br/>+ topics.js: domain → entropy/banking/jobs"| PF{"decided?"}
     PF -->|"free"| ACT
     PF -->|"undecided"| BR{"breaker.js<br/>Haiku up?"}

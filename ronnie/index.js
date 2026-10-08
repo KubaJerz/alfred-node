@@ -18,7 +18,8 @@
 //      add / delete / none. An add is deduped against the calendar (read the day,
 //      let the model judge) then created; a delete finds the matching event and
 //      removes it; none falls through to triage. Every write is the same gcal
-//      operation bin/gcal.js uses.
+//      operation bin/gcal.js uses. A forwarded invite (Fw: subject + .ics) that
+//      fails the gate gets a channel notice with the reason, then triage.
 //
 //   2. Triage. Everything else runs the classify pipeline (blocklist → allowlist
 //      → grep → Haiku) into three tiers: priority → a label + a webhook ping
@@ -33,7 +34,7 @@
 import { classify as defaultClassify } from "./classify.js";
 import { isForwardFromOwner } from "./sender-auth.js";
 import { extractInvite as defaultExtractInvite, matchEvent as defaultMatchEvent } from "./invite.js";
-import { mailEmbed, inviteEmbed, post } from "./notify.js";
+import { mailEmbed, inviteEmbed, rejectedInviteEmbed, post } from "./notify.js";
 
 // Gmail label IDs the sorting action applies. Unset → labelling is skipped (the
 // rest still runs), so a box that hasn't created the labels yet degrades to
@@ -79,6 +80,14 @@ function eventBody(e) {
     description: e.description,
     rrule: e.rrule,
   };
+}
+
+// A forwarded invite by its envelope alone, with no model call: a Fw:/Fwd:
+// subject and a text/calendar part. Outlook forwards carry both. A direct
+// invite from another person almost never has the Fw: prefix.
+const FORWARD_SUBJECT = /^\s*fwd?\s*:/i;
+function looksLikeForwardedInvite(msg) {
+  return !!msg.ics && FORWARD_SUBJECT.test(msg.subject || "");
 }
 
 // A short human string for the invite embed's time line.
@@ -171,11 +180,31 @@ export async function handleMessage(msg = {}, deps = {}) {
         return { action: "invite-removed", id: matchId, summary: ev.summary };
       }
       // verdict.action === "none": not an invite. Fall through to triage.
+      log(`📅 owner forward is not an invite — “${msg.subject || ""}”`);
     } catch (err) {
       // Invite handling is best-effort: never let it drop the message. Fall
       // through and triage it as ordinary mail so it's still labelled/pinged.
       log(`⚠️  invite handling failed (${err.message}); triaging as mail`);
     }
+  } else if (looksLikeForwardedInvite(msg)) {
+    // A forwarded invite that failed the gate. The calendar stays untouched,
+    // but say so in the channel: a wrong RONNIE_FORWARD_SENDERS entry was
+    // silent before this. The notice is best-effort. Triage still runs.
+    log(`📅 forwarded invite rejected (${auth.reason}) — “${msg.subject || ""}”`);
+    try {
+      await notify([
+        rejectedInviteEmbed({
+          summary: (msg.subject || "").replace(FORWARD_SUBJECT, ""),
+          from: msg.from,
+          reason: auth.reason,
+        }),
+      ]);
+    } catch (err) {
+      log(`⚠️  rejected-invite notice failed (${err.message})`);
+    }
+  } else if (msg.ics || FORWARD_SUBJECT.test(msg.subject || "")) {
+    // Half the signal: log only. A direct invite or a plain forward lands here.
+    log(`📅 not an owner forward (${auth.reason}) — “${msg.subject || ""}”`);
   }
   // Not an authenticated owner forward (or not an invite): treat as ordinary
   // mail below.

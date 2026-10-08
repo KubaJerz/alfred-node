@@ -86,6 +86,20 @@ export function inviteEmbed({ action, summary, uid, when } = {}) {
 }
 
 /**
+ * A forwarded invite that failed the sender check, so Ronnie did not read it.
+ * `reason` is the fixed string from sender-auth, not mail text. Ronnie still
+ * triages the message, so this is a notice only. There is nothing to undo.
+ */
+export function rejectedInviteEmbed({ summary, from, reason } = {}) {
+  return {
+    color: COLORS.undo,
+    title: `Calendar: did not add “${clean(summary) || "a forwarded invite"}”`,
+    description: `From ${clean(from) || "an unknown sender"}: ${clean(reason) || "failed the sender check"}.`,
+    footer: { text: "allowed senders are RONNIE_FORWARD_SENDERS in .env" },
+  };
+}
+
+/**
  * A one-time notice that Ronnie hit its daily Haiku call cap and is triaging on
  * the free stages (blocklist/allowlist/grep) for the rest of the day.
  */
