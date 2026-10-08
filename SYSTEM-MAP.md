@@ -68,7 +68,7 @@ flowchart TD
     BR --> G["Google Mail + Calendar"]
     BR --> N["Notion"]
     BR --> I["Intervals.icu<br/>(Garmin data)"]
-    SK -.->|"browser skill"| AB["agent-browser · headless Chrome<br/>agent-browser.json · browser.js"]
+    SK -.->|"browser skill"| AB["agent-browser · headed Chrome<br/>agent-browser.json · browser.js"]
     AB --> WEB["the open web"]
     SPAWN -->|"stdout JSON"| R["reply → Discord"]
     R --> U
@@ -101,12 +101,13 @@ instructions name a command → the agent runs it via `Bash` → the CLI asks th
 broker. The CLI is downstream and executed, not a thing that sits in the prompt.
 
 The **browser** is the one reach that skips the broker. `agent-browser` (an npm
-dependency) drives a headless Google Chrome. Chrome must be at
+dependency) drives Google Chrome with a window: on the desktop when one is
+there, else on an Xvfb screen that agent-browser starts itself. Chrome must be at
 `/opt/google/chrome/chrome`, because Ubuntu's AppArmor allows the Chrome sandbox
 only there. `agent/agent-browser.json` holds the static settings. The profile
-and screenshots go under `agent/var/`. `browser.js` adds two env values at boot:
-`node_modules/.bin` on `PATH`, and a user agent without "HeadlessChrome", with
-the version read from Chrome. The browser holds no logins. "Look, don't act" is
+and screenshots go under `agent/var/`. `browser.js` puts `node_modules/.bin` on
+`PATH`. Chrome uses `--password-store=basic`, so its cookies do not depend on
+the desktop keyring, which is not there after a reboot. The browser holds no logins. "Look, don't act" is
 a rule in the skill body only, so it is guidance, not a guarantee.
 
 The spawn, in full — the token reaches the agent through the environment, never
@@ -119,7 +120,7 @@ claude -p "<user message>" \
   --dangerously-skip-permissions \
   --resume <sessionId>
 # cwd = agent/    env: ALFRED_BROKER=<loopback url>  ALFRED_BROKER_TOKEN=<per-boot secret>
-#                      PATH=node_modules/.bin:…  AGENT_BROWSER_USER_AGENT=<Chrome UA>
+#                      PATH=node_modules/.bin:…
 ```
 
 ## Inbound mail (Pub/Sub)
