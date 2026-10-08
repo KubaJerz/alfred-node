@@ -1,5 +1,7 @@
 # Secrets
 .env
+# Local security notes and secrets for this box. Never in git.
+.secrets
 
 # Dependencies
 node_modules/
