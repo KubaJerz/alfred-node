@@ -212,6 +212,61 @@ test("an authenticated non-invite (model says 'none') falls through to triage", 
   assert.equal(r.action, "pinged");
 });
 
+test("a forwarded invite that FAILS the gate posts a notice, then triages", async () => {
+  // The owner list lacks the sender (the email.sc.ed typo case). The message
+  // has a Fw: subject and an .ics, so Ronnie says why it did not add the event.
+  const h = harness({ invite: { action: "add", event: EVENT } });
+  const logs = [];
+  const msg = authedForward({ from: "Kuba <kuba@school.edu>", subject: "Fw: Meeting with Bradley", ics: "BEGIN:VCALENDAR" });
+  const r = await handleMessage(msg, { ...h.deps, log: (m) => logs.push(m) });
+  assert.ok(!h.calls.some((c) => c.routeKey.includes("/calendar/")));
+  const notice = h.posts[0][0];
+  assert.match(notice.title, /did not add “Meeting with Bradley”/);
+  assert.match(notice.description, /sender is not an owner address/);
+  assert.ok(logs.some((l) => l.includes("forwarded invite rejected")));
+  assert.equal(r.action, "pinged"); // triage still runs
+  assert.equal(h.posts.length, 2); // the notice + the priority ping
+});
+
+test("a gate failure without both Fw: and .ics is logged, not posted", async () => {
+  // A direct invite from another person: .ics but no Fw: prefix.
+  const h = harness();
+  const logs = [];
+  const msg = { id: "m2", from: "jane@gmail.com", subject: "Lunch Friday", ics: "BEGIN:VCALENDAR" };
+  await handleMessage(msg, { ...h.deps, log: (m) => logs.push(m) });
+  assert.ok(logs.some((l) => l.includes("not an owner forward")));
+  assert.ok(!h.posts.flat().some((e) => /did not add/.test(e.title || "")));
+});
+
+test("a plain message with no Fw: and no .ics logs nothing about invites", async () => {
+  const h = harness();
+  const logs = [];
+  await handleMessage({ id: "m3", from: "jane@gmail.com", subject: "coffee?" }, { ...h.deps, log: (m) => logs.push(m) });
+  assert.ok(!logs.some((l) => l.includes("📅")));
+});
+
+test("an owner forward the model reads as 'none' is logged", async () => {
+  const h = harness({ invite: { action: "none" } });
+  const logs = [];
+  await handleMessage(authedForward(), { ...h.deps, log: (m) => logs.push(m) });
+  assert.ok(logs.some((l) => l.includes("not an invite")));
+});
+
+test("a failed rejected-invite notice does not drop the message", async () => {
+  const h = harness();
+  let first = true;
+  const notify = async (embeds) => {
+    if (first) {
+      first = false;
+      throw new Error("webhook down");
+    }
+    h.posts.push(embeds);
+  };
+  const msg = authedForward({ from: "x@evil.com", subject: "FWD: thing", ics: "BEGIN:VCALENDAR" });
+  const r = await handleMessage(msg, { ...h.deps, notify });
+  assert.equal(r.action, "pinged");
+});
+
 test("labelling is skipped (not fatal) when no label id is configured", async () => {
   const h = harness();
   h.deps.labels = { bulk: "", interesting: "" };

@@ -13,6 +13,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
   retries were limited, and about 15 test visits got this connection blocked
   on both Walmart and Target (#74).
 ### Fixed
+- **Ronnie dropped a rejected forwarded invite without a word.** A forward
+  must come from an address in `RONNIE_FORWARD_SENDERS`. A typo in that list
+  made every school forward fail the check, and nothing showed it. Now a
+  message with a `Fw:`/`Fwd:` subject and an `.ics` part that fails the check
+  gets a channel notice with the reason. Ronnie then triages it as before.
+  Other check failures on a `Fw:` subject or an `.ics` part go to the log. An
+  owner forward that Haiku reads as "not an invite" goes to the log (#76).
 - **The bot did not start when a Claude session used the tmux name `alfred`.**
   The bot's tmux session is now `alfred-bot`. `start-alfred.sh` holds the cron
   line. It also takes a lock in `agent/var/logs/`, so a second supervisor exits
