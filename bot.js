@@ -1085,9 +1085,7 @@ await bootstrap();
 // reached with the same token — one gateway, never a server per service.
 const broker = await startBroker({ extraRoutes: { ...NOTION_ROUTES, ...INTERVALS_ROUTES } });
 
-// The browser's PATH and user agent (browser.js), read once at startup. If Chrome
-// updates while the bot runs, the user agent is one version old until the next
-// restart. That signal is small. "HeadlessChrome" is the signal sites block.
+// The browser's PATH (browser.js), so Alfred can run agent-browser by name.
 const BROWSER_ENV = browserEnv(REPO_DIR);
 // agent-browser saves to the path Alfred gives it but never makes the folder.
 await mkdir(path.join(AGENT_DIR, "var", "screenshots"), { recursive: true });

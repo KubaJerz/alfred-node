@@ -5,6 +5,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
 
 ## [Unreleased]
 ### Changed
+- **Alfred browses with a window, and reads pages instead of clicking
+  through them.** A live Walmart run (choline stock at two stores) showed that
+  headless Chrome got a blank page, a Chrome with a window got through, and the
+  answers sat in the page's own data. Walmart blocked again after about 15
+  page loads. So (#78):
+  - `agent/agent-browser.json` sets `headed: true`. On the desktop the window
+    shows there. With nobody logged in, agent-browser starts its own Xvfb.
+  - `--password-store=basic`, so cookies do not depend on the desktop
+    keyring, which is not there after a reboot.
+  - `browser.js` no longer sets a user agent. A headed Chrome sends its real
+    one, with client hints.
+  - The browser skill: read page data (`eval` on JSON-LD or `__NEXT_DATA__`)
+    before clicking, a budget of 8 page loads per question on strict sites,
+    and what to do when Kuba is using the window.
+  - New `walmart.md` in the skill: set the store, read pickup status, aisle,
+    and seller from one product page, and what each status means.
+### Changed
 - **Alfred now goes easy on sites that block bots.** The browser skill tells
   Alfred to open one page per question on Walmart, Target, and CVS, with no
   browsing around and no reloads. For price and stock questions it prefers
