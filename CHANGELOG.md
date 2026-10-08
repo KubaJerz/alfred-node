@@ -4,6 +4,14 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [SemVer](https://semver.org/).
 
 ## [Unreleased]
+### Changed
+- **Alfred now goes easy on sites that block bots.** The browser skill tells
+  Alfred to open one page per question on Walmart, Target, and CVS, with no
+  browsing around and no reloads. For price and stock questions it prefers
+  sources that seldom block, such as Google Shopping or the brand's own site.
+  After a block it tries one such source, then sends links. Before, only
+  retries were limited, and about 15 test visits got this connection blocked
+  on both Walmart and Target (#74).
 ### Fixed
 - **The bot did not start when a Claude session used the tmux name `alfred`.**
   The bot's tmux session is now `alfred-bot`. `start-alfred.sh` holds the cron
