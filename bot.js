@@ -20,6 +20,7 @@ import { parseClearCommand } from "./commands.js";
 import { transcribe, transcriptionAvailable } from "./voice/transcribe.js";
 import { isVoiceInput } from "./voice/detect.js";
 import { browserEnv } from "./browser.js";
+import { startTelnyxWebhook, makeMessagingRoute, sendSms, smsText, parseNumberList } from "./telnyx/sms.js";
 
 // ── Config ──────────────────────────────────────────────────────────────────
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
@@ -35,6 +36,20 @@ const STRENGTH_LOG_CHANNEL = process.env.STRENGTH_LOG_CHANNEL || "";
 // data lands, enqueues a follow-up turn so Alfred reports back on his own.
 const BG_STRENGTH_RE = /\{bg:strength\}/i;
 const BG_DIGEST_TIMEOUT_MS = parseInt(process.env.BG_DIGEST_TIMEOUT_MS || "600000"); // 10 min
+
+// SMS over Telnyx (telnyx/sms.js). Off unless all four of the first group are
+// set. SMS_MIRROR_CHANNEL is optional: with it, each text and each reply also
+// shows in that Discord channel. See env.example for the setup steps.
+const TELNYX_API_KEY = process.env.TELNYX_API_KEY || "";
+const TELNYX_PUBLIC_KEY = process.env.TELNYX_PUBLIC_KEY || "";
+const TELNYX_PHONE_NUMBER = process.env.TELNYX_PHONE_NUMBER || "";
+const SMS_ALLOWED_NUMBERS = parseNumberList(process.env.SMS_ALLOWED_NUMBERS);
+const TELNYX_MESSAGING_PROFILE_ID = process.env.TELNYX_MESSAGING_PROFILE_ID || "";
+const SMS_MIRROR_CHANNEL = process.env.SMS_MIRROR_CHANNEL || "";
+const SMS_WEBHOOK_PORT = parseInt(process.env.SMS_WEBHOOK_PORT || "8788");
+const smsConfigured = !!(TELNYX_API_KEY && TELNYX_PUBLIC_KEY && TELNYX_PHONE_NUMBER && SMS_ALLOWED_NUMBERS.length);
+// Alfred reads this tag at the top of an SMS turn (see agent/SOUL.md).
+const SMS_TAG = "[via SMS]";
 
 // ── Layout ──────────────────────────────────────────────────────────────────
 // Three kinds of files live here and they don't mix:
@@ -677,7 +692,13 @@ client.on("messageCreate", async (msg) => {
     console.log(`⏳ ${pendingTurns} turn(s) already in flight — queuing this one`);
     msg.react("⏳").catch(() => {}); // best-effort; needs the Add Reactions permission
   }
-  await enqueueTurn(() => handleTurn(msg, userMessage, attachments));
+  // The SMS mirror channel is the phone thread. A message typed there gets its
+  // reply in Discord AND by SMS to the owner's phone. Every other channel is
+  // Discord only.
+  const target = smsConfigured && SMS_MIRROR_CHANNEL && msg.channelId === SMS_MIRROR_CHANNEL
+    ? smsTarget({ to: SMS_ALLOWED_NUMBERS[0], discord: discordTarget(msg) })
+    : discordTarget(msg);
+  await enqueueTurn(() => handleTurn(target, userMessage, attachments));
 });
 
 // Build Ronnie's Haiku usage dashboard and post it. Writes a self-contained
@@ -718,13 +739,14 @@ async function runRonnieMetrics(msg) {
 
 // One turn at a time, in arrival order. Everything below reads and writes the
 // single global state.json, so overlapping turns would resume the same session
-// twice and race to write the new session id back.
-async function handleTurn(msg, userMessage, attachments = []) {
+// twice and race to write the new session id back. `target` is where the turn
+// answers — Discord, SMS, or both (see "Reply targets" below).
+async function handleTurn(target, userMessage, attachments = []) {
   // "/clear" / "/c" as a prefix: bare = clear and wait; "/c <text>" = clear,
   // then run <text> as the fresh session's first turn (one message does both).
   const clear = parseClearCommand(userMessage);
   if (clear) {
-    console.log(`🧹 Clearing session for ${msg.author.tag}`);
+    console.log(`🧹 Clearing session for ${target.who.tag}`);
 
     // Archive the just-ended conversation, then kick off memory consolidation.
     let archivePath = null;
@@ -748,7 +770,7 @@ async function handleTurn(msg, userMessage, attachments = []) {
     // Nothing after the command → the old behaviour: confirm and wait.
     if (!clear.remainder && attachments.length === 0) {
       const note = archivePath ? " (archived + consolidating memory)" : "";
-      await msg.reply(`🧹 Session cleared.${note} The next message will start a fresh session with full context.`);
+      await target.send(`🧹 Session cleared.${note} The next message will start a fresh session with full context.`);
       return;
     }
 
@@ -756,7 +778,7 @@ async function handleTurn(msg, userMessage, attachments = []) {
     // clear with a reaction instead of a second message, then fall through and
     // handle the remainder as the fresh session's first turn. State is already
     // reset above, so `shouldResume` below is false and full context loads.
-    msg.react("🧹").catch(() => {}); // best-effort; needs the Add Reactions permission
+    target.react("🧹"); // best-effort; needs the Add Reactions permission
     userMessage = clear.remainder;
   }
 
@@ -764,18 +786,19 @@ async function handleTurn(msg, userMessage, attachments = []) {
   // fresh transcript rather than the one we just archived.
   await logTurn({
     dir: "in",
-    user: msg.author.tag,
-    userId: msg.author.id,
-    channel: msg.channelId,
+    user: target.who.tag,
+    userId: target.who.id,
+    channel: target.who.channel,
+    via: target.via,
     text: userMessage,
     attachments: attachments.length,
   });
 
-  console.log(`📨 ${msg.author.tag}: ${userMessage.slice(0, 100)}`);
+  console.log(`📨 ${target.who.tag}: ${userMessage.slice(0, 100)}`);
 
   // Show typing indicator
-  await msg.channel.sendTyping();
-  const typingInterval = setInterval(() => msg.channel.sendTyping(), 8000);
+  await target.typing();
+  const typingInterval = setInterval(() => target.typing(), 8000);
 
   try {
     // Read current state
@@ -792,9 +815,12 @@ async function handleTurn(msg, userMessage, attachments = []) {
     // there's no caption, give the turn a short placeholder so it isn't handed
     // an empty string.
     const attachBlock = buildAttachmentBlock(attachments);
-    const messageBody = attachBlock
+    let messageBody = attachBlock
       ? `${attachBlock}\n\n${userMessage || "(The user sent the file(s) above with no other text.)"}`
       : userMessage;
+    // The tag rides on this message only, like the attachment block, so a
+    // resumed session still sees it. A /clear above already took its prefix off.
+    if (target.via === "sms") messageBody = `${SMS_TAG} ${messageBody}`;
 
     let finalMessage = messageBody;
     if (shouldResume) {
@@ -827,7 +853,7 @@ async function handleTurn(msg, userMessage, attachments = []) {
     // out, skipping the <no_reply> and attachment handling below.
     if (infraFailed) {
       const kind = response.is_auth_error ? "auth_error" : "timeout";
-      await msg.reply(response.result);
+      await target.send(response.result);
       await logTurn({ dir: "out", kind, text: response.result });
       return;
     }
@@ -857,16 +883,16 @@ async function handleTurn(msg, userMessage, attachments = []) {
     const { text: cleaned, files } = extractAttachments(visibleText);
     const reply = cleaned.trim() ||
       (files.length ? "" : deferStrength ? "On it — pulling your workout, back in ~2 min ⏳" : "(empty response)");
-    await sendReply(msg, reply, files);
+    await target.send(reply, files);
 
     console.log(`✅ Replied (${reply.length} chars${files.length ? `, ${files.length} file(s)` : ""}${deferStrength ? ", deferred digest" : ""})`);
     await logTurn({ dir: "out", kind: "reply", text: reply, files: files.length, sessionId: response.session_id || null });
 
-    if (deferStrength) startStrengthDigestFollowup(msg);
+    if (deferStrength) startStrengthDigestFollowup(target);
   } catch (err) {
     console.error("❌ Error:", err);
     const errReply = `Something went wrong:\n\`\`\`\n${err.message}\n\`\`\``;
-    await msg.reply(errReply);
+    await target.send(errReply).catch((e) => console.error(`⚠️  Couldn't send the error reply: ${e.message}`));
     await logTurn({ dir: "out", kind: "error", text: errReply, error: err.message });
   } finally {
     clearInterval(typingInterval);
@@ -878,7 +904,7 @@ async function handleTurn(msg, userMessage, attachments = []) {
 // run — the activity pull works here. When it lands, enqueue a follow-up turn so
 // Alfred answers the original question with the freshly interpreted data. The
 // digest is idempotent, so a redundant run (e.g. nothing new) is harmless.
-function startStrengthDigestFollowup(msg) {
+function startStrengthDigestFollowup(target) {
   console.log("🏋️  Deferred strength digest started (background)");
   const proc = spawn("node", ["../bin/strength.js", "digest"], {
     cwd: AGENT_DIR,
@@ -891,11 +917,11 @@ function startStrengthDigestFollowup(msg) {
   proc.stderr.on("data", (d) => (err += d.toString()));
   proc.on("close", (code) => {
     console.log(`🏋️  Deferred digest ${code === 0 ? "done" : `failed (exit ${code})`}`);
-    enqueueTurn(() => strengthFollowupTurn(msg, { ok: code === 0, out, err }));
+    enqueueTurn(() => strengthFollowupTurn(target, { ok: code === 0, out, err }));
   });
   proc.on("error", (e) => {
     console.error(`🏋️  Deferred digest spawn error: ${e.message}`);
-    enqueueTurn(() => strengthFollowupTurn(msg, { ok: false, out: "", err: e.message }));
+    enqueueTurn(() => strengthFollowupTurn(target, { ok: false, out: "", err: e.message }));
   });
 }
 
@@ -904,14 +930,14 @@ function startStrengthDigestFollowup(msg) {
 // in his own voice. Runs through the turn queue, so it never races a live turn.
 // A concrete fallback covers the cases where there's no session or Alfred stays
 // silent, so a deferred pull never ends in silence.
-async function strengthFollowupTurn(msg, { ok, out, err }) {
+async function strengthFollowupTurn(target, { ok, out, err }) {
   const fallback = ok
     ? "✅ Pulled your workout — ask me how it looks for the breakdown."
     : "⚠️ I couldn't pull your workout just now — try again in a bit.";
   try {
     const state = await readState();
     const sessionId = state.last_session_id;
-    if (!sessionId) { await sendReply(msg, fallback, []); return; }
+    if (!sessionId) { await target.send(fallback); return; }
 
     const summary = ok
       ? `Digest output:\n${(out || "").trim().slice(0, 1000)}`
@@ -921,7 +947,7 @@ async function strengthFollowupTurn(msg, { ok, out, err }) {
       `Answer the user's earlier request now with the freshly interpreted data (read it via the strength skill — ` +
       `load/sets are instant). Reply naturally as a follow-up; do NOT run the digest again. If it failed, say so briefly.]`;
 
-    await msg.channel.sendTyping().catch(() => {});
+    await target.typing();
     const response = await runClaude(nudge, sessionId);
     if (!response.is_auth_error && !response.is_timeout) {
       await writeState({
@@ -934,16 +960,16 @@ async function strengthFollowupTurn(msg, { ok, out, err }) {
 
     const replyText = (response.result || "").trim();
     const canon = (s) => s.toLowerCase().replace(/[^a-z_]/g, "");
-    if (!replyText || canon(replyText) === canon(NO_REPLY)) { await sendReply(msg, fallback, []); return; }
+    if (!replyText || canon(replyText) === canon(NO_REPLY)) { await target.send(fallback); return; }
 
     const { text: cleaned, files } = extractAttachments(replyText);
     const reply = cleaned.trim() || (files.length ? "" : fallback);
-    await sendReply(msg, reply, files);
+    await target.send(reply, files);
     console.log(`✅ Strength follow-up replied (${reply.length} chars${files.length ? `, ${files.length} file(s)` : ""})`);
     await logTurn({ dir: "out", kind: "reply", text: reply, files: files.length, sessionId: response.session_id || null });
   } catch (e) {
     console.error(`❌ Strength follow-up error: ${e.message}`);
-    await sendReply(msg, fallback, []).catch(() => {});
+    await target.send(fallback).catch(() => {});
   }
 }
 
@@ -1074,6 +1100,94 @@ async function sendReply(msg, text, files) {
   }
 }
 
+// ── Reply targets ───────────────────────────────────────────────────────────
+// A turn writes to a target, not to a discord.js message. So one turn can
+// answer in Discord, by SMS, or in both. A target has:
+//
+//   who             { tag, id, channel } for the transcript and the console
+//   via             "sms" when the reply goes out by SMS, else undefined
+//   typing()        show that Alfred is working. It never throws.
+//   react(emoji)    react to the inbound message. It never throws.
+//   send(text, files)  deliver a reply. It throws only if no copy arrived.
+function discordTarget(msg) {
+  return {
+    who: { tag: msg.author.tag, id: msg.author.id, channel: msg.channelId },
+    typing: () => msg.channel.sendTyping().catch(() => {}),
+    react: (emoji) => msg.react(emoji).catch(() => {}),
+    send: (text, files = []) => sendReply(msg, text, files),
+  };
+}
+
+// SMS to `to`, plus a Discord copy when `discord` is a target (the mirror).
+// The two sends are independent: a failed SMS still leaves the Discord copy,
+// and the mirror says that the SMS did not go. Typing and reactions exist only
+// on the Discord side.
+function smsTarget({ to, discord = null, who = discord?.who }) {
+  return {
+    who,
+    via: "sms",
+    typing: () => discord?.typing() ?? Promise.resolve(),
+    react: (emoji) => discord?.react(emoji) ?? Promise.resolve(),
+    send: async (text, files = []) => {
+      const body = smsText(text, discord ? { files: files.length } : {
+        files: files.length,
+        filesNote: "not sent — SMS cannot carry files",
+        overflowNote: "(cut)",
+      });
+      const [sms, mirror] = await Promise.allSettled([
+        body
+          ? sendSms({ apiKey: TELNYX_API_KEY, from: TELNYX_PHONE_NUMBER, to, text: body, messagingProfileId: TELNYX_MESSAGING_PROFILE_ID })
+          : Promise.resolve(null),
+        discord ? discord.send(text, files) : Promise.resolve(),
+      ]);
+      if (sms.status === "rejected") {
+        console.error(`📵 ${sms.reason.message}`);
+        if (discord && mirror.status === "fulfilled") {
+          await discord.send(`📵 The SMS copy did not go: ${sms.reason.message}`).catch(() => {});
+        }
+      }
+      if (mirror.status === "rejected") console.error(`⚠️  SMS mirror post failed: ${mirror.reason.message}`);
+      if (sms.status === "rejected" && (!discord || mirror.status === "rejected")) throw sms.reason;
+    },
+  };
+}
+
+// An inbound text from an allowed number. Post it in the mirror channel (if
+// set), then queue it as a normal turn. The mirror post is what Alfred's
+// Discord-side reply answers, so the thread reads in order. The text runs the
+// same path as a Discord message, so "/c …" clears from a phone too.
+async function onSmsText({ from, text, media }) {
+  if (!text) {
+    // MMS with no words. Media download is not built yet.
+    if (media.length) {
+      await smsTarget({ to: from, who: { tag: `sms:${from}`, id: from, channel: "sms" } })
+        .send("I can read only text by SMS for now. Send photos in Discord.")
+        .catch(() => {});
+    }
+    return;
+  }
+  console.log(`📱 SMS from ${from}: ${text.slice(0, 100)}`);
+
+  let discord = null;
+  if (SMS_MIRROR_CHANNEL) {
+    try {
+      const channel = await client.channels.fetch(SMS_MIRROR_CHANNEL);
+      const posted = await channel.send({ content: `📱 ${text}`.slice(0, 2000), allowedMentions: { parse: [] } });
+      discord = discordTarget(posted);
+    } catch (err) {
+      console.error(`⚠️  Couldn't post the SMS in the mirror channel: ${err.message}`);
+    }
+  }
+  const target = smsTarget({
+    to: from,
+    discord,
+    who: { tag: `sms:${from}`, id: from, channel: SMS_MIRROR_CHANNEL || "sms" },
+  });
+  if (media.length) text += "\n(The user also sent a picture by MMS. You cannot see it.)";
+  if (pendingTurns > 0) target.react("⏳");
+  await enqueueTurn(() => handleTurn(target, text));
+}
+
 // ── Launch ──────────────────────────────────────────────────────────────────
 await bootstrap();
 
@@ -1167,6 +1281,27 @@ if (ronnieConfigured) {
 startMailListener({ gmail: sharedGmail, enqueue: ronnie?.enqueue, onDrained: ronnie?.drain }).catch((err) =>
   console.error(`⚠️  Gmail push listener failed to start: ${err.message}`)
 );
+
+// SMS over Telnyx. Off unless configured. The webhook server binds loopback
+// only. A tunnel forwards the public URL to it (see env.example). A failure to
+// start is logged and swallowed — SMS is an add-on, like mail.
+if (smsConfigured) {
+  startTelnyxWebhook({
+    port: SMS_WEBHOOK_PORT,
+    publicKey: TELNYX_PUBLIC_KEY,
+    routes: {
+      "/telnyx/messaging": makeMessagingRoute({
+        ourNumber: TELNYX_PHONE_NUMBER,
+        allowFrom: SMS_ALLOWED_NUMBERS,
+        onText: onSmsText,
+      }),
+    },
+  })
+    .then((hook) => console.log(`📱 SMS is on — Telnyx webhook on ${hook.url}/telnyx/messaging${SMS_MIRROR_CHANNEL ? ", mirrored to Discord" : ""}`))
+    .catch((err) => console.error(`⚠️  Telnyx webhook failed to start: ${err.message}`));
+} else if (TELNYX_API_KEY || TELNYX_PUBLIC_KEY || TELNYX_PHONE_NUMBER) {
+  console.warn("⚠️  SMS is off — set TELNYX_API_KEY, TELNYX_PUBLIC_KEY, TELNYX_PHONE_NUMBER, and SMS_ALLOWED_NUMBERS");
+}
 
 // An unreachable network rejects here. Left unhandled it becomes an uncaught
 // exception and a full stack dump — which, at one restart every 5s, is how a
