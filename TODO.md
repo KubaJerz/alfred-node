@@ -144,14 +144,11 @@ risky jobs to small least-privilege agents instead of widening his reach.
 - [ ] **Tiered memory (L1/L2).** `agent/var/memories/MEMORY.md` is injected into
       every new session; it's empty today, but the split plan is already noted in
       that file's header (issue #8). Do it when size actually becomes a problem.
-- [ ] **Give Alfred a phone number.** A number he can text — and be texted at —
-      so he reaches Kuba outside Discord: reminders and nudges over a channel
-      that's open even when Discord isn't. Settle the provider first, because it
-      sets the whole surface: **Google Voice has no official API**, so "a Google
-      number" specifically means either a supported path (Workspace telephony) or
-      an unofficial route that can break; Twilio is the friction-free alternative
-      if "Google" isn't load-bearing. Inbound texts would ride the same
-      buffer-vs-turn tiering as the Pub/Sub mail path.
+- [ ] **Give Alfred a phone number — voice calls.** SMS shipped in #82 on a
+      Telnyx toll-free number. Next: Kuba calls the same number and talks to
+      Alfred. The design is in `docs/phone-design.md`: Telnyx sends the call by
+      SIP to the OpenAI Realtime API, and one `ask_alfred` tool runs a normal
+      turn for anything real. Open a new issue for it.
 - [ ] **Food logging + a database.** Let Kuba log meals to Alfred (a Discord line
       first, a photo later) and keep them queryable — what and when, ideally
       calories/macros. Two open questions: the schema, and whether Alfred
