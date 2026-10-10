@@ -42,6 +42,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
   line. It also takes a lock in `agent/var/logs/`, so a second supervisor exits
   and does not start a second bot (#72).
 ### Added
+- **Text Alfred from your phone.** Alfred has an SMS number through Telnyx.
+  A text from an allowed number runs as a normal turn in the same session as
+  Discord. Alfred replies by SMS in short plain text. With `SMS_MIRROR_CHANNEL`
+  set, that Discord channel is the phone thread: each text and reply shows
+  there, and a message typed there also gets its reply by SMS. The bot checks
+  the Ed25519 signature on every webhook request and drops texts from other
+  numbers. SMS stays off until the `TELNYX_*` keys are set (#82).
 - **A real browser for Alfred.** Alfred can now open a web page in headless
   Chrome, click through it, and send a screenshot. Before, its only web tool was
   a plain fetch: no JavaScript, no pictures, and blocked by sites such as
