@@ -34,7 +34,8 @@ redesign, from a five-agent audit of the 1,777-message backfill:
       the subtopics the audit found under Records and Interesting. Fix the
       misses: FreeTaxUSA/TaxAct/IRS → taxes; Optiver, Akuna, iCIMS, Handshake,
       `indeedemail.com` → jobs.
-- [ ] **Novelty ledger.** A JSON tally per sender brand × mail kind (statement,
+- [x] ~~**Novelty ledger.**~~ Done in #90. Thresholds as built: 1st or 60+ days
+      → Priority, 2nd–3rd → Interesting, 4th on → Records. A JSON tally per sender brand × mail kind (statement,
       autopay reminder, payment confirmed, …) with distinct-day count and
       last-seen date. First time ever → Priority. Roughly yearly, or a gap over
       60 days → Priority. A steady cadence (about the 4th time) → Records.

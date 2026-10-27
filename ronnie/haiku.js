@@ -23,6 +23,7 @@
 
 import { spawn } from "child_process";
 import { validHaikuTopic } from "./topics.js";
+import { KINDS } from "./ledger.js";
 
 // Thrown when the `claude -p` call itself fails — spawn error, non-zero exit,
 // non-JSON output. That's the *service* being down, not one bad message, so the
@@ -104,8 +105,23 @@ const RUBRIC = [
   '- "policies": a terms-of-service, privacy-policy, or user-agreement update.',
   "- none: anything else. Do NOT guess; only tag when it clearly fits.",
   "",
+  "ALSO name the KIND of email, exactly one of:",
+  '- "statement": a statement or account summary is ready.',
+  '- "autopay": an autopay reminder or confirmation, upcoming or done.',
+  '- "payment-confirmed": a payment they made was received, processed, or scheduled.',
+  '- "payment-due": a bill is due or past due (not autopay).',
+  '- "payment-failed": a payment failed or was declined.',
+  '- "transfer": a transfer between accounts started, completed, or received.',
+  '- "deposit": money received — a payout, a deposit, a payment someone sent them.',
+  '- "receipt": a receipt for a purchase, ride, or order.',
+  '- "account-change": a setting, linked account, card, or beneficiary changed.',
+  '- "security": a sign-in, fraud, or security alert.',
+  '- "tos-update": a terms-of-service or privacy-policy update.',
+  '- "tax-doc": a tax form or tax filing notice.',
+  '- "other": anything else.',
+  "",
   "Return ONLY compact JSON, no prose:",
-  '{"label":"priority"|"meetings"|"records"|"interesting"|"general","summary":"...","topic":"taxes"|"jobs"|"ut"|"research"|"docs"|"policies"|null}',
+  '{"label":"priority"|"meetings"|"records"|"interesting"|"general","summary":"...","topic":"taxes"|"jobs"|"ut"|"research"|"docs"|"policies"|null,"kind":"statement"|"autopay"|...|"other"}',
   'summary is ONE plain sentence for a "priority" label — what it is and why it',
   'needs them now, concrete (name the amount, date, or action). Else summary "".',
 ].join("\n");
@@ -124,8 +140,9 @@ function parseVerdict(text) {
     if (!label) return null;
     // topic is a separate axis; only the semantic topics are Haiku's to set.
     const topic = validHaikuTopic(o.topic);
+    const kind = KINDS.includes(o.kind) ? o.kind : "other";
     // Only the ping tier carries a summary (it's what the ping says).
-    return { label, summary: label === "priority" ? String(o.summary || "").trim() : "", topic };
+    return { label, summary: label === "priority" ? String(o.summary || "").trim() : "", topic, kind };
   } catch {
     return null;
   }

@@ -20,6 +20,7 @@ import { post, capEmbed, mailEmbed } from "./notify.js";
 import { makeClassifier } from "./classify.js";
 import { extractInvite as runExtractInvite, matchEvent as runMatchEvent } from "./invite.js";
 import { makeMeter } from "./meter.js";
+import { makeLedger } from "./ledger.js";
 import { makeQueue } from "./queue.js";
 import { makeBreaker } from "./breaker.js";
 import { makeConsumer } from "./consumer.js";
@@ -42,6 +43,7 @@ export function makeRonnie({
   enrichOne, // (id) => Promise<msg|null>, injected by bot.js (needs the gmail client)
   queue = makeQueue(),
   breaker = makeBreaker(),
+  ledger = makeLedger(),
   fetchImpl = fetch,
   log = console.log,
 } = {}) {
@@ -53,7 +55,9 @@ export function makeRonnie({
   // strict:true so a Haiku *service* failure throws HaikuDownError — the breaker's
   // signal — instead of failing open. A junk verdict still fails that one message
   // open; only the service being down backs the whole queue off.
-  const classify = makeClassifier({ meter, capCalls, strict: true, log });
+  // The novelty ledger moves a records verdict up when the sender has never
+  // sent that kind of mail, or not for 60+ days (ledger.js).
+  const classify = makeClassifier({ meter, capCalls, strict: true, log, ledger });
 
   // The invite reader + dedupe, bound to the same meter so their Haiku calls are
   // counted too. Both are gated by the DKIM + owner check inside handleMessage,
