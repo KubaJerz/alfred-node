@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { mkdtempSync } from "node:fs";
-import { classifyWithHaiku } from "../ronnie/haiku.js";
+import { classifyWithHaiku, claudeArgs } from "../ronnie/haiku.js";
 import { makeMeter } from "../ronnie/meter.js";
 import { classify } from "../ronnie/classify.js";
 
@@ -182,4 +182,14 @@ test("classify: over the daily call cap, surface priority and flag capped", asyn
   assert.equal(r.label, "priority");
   assert.equal(r.capped, true);
   assert.equal(called, false);
+});
+
+test("the Haiku call runs with every tool and MCP server removed", () => {
+  const args = claudeArgs("PROMPT", "claude-haiku-4-5");
+  const i = args.indexOf("--tools");
+  assert.ok(i >= 0, "--tools present");
+  assert.equal(args[i + 1], ""); // empty list = no built-in tools
+  assert.ok(args.includes("--strict-mcp-config"));
+  assert.ok(!args.includes("--bare")); // --bare skips the subscription login
+  assert.ok(!args.some((a) => /allowedTools|dangerously/i.test(a)));
 });
