@@ -1,55 +1,70 @@
 // Ronnie's label taxonomy, resolved to Gmail ids.
 //
-// Two axes, nested as one tree. ATTENTION is the parent — three tiers by urgency:
+// Two axes, nested as one tree. ATTENTION is the parent — five tiers:
 //   Priority     interrupt now (the only tier that pings), stays in the inbox
 //   Interesting  keep + read later, no ping, stays in the inbox
-//   Bulk         noise, archived out of the inbox
-// TOPIC is a child under each, so a message is Priority/Banking (a fraud alert),
-// Interesting/Banking (a "new external account" confirmation), or Bulk/Banking (a
-// rewards blast). Taxes is interesting-only — worth keeping, never a ping and
-// never bulk (classify.js enforces the tier; this file just doesn't make a
-// Priority/Taxes or Bulk/Taxes).
+//   Records      a record of something done or automatic, archived
+//   General      noise (marketing, newsletters), archived. Was "Bulk": the
+//                label keeps its id, so RONNIE_LABEL_BULK still names it.
+//   Meetings     appointment and meeting mail, and forwarded invites Ronnie put
+//                on the calendar, archived
+// TOPIC is a child under a tier, so a message is Priority/Banking (a fraud
+// alert), Records/Banking (a statement), or General/Banking (a rewards blast).
+// Taxes is never a ping and never noise (classify.js enforces the tier; this
+// file just doesn't make a Priority/Taxes or General/Taxes). Meetings has no
+// topic children.
 //
 // The child label NAME is `${parentName}/${Title}`, so it nests under the real
-// parent in Gmail's sidebar. Interesting/Bulk parents come from the two ids the
-// live bot has in env; Priority is newer and is passed in the same way (bot.js
-// ensures it exists). With { create: true } the children are created; otherwise
-// only what exists is resolved. `gmail` is injectable so tests never hit the API.
+// parent in Gmail's sidebar. Parent ids are passed in (bot.js reads them from
+// env or creates the parent). With { create: true } the children are created;
+// otherwise only what exists is resolved. `gmail` is injectable so tests never
+// hit the API.
 
 import { ensureLabels } from "../google/gmail-labels.js";
 
 // Display titles for the child labels (parents keep whatever name they have).
 export const TOPIC_TITLES = { banking: "Banking", jobs: "Jobs", taxes: "Taxes", entropy: "Entropy" };
 
-// Which topics exist under each tier. Taxes is interesting-only, on purpose.
+// Which topics exist under each tier. Taxes is interesting or records only.
 export const TIER_TOPICS = {
   priority: ["banking", "jobs", "entropy"],
   interesting: ["banking", "jobs", "taxes", "entropy"],
-  bulk: ["banking", "jobs", "entropy"],
+  records: ["banking", "jobs", "taxes", "entropy"],
+  general: ["banking", "jobs", "entropy"],
+  meetings: [],
 };
 
-const TIERS = ["priority", "interesting", "bulk"];
+export const TIERS = ["priority", "interesting", "records", "general", "meetings"];
 
 /**
- * @param {{gmail: object, priorityId?: string, interestingId: string, bulkId: string, create?: boolean}} o
+ * `bulkId` is the old name for `generalId` (same label, renamed); either works.
+ *
+ * @param {{gmail: object, priorityId?: string, interestingId: string,
+ *          recordsId?: string, generalId?: string, bulkId?: string,
+ *          meetingsId?: string, create?: boolean}} o
  * @returns {Promise<{
- *   priority: string, interesting: string, bulk: string,
- *   topics: { priority: Record<string,string>, interesting: Record<string,string>, bulk: Record<string,string> },
+ *   priority: string, interesting: string, records: string, general: string, meetings: string,
+ *   topics: Record<string, Record<string,string>>,
  *   created: string[]
  * }>}
  */
-export async function resolveRonnieLabels({ gmail, priorityId, interestingId, bulkId, create = false } = {}) {
+export async function resolveRonnieLabels({
+  gmail, priorityId, interestingId, recordsId, generalId, bulkId, meetingsId, create = false,
+} = {}) {
+  generalId = generalId || bulkId;
   const list = await gmail.users.labels.list({ userId: "me" });
   const all = list.data?.labels || [];
   const id2name = new Map(all.map((l) => [l.id, l.name]));
   const name2id = new Map(all.map((l) => [l.name, l.id]));
 
-  const parentId = { priority: priorityId, interesting: interestingId, bulk: bulkId };
-  const parentName = {
-    priority: id2name.get(priorityId),
-    interesting: id2name.get(interestingId),
-    bulk: id2name.get(bulkId),
+  const parentId = {
+    priority: priorityId,
+    interesting: interestingId,
+    records: recordsId,
+    general: generalId,
+    meetings: meetingsId,
   };
+  const parentName = Object.fromEntries(TIERS.map((t) => [t, id2name.get(parentId[t])]));
 
   // Every child name we want, tier by tier.
   const wanted = []; // { tier, topic, name }
@@ -69,8 +84,16 @@ export async function resolveRonnieLabels({ gmail, priorityId, interestingId, bu
     created = res.created;
   }
 
-  const topics = { priority: {}, interesting: {}, bulk: {} };
+  const topics = Object.fromEntries(TIERS.map((t) => [t, {}]));
   for (const w of wanted) topics[w.tier][w.topic] = name2id.get(w.name) || "";
 
-  return { priority: priorityId || "", interesting: interestingId, bulk: bulkId, topics, created };
+  return {
+    priority: priorityId || "",
+    interesting: interestingId || "",
+    records: recordsId || "",
+    general: generalId || "",
+    meetings: meetingsId || "",
+    topics,
+    created,
+  };
 }

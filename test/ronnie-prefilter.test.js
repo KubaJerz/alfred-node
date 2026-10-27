@@ -5,10 +5,10 @@ import { prefilter } from "../ronnie/prefilter.js";
 
 const opts = { block: ["community@boyd.org", "krispykreme.com"], allow: ["mom@family.com", "advisor.edu"] };
 
-test("blocklist sends a sender straight to bulk, before anything else", () => {
-  assert.deepEqual(prefilter({ from: "community@boyd.org" }, opts), { decision: "bulk", reason: "blocklist" });
+test("blocklist sends a sender straight to general, before anything else", () => {
+  assert.deepEqual(prefilter({ from: "community@boyd.org" }, opts), { decision: "general", reason: "blocklist" });
   // domain form: any address at krispykreme.com
-  assert.equal(prefilter({ from: "News <deals@krispykreme.com>" }, opts).decision, "bulk");
+  assert.equal(prefilter({ from: "News <deals@krispykreme.com>" }, opts).decision, "general");
 });
 
 test("allowlist sends a sender straight to priority", () => {
@@ -23,7 +23,7 @@ test("blocklist beats the grep and the allowlist beats it too", () => {
   assert.equal(prefilter({ from: "mom@family.com", headers: { "list-unsubscribe": "<u>" } }, opts).decision, "priority");
 });
 
-test("Gmail's Promotions/Social box -> bulk, before spending a Haiku call", () => {
+test("Gmail's Promotions/Social box -> general, before spending a Haiku call", () => {
   assert.equal(prefilter({ from: "x@brand.com", labelIds: ["INBOX", "CATEGORY_PROMOTIONS"] }, opts).reason, "gmail promotions");
   assert.equal(prefilter({ from: "x@brand.com", labelIds: ["CATEGORY_SOCIAL"] }, opts).reason, "gmail social");
   // Updates is NOT filed — its label sweeps in bank/sign-in/verify mail, so it
@@ -35,9 +35,24 @@ test("Gmail's Promotions/Social box -> bulk, before spending a Haiku call", () =
   assert.equal(prefilter({ from: "mom@family.com", labelIds: ["CATEGORY_PROMOTIONS"] }, opts).decision, "priority");
 });
 
-test("no list match, but a list header -> bulk via grep (no Haiku)", () => {
+test("a list header with a record or action subject goes to Haiku, not general", () => {
+  const listed = { from: "x@brand.com", headers: { "list-unsubscribe": "<u>" } };
+  for (const subject of [
+    "Your Premium payment failed",
+    "2024 Federal Tax Return Accepted",
+    "Your statement is ready",
+    "[Action Required] Your Assessments Expire in 24 hours",
+    "Re: I would like to update my policy",
+  ]) {
+    assert.equal(prefilter({ ...listed, subject }, opts).decision, "undecided", subject);
+  }
+  // A plain newsletter subject is still filed for free.
+  assert.equal(prefilter({ ...listed, subject: "This week's top stories" }, opts).decision, "general");
+});
+
+test("no list match, but a list header -> general via grep (no Haiku)", () => {
   const r = prefilter({ from: "newsletter@brand.com", headers: { "list-unsubscribe": "<u>" } }, opts);
-  assert.deepEqual(r, { decision: "bulk", reason: "list header" });
+  assert.deepEqual(r, { decision: "general", reason: "list header" });
 });
 
 test("nothing matches -> undecided (hand to Haiku)", () => {
@@ -47,5 +62,5 @@ test("nothing matches -> undecided (hand to Haiku)", () => {
 
 test("empty lists still let the grep and undecided paths work", () => {
   assert.equal(prefilter({ from: "x@y.com" }, { block: [], allow: [] }).decision, "undecided");
-  assert.equal(prefilter({ from: "x@y.com", headers: { "list-id": "<l>" } }, { block: [], allow: [] }).decision, "bulk");
+  assert.equal(prefilter({ from: "x@y.com", headers: { "list-id": "<l>" } }, { block: [], allow: [] }).decision, "general");
 });

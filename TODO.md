@@ -10,6 +10,46 @@ and move to **Done** with the PR number. Anything with a GitHub issue links to i
 
 ## Now
 
+### Calendar
+
+- [ ] **Keep Google's "Events from Gmail" off.** A forwarded invite can land on
+      the calendar twice: Ronnie's guest-less add, and Google's own auto-add,
+      which copies the organizer and every attendee from the `.ics` and keeps the
+      `FW:` subject as the title. The `FW: Lab Meeting` series (Anna Chupak as
+      organizer, 8 guests) was Google's — the log shows Ronnie only labelled
+      those forwards Interesting, with no `📅` line. Ronnie never adds guests and
+      writes with `sendUpdates: "none"`. Google Calendar → Settings → Events from
+      Gmail.
+
+### Ronnie — mail tiers, after #84
+
+#84 split Bulk into Records and General and added Meetings. The rest of the
+redesign, from a five-agent audit of the 1,777-message backfill:
+
+- [ ] **Topics.** Make `ut` a real topic (424 backfill messages carry it, but
+      the code has no `ut`). Add `health` (Prisma/MyChart; reaches Priority),
+      `research` (lab, AI Institute, Leo's group; needs Haiku), `usc` (alumni
+      and admin senders only, not people at `email.sc.edu`), `receipts` (Uber,
+      Square, travel) and `benefits` (Empower, SurePayroll, PEBA, USC HR). Add
+      the subtopics the audit found under Records and Interesting. Fix the
+      misses: FreeTaxUSA/TaxAct/IRS → taxes; Optiver, Akuna, iCIMS, Handshake,
+      `indeedemail.com` → jobs.
+- [ ] **Novelty ledger.** A JSON tally per sender brand × mail kind (statement,
+      autopay reminder, payment confirmed, …) with distinct-day count and
+      last-seen date. First time ever → Priority. Roughly yearly, or a gap over
+      60 days → Priority. A steady cadence (about the 4th time) → Records.
+      Failed payments, bills due and security mail never become routine. Seed
+      from the backfill — Gmail ids carry the date.
+- [ ] **ToS check.** For a terms-of-service update only, give Haiku one web
+      search: "is the <company> terms of service change a big deal?" Yes →
+      Priority, else Records. That call gets the search tool and nothing else.
+- [ ] **ToS check, later: Twitter.** Also look at what people on Twitter say
+      about the change before deciding.
+- [ ] **Job assessments into Jobs.** Assessment invites are Priority now. Later,
+      file them so all job mail is in one place to review.
+- [ ] **Re-sort the existing inbox.** Run `scripts/ronnie-backfill.mjs` again
+      (dry run first) so old Interesting receipts and statements move to Records.
+
 ### Keeping context live
 
 - [ ] **A change bus — everything publishes, Alfred subscribes and drains per
@@ -75,7 +115,8 @@ and move to **Done** with the PR number. Anything with a GitHub issue links to i
       **Phase two, when this comes back — point at Gmail, don't build a store.**
       The robust "more context on that email" path is *notify by path* aimed at
       Gmail: teach the `gmail` skill the Ronnie label convention (`Priority` =
-      pinged, `Interesting`, `Bulk`, plus topic children), so "that email Ronnie
+      pinged, `Interesting`, `Records`, `General`, `Meetings`, plus topic
+      children), so "that email Ronnie
       flagged" is a `label:Priority newer_than:Nd` search, newest first. Gmail is
       the live, always-current store; Alfred already reads it; the ping already
       carries the message id. Do **not** build a "recent pings" file — that just

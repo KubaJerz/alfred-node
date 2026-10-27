@@ -3,7 +3,8 @@
 //   blocklist -> allowlist -> grep   (prefilter.js, free)
 //   -> Haiku                          (haiku.js, paid, only when undecided)
 //
-// Returns { label: "priority"|"interesting"|"bulk", summary, reason, topic }.
+// Returns { label: "priority"|"meetings"|"records"|"interesting"|"general",
+// summary, reason, topic }.
 // summary is filled only when Haiku judged it priority (that's the ping text).
 // reason names which stage decided, so a log or a dry-run can show why — and how
 // often the paid stage actually ran.
@@ -23,7 +24,7 @@ import { domainTopic, validHaikuTopic } from "./topics.js";
  */
 export async function classify(msg = {}, opts = {}) {
   // The topic axis is independent of attention: a sender-domain topic
-  // (entropy/banking/jobs) is decided up front and applies even to filed bulk.
+  // (entropy/banking/jobs) is decided up front and applies even to filed mail.
   const dTopic = domainTopic(msg, opts);
 
   const pre = prefilter(msg, { block: opts.block, allow: opts.allow });
@@ -48,11 +49,12 @@ export async function classify(msg = {}, opts = {}) {
   return finish(v.label, v.summary, v.error ? `haiku error: ${v.error}` : "haiku", topic, true);
 }
 
-// Assemble the verdict and apply the one cross-axis rule: taxes is ALWAYS the
-// interesting tier — a tax notice is worth keeping (never bulk) but is not a ping
-// (not priority); you review it at your leisure.
+// Assemble the verdict and apply the one cross-axis rule: taxes is always kept
+// and never pings. A filed return or a "return accepted" notice is records; any
+// other tax mail is interesting, so you review it at your leisure.
+const TAX_TIERS = new Set(["interesting", "records"]);
 function finish(label, summary, reason, topic, usedHaiku) {
-  if (topic === "taxes" && label !== "interesting") {
+  if (topic === "taxes" && !TAX_TIERS.has(label)) {
     return { label: "interesting", summary: "", reason: `${reason} → taxes forces interesting`, topic, usedHaiku };
   }
   return { label, summary, reason, topic, usedHaiku };

@@ -1123,15 +1123,18 @@ if (ronnieConfigured) {
   let labels;
   if (sharedGmail) {
     try {
-      // Priority is the newer top-level parent (the ping tier); Interesting/Bulk
-      // come from env. Ensure Priority exists, then resolve the nested children.
-      let priorityId = process.env.RONNIE_LABEL_PRIORITY;
-      if (!priorityId) priorityId = (await ensureLabels(["Priority"], { gmail: sharedGmail })).ids["Priority"];
+      // Interesting and General (the old Bulk label, same id) come from env.
+      // Priority, Records and Meetings are newer parents: use the env id when it
+      // is set, else create the label by name. Then resolve the nested children.
+      const parent = async (envId, name) =>
+        envId || (await ensureLabels([name], { gmail: sharedGmail })).ids[name];
       labels = await resolveRonnieLabels({
         gmail: sharedGmail,
-        priorityId,
+        priorityId: await parent(process.env.RONNIE_LABEL_PRIORITY, "Priority"),
         interestingId: process.env.RONNIE_LABEL_INTERESTING,
-        bulkId: process.env.RONNIE_LABEL_BULK,
+        recordsId: await parent(process.env.RONNIE_LABEL_RECORDS, "Records"),
+        generalId: process.env.RONNIE_LABEL_BULK,
+        meetingsId: await parent(process.env.RONNIE_LABEL_MEETINGS, "Meetings"),
         create: true,
       });
       if (labels.created?.length) console.log(`🏷️  created ${labels.created.length} topic label(s): ${labels.created.join(", ")}`);

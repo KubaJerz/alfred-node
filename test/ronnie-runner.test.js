@@ -30,7 +30,7 @@ test("enqueue → drain triages a queued message end to end (free stage, no Haik
     calls.push({ url, body: JSON.parse(opts.body || "{}") });
     return { ok: true, json: async () => ({ id: "evt" }) };
   };
-  // A bulk message the prefilter decides for free — so no `claude -p` is spawned.
+  // A general message the prefilter decides for free — so no `claude -p` is spawned.
   const msg = {
     id: "m1",
     from: "newsletter@brand.com",
@@ -43,7 +43,7 @@ test("enqueue → drain triages a queued message end to end (free stage, no Haik
     brokerUrl: "http://127.0.0.1:1",
     brokerToken: "T",
     webhookUrl: "",
-    labels: { bulk: "L_BULK", interesting: "L_INT" },
+    labels: { general: "L_BULK", interesting: "L_INT" },
     owners: ["kuba@gmail.com"],
     enrichOne: async (id) => (id === "m1" ? msg : null),
     queue,
@@ -59,7 +59,7 @@ test("enqueue → drain triages a queued message end to end (free stage, no Haik
   const label = calls.find((c) => c.url.endsWith("/mail/label"));
   assert.ok(label, "it labelled the message");
   assert.equal(label.body.addLabels[0], "L_BULK");
-  assert.deepEqual(label.body.removeLabels, ["INBOX"]); // bulk is archived
+  assert.deepEqual(label.body.removeLabels, ["INBOX"]); // general is archived
 });
 
 test("undo cal:<eventId> deletes the calendar event by id", async () => {
@@ -77,7 +77,7 @@ test("undo cal:<eventId> deletes the calendar event by id", async () => {
   assert.match(call.url, /[?&]id=evt-9\b/);
 });
 
-test("undo mail:<id> re-files a pinged message as bulk", async () => {
+test("undo mail:<id> re-files a pinged message as general", async () => {
   const calls = [];
   const fetchImpl = async (url, opts) => {
     calls.push({ url, body: JSON.parse(opts.body || "{}") });
@@ -86,7 +86,7 @@ test("undo mail:<id> re-files a pinged message as bulk", async () => {
   const r = makeRonnie({
     brokerUrl: "http://127.0.0.1:1",
     brokerToken: "T",
-    labels: { priority: "L_PRI", bulk: "L_BULK", interesting: "L_INT" },
+    labels: { priority: "L_PRI", general: "L_BULK", interesting: "L_INT" },
     fetchImpl,
   });
   const out = await r.undo("mail:m7");

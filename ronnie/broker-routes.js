@@ -31,7 +31,7 @@ export const RONNIE_ROUTES = {
   // Apply / remove Gmail labels. A deliberate subset of the read broker's
   // /mail/modify: labels only — no archive, no mark-read, and crucially no way
   // to *read* what's being labelled from this broker. This is the tier-1/tier-2
-  // sorting action (bulk → a boring label, interesting → a watched one).
+  // sorting action (general → a boring label, interesting → a watched one).
   "POST /mail/label": async ({ body }) => {
     const { id, addLabels, removeLabels } = body || {};
     if (!id) return { error: "id required", status: 400 };

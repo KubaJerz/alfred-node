@@ -1,9 +1,8 @@
 // The topic axis — a SECOND, independent label layered on top of the
-// attention axis (interesting/bulk in prefilter.js + haiku.js). Attention
-// decides whether you're pinged and whether the mail leaves the inbox; a topic
-// says what the mail is *about* and co-applies to either. So an entropy.co
-// newsletter is `bulk + ENTROPY`, and a job offer from a person is
-// `interesting + JOBS`.
+// attention axis (the tiers in prefilter.js + haiku.js). Attention decides
+// whether you're pinged and whether the mail leaves the inbox; a topic says what
+// the mail is *about* and co-applies to any tier. So an entropy.co newsletter is
+// `general + ENTROPY`, and a job offer from a person is `interesting + JOBS`.
 //
 // A message carries at most one topic. Three topics are decided the cheap,
 // reliable way — by the sender's domain, an explicit durable fact just like the
@@ -12,7 +11,7 @@
 //   entropy  — anyone @entrpy.co (RONNIE_TOPIC_ENTROPY_SENDERS)
 //   banking  — your banks' domains (RONNIE_TOPIC_BANKING_SENDERS)
 //   jobs     — job boards / ATS senders (RONNIE_TOPIC_JOBS_SENDERS). A board is a
-//              *listing*; it usually free-files as bulk and so skips Haiku, which
+//              *listing*; it usually free-files as general and so skips Haiku, which
 //              would otherwise be the only thing to tag it "jobs" — hence a domain
 //              rule, so listings still land under Jobs even when filed silently.
 //
@@ -39,7 +38,7 @@ const parseList = (v) =>
 const ENTROPY = parseList(process.env.RONNIE_TOPIC_ENTROPY_SENDERS || "entrpy.co,entropy.co");
 const BANKING = parseList(process.env.RONNIE_TOPIC_BANKING_SENDERS);
 // Job boards / applicant-tracking senders default to the ones seen in the inbox;
-// override with RONNIE_TOPIC_JOBS_SENDERS. These are listings → Bulk/Jobs; an
+// override with RONNIE_TOPIC_JOBS_SENDERS. These are listings → General/Jobs; an
 // active thread from a person/company is tagged jobs by Haiku instead.
 const JOBS = parseList(
   process.env.RONNIE_TOPIC_JOBS_SENDERS ||
@@ -60,7 +59,7 @@ function listed(address, list) {
 
 /**
  * The deterministic topic decided from the sender alone. Runs on every message,
- * regardless of what attention decided, so entropy/banking tag even filed bulk.
+ * regardless of what attention decided, so entropy/banking tag even filed mail.
  * Returns "entropy" | "banking" | null.
  *
  * @param {{from?: string}} msg

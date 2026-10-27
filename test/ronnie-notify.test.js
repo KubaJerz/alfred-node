@@ -3,9 +3,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mailEmbed, inviteEmbed, post, notifyMail, COLORS } from "../ronnie/notify.js";
 
-test("mailEmbed colours priority green and bulk blue", () => {
+test("mailEmbed colours priority green and general blue", () => {
   assert.equal(mailEmbed({ from: "a@x", subject: "hi", category: "priority" }).color, COLORS.priority);
-  assert.equal(mailEmbed({ from: "a@x", subject: "sale", category: "bulk" }).color, COLORS.bulk);
+  assert.equal(mailEmbed({ from: "a@x", subject: "sale", category: "general" }).color, COLORS.general);
 });
 
 test("mailEmbed defuses an @everyone in the subject", () => {
@@ -20,11 +20,11 @@ test("mailEmbed fills sensible defaults for missing fields", () => {
   assert.equal(e.title, "(no subject)");
 });
 
-test("a priority mailEmbed carries a mail: undo handle; bulk does not", () => {
+test("a priority mailEmbed carries a mail: undo handle; general does not", () => {
   const personal = mailEmbed({ id: "m1", from: "a@x", subject: "hi", category: "priority" });
   assert.match(personal.footer.text, /undo mail:m1/);
-  const bulk = mailEmbed({ id: "m2", from: "a@x", subject: "sale", category: "bulk" });
-  assert.equal(bulk.footer.text, "filed — bulk"); // no undo handle on silent filing
+  const bulk = mailEmbed({ id: "m2", from: "a@x", subject: "sale", category: "general" });
+  assert.equal(bulk.footer.text, "filed — general"); // no undo handle on silent filing
 });
 
 test("inviteEmbed puts the UID in the footer as the undo handle", () => {
@@ -80,11 +80,11 @@ test("notifyMail builds one embed per entry", async () => {
   await notifyMail(
     [
       { from: "a@x", subject: "one", category: "priority" },
-      { from: "n@brand", subject: "sale", category: "bulk" },
+      { from: "n@brand", subject: "sale", category: "general" },
     ],
     { webhookUrl: "https://d/w", fetchImpl }
   );
   assert.equal(seen.embeds.length, 2);
   assert.equal(seen.embeds[0].color, COLORS.priority);
-  assert.equal(seen.embeds[1].color, COLORS.bulk);
+  assert.equal(seen.embeds[1].color, COLORS.general);
 });
