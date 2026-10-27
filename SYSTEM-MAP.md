@@ -216,6 +216,9 @@ flowchart TD
     ACT -->|"records / general / meetings → label − INBOX"| RBR
     ACT -->|"interesting → label, kept, silent"| RBR
     ACT -->|"priority → label + ping"| PING["ping · notify.js"]
+    ACT -.->|"topic policies → in the background"| POL["ToS check · policy.js → policy-check.js<br/>Opus · WebSearch + allowlisted WebFetch<br/>links stripped · DMARC · cap 10/day<br/>re-check at 48h on the sweep"]
+    POL -.->|"big deal → Priority + INBOX"| RBR
+    POL -.->|"big deal → ping: what changed"| PING
     RBR["Ronnie's broker · broker-routes.js<br/>4 routes · own token"] ==>|"label / list / add / delete"| GM["Gmail / Calendar"]
     PING --> DIS["Discord webhook · write-only"]
 
@@ -225,7 +228,7 @@ flowchart TD
     classDef store fill:#e7e7e7,stroke:#888,color:#333
     class GM,DIS external
     class SC,RBR gateway
-    class HK agent
+    class HK,POL agent
     class Q,X,LF store
 ```
 
@@ -278,6 +281,29 @@ Seven properties, each a decision made on purpose:
   `removeLabels: ["INBOX"]` is the archive); **Interesting** is labelled but kept
   in the inbox, silent; **Priority** is labelled, kept, and *pinged* with Haiku's
   one-sentence why (`notify.js`).
+- **A ToS email gets a web check** (`policy.js`, `policy-check.js`). When Haiku
+  tags an email `policies`, it is filed as Haiku said, and a separate Opus run
+  starts in the background, one at a time. It is the only Ronnie call with tools:
+  `--tools "WebSearch,WebFetch"`, WebFetch allowed only for fixed research sites
+  (`x` and `*.x` per site, since a rule is one exact host) plus the sender's
+  domain when DMARC passed and the owner listed it, and `--permission-mode
+  dontAsk --permission-prompts none`, so Claude Code refuses anything else; a
+  redirect off the allowlist is refused too. The email reaches it through
+  `stripLinks`, and the run doesn't start if `findLinks` still finds anything.
+  The verdict is JSON (`--json-schema`), validated, with sources kept only on
+  allowed hosts. Big deal → Priority, back in the inbox, ping with what changed.
+  Every ToS email is checked again 48 hours later from a small id-only queue in
+  `agent/var/ronnie-policy.json`, drained by the same sweep as the mail queue.
+  Gated on DMARC, one company per 3 days, and 10 runs a day.
+- **Every model call runs in a small box** (`claude-run.js`). Ronnie's `claude -p`
+  calls read untrusted email, so each one runs from an empty temporary directory
+  with only `PATH` and `HOME` in its environment, a hard timeout, and four flags:
+  `--restricted` (the owner's settings run in `auto` mode, which let an unflagged
+  call read files and run shell), `--strict-mcp-config`, `--disable-slash-commands`
+  and `--no-session-persistence` (a saved session would keep the email body under
+  `~/.claude/projects`). Haiku's own argv adds `--tools ""`. Model-written text
+  posted to Discord goes through `stripLinks` (`strip-links.js`) first, because
+  Discord makes a URL in an embed clickable.
 - **The novelty ledger moves a routine-looking record up when it isn't routine**
   (`ledger.js`, `agent/var/ronnie-ledger.json`). Haiku also names the *kind* of mail
   (statement, autopay, payment confirmed, transfer, deposit, payment failed, …).

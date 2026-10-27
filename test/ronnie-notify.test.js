@@ -20,6 +20,12 @@ test("mailEmbed fills sensible defaults for missing fields", () => {
   assert.equal(e.title, "(no subject)");
 });
 
+test("a link in a model-written summary never reaches Discord", () => {
+  const e = mailEmbed({ from: "a@x", subject: "s", category: "priority", summary: "Call now at https://evil.example/pay or visit pay-here.com" });
+  assert.doesNotMatch(e.description, /https?:|evil\.example|pay-here\.com/);
+  assert.match(e.description, /link removed/);
+});
+
 test("a priority mailEmbed carries a mail: undo handle; general does not", () => {
   const personal = mailEmbed({ id: "m1", from: "a@x", subject: "hi", category: "priority" });
   assert.match(personal.footer.text, /undo mail:m1/);

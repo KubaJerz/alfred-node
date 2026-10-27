@@ -41,11 +41,17 @@ redesign, from a five-agent audit of the 1,777-message backfill:
       60 days → Priority. A steady cadence (about the 4th time) → Records.
       Failed payments, bills due and security mail never become routine. Seed
       from the backfill — Gmail ids carry the date.
-- [ ] **ToS check.** For a terms-of-service update only, give Haiku one web
-      search: "is the <company> terms of service change a big deal?" Yes →
-      Priority, else Records. That call gets the search tool and nothing else.
+- [x] ~~**ToS check.**~~ Done in #94: a separate Opus run with WebSearch and an
+      allowlisted WebFetch, links stripped from the email, re-checked at 48h.
+- [ ] **ToS check: more early sources.** A live run found ConductAtlas (a ToS
+      change tracker) through search but could not open it. Vet it and add it to
+      `FIXED_SITES`, and add big services the owner uses to
+      `RONNIE_POLICY_FETCH_DOMAINS` so their own change pages can be read.
 - [ ] **ToS check, later: Twitter.** Also look at what people on Twitter say
-      about the change before deciding.
+      about the change before deciding. The free mirrors (Nitter, XCancel) are
+      gone; the X API is pay-per-use (about $0.005 a read). If added, bot.js
+      fetches the posts and passes them in as untrusted text — the model gets
+      no new tool.
 - [ ] **Job assessments into Jobs.** Assessment invites are Priority now. Later,
       file them so all job mail is in one place to review.
 - [ ] **Re-sort the existing inbox.** Run `scripts/ronnie-backfill.mjs` again

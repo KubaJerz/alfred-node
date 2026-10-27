@@ -140,6 +140,7 @@ export async function handleMessage(msg = {}, deps = {}) {
     classify = defaultClassify,
     extractInvite = defaultExtractInvite,
     matchEvent = defaultMatchEvent,
+    policy = null,
     log = () => {},
   } = deps;
 
@@ -265,6 +266,11 @@ export async function handleMessage(msg = {}, deps = {}) {
   // the inbox but silent (you review it later); the archived tiers are silent.
   if (tier === "priority") {
     await notify([mailEmbed({ ...msg, category: "priority", summary, topic })]);
+  }
+  // A ToS or privacy-policy email: start the web check (policy.js) without
+  // waiting. It may move the email to Priority minutes later.
+  if (topic === "policies" && policy) {
+    policy.onPolicyMail(msg, { tier }).catch((err) => log(`⚠️  ToS check failed (${err.message})`));
   }
   const domain = senderDomain(msg.from);
   log(

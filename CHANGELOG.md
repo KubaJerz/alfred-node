@@ -4,6 +4,33 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [SemVer](https://semver.org/).
 
 ## [Unreleased]
+### Added
+- **Ronnie checks whether a terms-of-service change is a big deal.** When Haiku
+  tags an email `policies`, Ronnie files it as Records and starts a separate
+  Opus run in the background with WebSearch and an allowlisted WebFetch (Open
+  Terms Archive on GitHub, Hacker News search, ToS;DR, Wikipedia). A big deal —
+  AI training on your data, forced arbitration, wider data sharing, new rights
+  to your content, retention, price or auto-renew changes — moves the email to
+  Priority, back to the inbox, with a ping saying what changed. Every ToS email
+  is checked again 48 hours later, since early sources often have nothing on
+  day one. The email reaches the run with every link stripped, and it fails
+  closed if one survives. Only DMARC-passing mail is researched, one company
+  every 3 days, at most 10 runs a day. A live run on a Google Play ToS email
+  took 32 seconds; Claude Code refused its fetches to three sites off the
+  allowlist (#94).
+### Fixed
+- **Ronnie's model calls run in a box.** Every `claude -p` call now runs from
+  an empty temporary directory, with only `PATH` and `HOME` in its environment,
+  a 2-minute timeout, and `--restricted --strict-mcp-config
+  --disable-slash-commands --no-session-persistence`. Before, the call ran from
+  the repo root with the bot's whole environment (broker token, webhook, Discord
+  token), under the owner's `auto` permission mode, and saved each email body as
+  a session under `~/.claude/projects`. A hung call stalled the queue; now it
+  times out. A test email that asked for a file by absolute path, and for a
+  shell command, got its tier and nothing else.
+- **No clickable links in Ronnie's pings.** A model-written summary or event
+  title goes through the new link stripper (`ronnie/strip-links.js`) before it
+  is posted, so an email can't put a phishing link into a ping in Ronnie's voice.
 ### Fixed
 - **Ronnie's Haiku call could read local files.** `claude -p` keeps its
   read-only tools unless told otherwise, and Ronnie's call never said so. A
