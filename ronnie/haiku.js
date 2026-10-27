@@ -21,7 +21,7 @@
 // failure falls back to interesting — kept in the inbox, never buried. Falling
 // back to priority made errors look like urgent mail: 26 of 103 backfill pings.
 
-import { spawn } from "child_process";
+import { runClaudeJson } from "./claude-run.js";
 import { validHaikuTopic } from "./topics.js";
 import { KINDS } from "./ledger.js";
 
@@ -149,35 +149,20 @@ function parseVerdict(text) {
 }
 
 // The argv for a one-shot classification. `--tools ""` removes every built-in
-// tool and `--strict-mcp-config` (with no --mcp-config) drops every MCP server.
-// Without them `claude -p` keeps its read-only tools: a test run read a file on
+// tool. Without it `claude -p` keeps its tools: a test run read a file on
 // request, so a prompt-injected email could have had Haiku read `.env` and put
-// it in the ping summary. "No tools" has to be a flag, not a default. Do not
-// add `--bare`: it skips the subscription login, and every call then fails.
+// it in the ping summary. "No tools" has to be a flag, not a default.
+// claude-run.js adds the flags every Ronnie call gets (no settings, no MCP, no
+// saved session) and runs it in an empty directory with a timeout.
 export function claudeArgs(prompt, model) {
-  return ["-p", prompt, "--model", model, "--output-format", "json", "--tools", "", "--strict-mcp-config"];
+  return ["-p", prompt, "--model", model, "--output-format", "json", "--tools", ""];
 }
 
 // Default runner: `claude -p` over the subscription. No tools — a pure one-shot
 // classification. Returns { text, usage } from the JSON output.
-function runClaude(prompt, { model }) {
-  return new Promise((resolve, reject) => {
-    const child = spawn("claude", claudeArgs(prompt, model), { stdio: ["ignore", "pipe", "pipe"] });
-    let out = "";
-    let err = "";
-    child.stdout.on("data", (d) => (out += d));
-    child.stderr.on("data", (d) => (err += d));
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (code !== 0) return reject(new Error(`claude -p exited ${code}: ${err.slice(0, 160)}`));
-      try {
-        const j = JSON.parse(out);
-        resolve({ text: j.result || "", usage: j.usage || {}, cost: j.total_cost_usd });
-      } catch {
-        reject(new Error("claude -p output was not JSON"));
-      }
-    });
-  });
+async function runClaude(prompt, { model }) {
+  const j = await runClaudeJson(claudeArgs(prompt, model), { timeoutMs: 120_000 });
+  return { text: j.result || "", usage: j.usage || {}, cost: j.total_cost_usd };
 }
 
 // Thrown in strict mode when the service answered but the verdict is unusable.

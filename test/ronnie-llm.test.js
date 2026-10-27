@@ -3,8 +3,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readdirSync } from "node:fs";
 import { classifyWithHaiku, claudeArgs } from "../ronnie/haiku.js";
+import { BASE_FLAGS, sandboxDir, sandboxEnv } from "../ronnie/claude-run.js";
 import { makeMeter } from "../ronnie/meter.js";
 import { classify } from "../ronnie/classify.js";
 
@@ -184,12 +185,22 @@ test("classify: over the daily call cap, surface priority and flag capped", asyn
   assert.equal(called, false);
 });
 
-test("the Haiku call runs with every tool and MCP server removed", () => {
-  const args = claudeArgs("PROMPT", "claude-haiku-4-5");
+test("the Haiku call runs with every tool removed", () => {
+  const args = [...claudeArgs("PROMPT", "claude-haiku-4-5"), ...BASE_FLAGS];
   const i = args.indexOf("--tools");
   assert.ok(i >= 0, "--tools present");
   assert.equal(args[i + 1], ""); // empty list = no built-in tools
-  assert.ok(args.includes("--strict-mcp-config"));
+  for (const f of ["--restricted", "--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence"]) {
+    assert.ok(args.includes(f), f);
+  }
   assert.ok(!args.includes("--bare")); // --bare skips the subscription login
   assert.ok(!args.some((a) => /allowedTools|dangerously/i.test(a)));
+});
+
+test("every Ronnie claude call runs in an empty dir with PATH and HOME only", () => {
+  const env = sandboxEnv({ PATH: "/bin", HOME: "/home/x", DISCORD_TOKEN: "t", RONNIE_BROKER_TOKEN: "b" });
+  assert.deepEqual(Object.keys(env).sort(), ["ENABLE_CLAUDEAI_MCP_SERVERS", "HOME", "PATH"]);
+  const dir = sandboxDir();
+  assert.ok(dir.includes("ronnie-claude-"));
+  assert.deepEqual(readdirSync(dir), []);
 });

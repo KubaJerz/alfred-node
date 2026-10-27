@@ -16,6 +16,8 @@
 // and length capped. A webhook can't reach an irreversible action regardless,
 // but a subject shouldn't be able to @everyone either.
 
+import { stripLinks } from "./strip-links.js";
+
 const WEBHOOK_URL = process.env.RONNIE_DISCORD_WEBHOOK || "";
 
 // Embed colours. Green = a priority message worth interrupting you for (the only
@@ -41,6 +43,13 @@ function clean(s, max = 240) {
     .slice(0, max);
 }
 
+// Text a model wrote from an email (Haiku's summary, an extracted event title).
+// Discord makes a URL in an embed clickable, so a prompt-injected email could
+// put a phishing link into a ping in Ronnie's voice. Strip links first.
+function prose(s, max) {
+  return clean(stripLinks(String(s ?? "")), max);
+}
+
 /**
  * A Discord embed for a single inbound message. `entry` carries the sender,
  * subject, category, and (for a personal message) Haiku's one-sentence summary,
@@ -60,7 +69,7 @@ export function mailEmbed(entry = {}) {
     author: { name: topic ? `${from} · #${topic}` : from },
     title: subject,
     // The one-liner is the point of the ping — why this matters, in a sentence.
-    description: entry.summary ? clean(entry.summary, 500) : undefined,
+    description: entry.summary ? prose(entry.summary, 500) : undefined,
     // A pinged (personal) message carries its own undo handle: reply to re-file
     // it as general if Ronnie got it wrong. General mail is filed silently, no handle.
     footer: { text: general ? "filed — general" : id ? `reply “undo mail:${id}” to file it` : "new mail" },
@@ -76,7 +85,7 @@ export function inviteEmbed({ action, summary, uid, when } = {}) {
   const removed = action === "removed";
   return {
     color: removed ? COLORS.undo : COLORS.invite,
-    title: `Calendar: ${removed ? "removed" : "added"} “${clean(summary) || "an event"}”`,
+    title: `Calendar: ${removed ? "removed" : "added"} “${prose(summary) || "an event"}”`,
     description: when ? clean(when) : undefined,
     // The event id is the undo handle (prefixed cal: so bot.js can tell it from a
     // mail undo). Kept un-cleaned of case but capped; it's Google's own event id,
@@ -93,7 +102,7 @@ export function inviteEmbed({ action, summary, uid, when } = {}) {
 export function rejectedInviteEmbed({ summary, from, reason } = {}) {
   return {
     color: COLORS.undo,
-    title: `Calendar: did not add “${clean(summary) || "a forwarded invite"}”`,
+    title: `Calendar: did not add “${prose(summary) || "a forwarded invite"}”`,
     description: `From ${clean(from) || "an unknown sender"}: ${clean(reason) || "failed the sender check"}.`,
     footer: { text: "allowed senders are RONNIE_FORWARD_SENDERS in .env" },
   };

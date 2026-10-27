@@ -278,6 +278,15 @@ Seven properties, each a decision made on purpose:
   `removeLabels: ["INBOX"]` is the archive); **Interesting** is labelled but kept
   in the inbox, silent; **Priority** is labelled, kept, and *pinged* with Haiku's
   one-sentence why (`notify.js`).
+- **Every model call runs in a small box** (`claude-run.js`). Ronnie's `claude -p`
+  calls read untrusted email, so each one runs from an empty temporary directory
+  with only `PATH` and `HOME` in its environment, a hard timeout, and four flags:
+  `--restricted` (the owner's settings run in `auto` mode, which let an unflagged
+  call read files and run shell), `--strict-mcp-config`, `--disable-slash-commands`
+  and `--no-session-persistence` (a saved session would keep the email body under
+  `~/.claude/projects`). Haiku's own argv adds `--tools ""`. Model-written text
+  posted to Discord goes through `stripLinks` (`strip-links.js`) first, because
+  Discord makes a URL in an embed clickable.
 - **The novelty ledger moves a routine-looking record up when it isn't routine**
   (`ledger.js`, `agent/var/ronnie-ledger.json`). Haiku also names the *kind* of mail
   (statement, autopay, payment confirmed, transfer, deposit, payment failed, …).

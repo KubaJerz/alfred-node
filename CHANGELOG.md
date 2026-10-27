@@ -5,6 +5,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
 
 ## [Unreleased]
 ### Fixed
+- **Ronnie's model calls run in a box.** Every `claude -p` call now runs from
+  an empty temporary directory, with only `PATH` and `HOME` in its environment,
+  a 2-minute timeout, and `--restricted --strict-mcp-config
+  --disable-slash-commands --no-session-persistence`. Before, the call ran from
+  the repo root with the bot's whole environment (broker token, webhook, Discord
+  token), under the owner's `auto` permission mode, and saved each email body as
+  a session under `~/.claude/projects`. A hung call stalled the queue; now it
+  times out. A test email that asked for a file by absolute path, and for a
+  shell command, got its tier and nothing else.
+- **No clickable links in Ronnie's pings.** A model-written summary or event
+  title goes through the new link stripper (`ronnie/strip-links.js`) before it
+  is posted, so an email can't put a phishing link into a ping in Ronnie's voice.
+### Fixed
 - **Ronnie's Haiku call could read local files.** `claude -p` keeps its
   read-only tools unless told otherwise, and Ronnie's call never said so. A
   test run read a file on request, so a prompt-injected email could have had
