@@ -1,7 +1,7 @@
 // Run with: npm test   (node's built-in runner, no network, no credentials)
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { resolveRonnieLabels, TIER_TOPICS } from "../ronnie/labels.js";
+import { resolveRonnieLabels, TIER_TOPICS, TOPIC_TITLES } from "../ronnie/labels.js";
 
 // A fake Gmail labels API seeded with the three parents (proper-cased) + records creates.
 function fakeGmail(extra = []) {
@@ -41,13 +41,27 @@ test("resolve without create: children that don't exist come back empty", async 
 test("resolve with create: builds nested names under the real parent names", async () => {
   const gmail = fakeGmail();
   const r = await resolveRonnieLabels({ gmail, priorityId: "L_PRI", interestingId: "L_INT", bulkId: "L_BULK", create: true });
-  // Names are parentName/Title, so they nest in Gmail's sidebar.
-  assert.deepEqual(
-    gmail._created.sort(),
-    ["Priority/Banking", "Priority/Entropy", "Priority/Jobs", "Bulk/Banking", "Bulk/Entropy", "Bulk/Jobs", "Interesting/Banking", "Interesting/Entropy", "Interesting/Jobs", "Interesting/Taxes"].sort()
-  );
+  // Names are parentName/Title, so they nest in Gmail's sidebar. Records and
+  // Meetings have no parent id here, so only these three tiers get children.
+  const want = [];
+  for (const [tier, parent] of [["priority", "Priority"], ["interesting", "Interesting"], ["general", "Bulk"]]) {
+    for (const t of TIER_TOPICS[tier]) want.push(`${parent}/${TOPIC_TITLES[t]}`);
+  }
+  assert.deepEqual(gmail._created.sort(), want.sort());
+  assert.ok(gmail._created.includes("Priority/Health"));
+  assert.ok(!gmail._created.includes("Bulk/Research")); // research is never noise
   assert.match(r.topics.interesting.jobs, /^NEW_/);
   assert.match(r.topics.general.banking, /^NEW_/);
+});
+
+test("every tier topic is a known topic with a title", async () => {
+  const { TOPICS } = await import("../ronnie/topics.js");
+  for (const topics of Object.values(TIER_TOPICS)) {
+    for (const t of topics) {
+      assert.ok(TOPICS.includes(t), t);
+      assert.ok(TOPIC_TITLES[t], t);
+    }
+  }
 });
 
 test("taxes exists only under interesting and records, never general or priority", () => {

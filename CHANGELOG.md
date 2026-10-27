@@ -5,6 +5,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
 
 ## [Unreleased]
 ### Added
+- **Ronnie tags eight more topics.** `ut` (University Tees), `health`
+  (Prisma/MyChart), `benefits` (payroll, retirement, USC onboarding),
+  `receipts` (rides, food orders, travel), `usc` (institutional senders only),
+  `research` (lab, AI Institute, Brain Health), `docs` (shared files) and
+  `policies` (ToS and privacy updates). Each tier lists the topics it carries.
+  Taxes and jobs get more sender domains, and USC onboarding (HireRight, I-9)
+  moves from jobs to benefits. The backfill no longer sweeps all University
+  Tees mail into General: it triages it like other mail (#86).
 - **Ronnie files mail in five tiers, not three.** Records holds receipts,
   statements, payment and autopay confirmations, transfers, and ToS updates.
   Meetings holds appointment mail (MyChart and similar) and the forwards of

@@ -16,15 +16,15 @@
 
 import { prefilter } from "./prefilter.js";
 import { classifyWithHaiku } from "./haiku.js";
-import { domainTopic, validHaikuTopic } from "./topics.js";
+import { domainTopic, pickTopic } from "./topics.js";
 
 /**
  * @param {object} msg  enriched message: { from, subject, body, headers }
  * @param {object} [opts] { block, allow, meter, run, capCalls, log }
  */
 export async function classify(msg = {}, opts = {}) {
-  // The topic axis is independent of attention: a sender-domain topic
-  // (entropy/banking/jobs) is decided up front and applies even to filed mail.
+  // The topic axis is independent of attention: a sender-domain topic is
+  // decided up front and applies even to filed mail.
   const dTopic = domainTopic(msg, opts);
 
   const pre = prefilter(msg, { block: opts.block, allow: opts.allow });
@@ -44,8 +44,8 @@ export async function classify(msg = {}, opts = {}) {
   // In strict mode a service-down here throws HaikuDownError (for the breaker);
   // otherwise it fails open, exactly as before.
   const v = await classifyWithHaiku(msg, { meter: opts.meter, run: opts.run, strict: opts.strict });
-  // Domain topic wins; only fall back to Haiku's guess (taxes/jobs) if none.
-  const topic = dTopic || validHaikuTopic(v.topic);
+  // Domain topic wins, except a Haiku research tag beats the usc rule.
+  const topic = pickTopic(dTopic, v.topic);
   return finish(v.label, v.summary, v.error ? `haiku error: ${v.error}` : "haiku", topic, true);
 }
 
