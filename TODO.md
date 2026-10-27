@@ -94,23 +94,26 @@ risky jobs to small least-privilege agents instead of widening his reach.
       survive Bash. Needs: a second user with its own authenticated Claude Code,
       a NOPASSWD sudoers rule, `chmod 700` on the credentials dir, and group
       sharing so memories stay writable.
+- [ ] **Revisit: the Tailscale operator is Alfred's user.** Set 2026-10-08
+      (`sudo tailscale set --operator=koob`) for a phone viewer we then did not
+      build. Any process running as that user, Alfred included, can change
+      Tailscale settings without `sudo`: `tailscale serve`, or `tailscale
+      funnel`, which publishes a port to the whole internet. Left in place on
+      purpose for now. Undo with `sudo tailscale set --operator=`. The separate
+      Unix user above also closes this.
+- [ ] **A file Alfred can read is not a secret.** Gitignored files (`.env`, a
+      local `.secrets`) stay out of git but not out of Alfred's reach, since he
+      runs as the same user. Real secrets go in a password manager or a
+      root-owned file until the separate user exists.
 
 ## Next
 
 ### Remote access to the box
 
-- [ ] **Reach the machine from anywhere — Tailscale + SSH.** Kuba often works
-      from another device through a remote Claude Code session. That session
-      cannot run `sudo`, and Kuba has no SSH access. So any step that needs root
-      waits until he is at the machine. The first case was the Chrome install for
-      the browser skill (#69). `sshd` is installed but inactive. Tailscale is not
-      installed.
-
-      Do it at the machine, once:
-      1. Install Tailscale and log in. Tailscale SSH (`tailscale up --ssh`) needs
-         no open port and no `sshd`.
-      2. Or enable `sshd` with key-only login, reachable only over the tailnet.
-      3. Install Tailscale on the phone and the laptop.
+- [x] **Reach the machine from anywhere — Tailscale + SSH.** Done by
+      2026-10-08: Tailscale is up (the box is `opti`), and `sshd` runs, so
+      `ssh koob@opti` works over the tailnet and `sudo` no longer waits until
+      Kuba is at the machine. Left to check: key-only login for `sshd`.
 
       Keep `sudo` behind a password. Remote access is for Kuba, not for Alfred.
 
