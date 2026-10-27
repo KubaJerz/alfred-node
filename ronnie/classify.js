@@ -17,10 +17,12 @@
 import { prefilter } from "./prefilter.js";
 import { classifyWithHaiku } from "./haiku.js";
 import { domainTopic, pickTopic } from "./topics.js";
+import { NOVEL_KINDS, brandOf, easternDay } from "./ledger.js";
+import { dmarcPass } from "./sender-auth.js";
 
 /**
  * @param {object} msg  enriched message: { from, subject, body, headers }
- * @param {object} [opts] { block, allow, meter, run, capCalls, log }
+ * @param {object} [opts] { block, allow, meter, run, capCalls, log, ledger, day }
  */
 export async function classify(msg = {}, opts = {}) {
   // The topic axis is independent of attention: a sender-domain topic is
@@ -46,7 +48,38 @@ export async function classify(msg = {}, opts = {}) {
   const v = await classifyWithHaiku(msg, { meter: opts.meter, run: opts.run, strict: opts.strict });
   // Domain topic wins, except a Haiku research tag beats the usc rule.
   const topic = pickTopic(dTopic, v.topic);
-  return finish(v.label, v.summary, v.error ? `haiku error: ${v.error}` : "haiku", topic, true);
+  let { label, summary } = v;
+  let reason = v.error ? `haiku error: ${v.error}` : "haiku";
+  if (opts.ledger && NOVEL_KINDS.has(v.kind)) {
+    ({ label, summary, reason } = await consultLedger(msg, v.kind, { label, summary, reason }, opts));
+  }
+  return { ...finish(label, summary, reason, topic, true), kind: v.kind };
+}
+
+// A record-like kind: ask the novelty ledger (ledger.js) whether this sender
+// sends it routinely. Only a records verdict can move — Haiku's priority or
+// interesting stands. Then record the sighting, but only for mail that passed
+// DMARC, so a spoofed email can't teach the ledger that a sender is routine.
+// A ledger failure never blocks triage: the Haiku verdict stands.
+async function consultLedger(msg, kind, v, opts) {
+  const brand = brandOf(msg.from);
+  if (!brand) return v;
+  const day = opts.day || easternDay();
+  let out = v;
+  try {
+    if (v.label === "records") {
+      const res = await opts.ledger.check(brand, kind, day);
+      out = {
+        label: res.tier,
+        summary: res.tier === "priority" ? res.why : "",
+        reason: `${v.reason} → ledger: ${res.why}`,
+      };
+    }
+    if (dmarcPass(msg)) await opts.ledger.record(brand, kind, day);
+  } catch (err) {
+    opts.log?.(`⚠️  novelty ledger failed (${err.message}); keeping Haiku's tier`);
+  }
+  return out;
 }
 
 // Assemble the verdict and apply the one cross-axis rule: taxes is always kept
