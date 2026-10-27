@@ -24,6 +24,14 @@ export const SMS_MAX_CHARS = 1600; // Telnyx's limit for one (multi-segment) SMS
 const BODY_CAP = 256 * 1024;
 const SEEN_CAP = 500; // event ids kept for de-duplication of Telnyx retries
 
+// Keywords that the Telnyx messaging profile answers by itself (Keywords tab).
+// The reply texts there must stay the same as the ones in the 10DLC campaign.
+// A text that is only one of these words is not a question for Alfred. Keep
+// this list to the profile's keywords: "yes" or "cancel" can be a real answer.
+// Telnyx tags any text it answered with payload.autoresponse_type, which the
+// route also checks.
+export const CARRIER_KEYWORDS = new Set(["STOP", "START", "HELP"]);
+
 // Normalize a phone number to E.164-ish digits with a leading "+". Strips
 // spaces, dashes, dots, and brackets. A bare 10-digit number gets "+1" (US).
 export function normalizeNumber(n) {
@@ -129,7 +137,12 @@ export function makeMessagingRoute({ ourNumber, allowFrom, onText, log = console
       log(`🚫 SMS from a number not in SMS_ALLOWED_NUMBERS (${from}) — ignored`);
       return;
     }
-    await onText({ id: p.id, from, text: String(p.text || "").trim(), media: p.media || [] });
+    const text = String(p.text || "").trim();
+    if (p.autoresponse_type || CARRIER_KEYWORDS.has(text.toUpperCase())) {
+      log(`🔑 SMS keyword "${text}" from ${from}: Telnyx answers it — no turn`);
+      return;
+    }
+    await onText({ id: p.id, from, text, media: p.media || [] });
   };
 }
 
