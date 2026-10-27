@@ -91,7 +91,7 @@ export function makeRonnie({
   // Reverse an action from a Discord "undo <token>" reply. Two forms, keyed by a
   // prefix so bot.js needn't know which is which:
   //   cal:<eventId>  — delete the calendar event Ronnie added from an invite.
-  //   mail:<id>      — re-file a message Ronnie pinged as bulk (archive it), for
+  //   mail:<id>      — re-file a message Ronnie pinged as general (archive it), for
   //                    when Ronnie called a message priority and it wasn't.
   const undo = async (token) => {
     const i = String(token).indexOf(":");
@@ -99,10 +99,10 @@ export function makeRonnie({
     const arg = i === -1 ? token : token.slice(i + 1);
     if (kind === "mail") {
       // Only priority mail is pinged, so an undo demotes a priority message to
-      // bulk: add Bulk, archive it, and drop the Priority parent it was under.
+      // general: add General, archive it, and drop the Priority parent it was under.
       await broker("POST /mail/label", {
         id: arg,
-        addLabels: [labels?.bulk].filter(Boolean),
+        addLabels: [labels?.general].filter(Boolean),
         removeLabels: ["INBOX", labels?.priority].filter(Boolean),
       });
       return { kind: "mail", id: arg };

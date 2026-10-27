@@ -4,7 +4,25 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [SemVer](https://semver.org/).
 
 ## [Unreleased]
+### Added
+- **Ronnie files mail in five tiers, not three.** Records holds receipts,
+  statements, payment and autopay confirmations, transfers, and ToS updates.
+  Meetings holds appointment mail (MyChart and similar) and the forwards of
+  invites Ronnie put on the calendar, which before stayed in the inbox with no
+  label. Both are archived. Bulk is now General. The Gmail label keeps its id,
+  so rename it in Gmail; Records and Meetings are created at boot (#84).
 ### Changed
+- **Ronnie's rubric moved routine mail out of the inbox.** About 70% of
+  Interesting in the backfill was receipts and statements; those are Records
+  now. Priority adds failed or declined payments, eCheck-In available, job
+  assessment invites, and medical bills. An autopay reminder is Records, not a
+  bill due (#84).
+- **A list header no longer hides a failed payment.** List-header mail goes to
+  General for free only when the subject has no record or action words.
+  "Your Premium payment failed" and "Tax Return Accepted" were filed as noise
+  before; now Haiku reads them. This costs about one extra Haiku call per ten
+  list-header mails (#84).
+- **The triage log line names the sender domain** (#84).
 - **Alfred browses with a window, and reads pages instead of clicking
   through them.** A live Walmart run (choline stock at two stores) showed that
   headless Chrome got a blank page, a Chrome with a window got through, and the
@@ -30,6 +48,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
   retries were limited, and about 15 test visits got this connection blocked
   on both Walmart and Target (#74).
 ### Fixed
+- **A Haiku error no longer pings.** An unusable verdict fell back to Priority:
+  26 of 103 backfill pings were errors. Now the message is retried, and a
+  message that keeps failing is surfaced after 3 tries (#84).
 - **Ronnie dropped a rejected forwarded invite without a word.** A forward
   must come from an address in `RONNIE_FORWARD_SENDERS`. A typo in that list
   made every school forward fail the check, and nothing showed it. Now a

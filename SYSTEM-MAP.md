@@ -201,16 +201,17 @@ flowchart TD
     C -->|"enrich() by id"| SC{"screen()<br/>mail-filter.js"}
     SC -.->|"login code → dropped"| X["screened out<br/>id removed · nothing kept"]
     SC -->|"safe"| H["handleMessage · index.js"]
-    H -->|"DKIM forward · sender-auth.js · invite.js (model)"| RBR
+    H -->|"DKIM forward · sender-auth.js · invite.js (model)<br/>event add/delete + forward → Meetings − INBOX"| RBR
     H -.->|"Fw: + .ics fails the gate → notice, then triage"| PING
-    H -->|"else · classify.js → prefilter.js<br/>block/allow/category/list-header (mail-triage.js)<br/>+ topics.js: domain → entropy/banking/jobs"| PF{"decided?"}
+    H -->|"else · classify.js → prefilter.js<br/>block/allow/category/list-header (mail-triage.js)<br/>list header skipped for record/action subjects<br/>+ topics.js: domain → entropy/banking/jobs"| PF{"decided?"}
     PF -->|"free"| ACT
     PF -->|"undecided"| BR{"breaker.js<br/>Haiku up?"}
     BR -->|"ready"| HK["Haiku · haiku.js<br/>claude -p · meter.js · capped<br/>label + taxes/jobs topic"]
     BR -.->|"open → hold + back off 60s→30m"| Q
     HK -->|"ok → success"| ACT{"tier<br/>+ topic"}
     HK -.->|"down → trip"| BR
-    ACT -->|"bulk → Bulk/topic − INBOX"| RBR
+    HK -.->|"unusable verdict → retry"| Q
+    ACT -->|"records / general / meetings → label − INBOX"| RBR
     ACT -->|"interesting → label, kept, silent"| RBR
     ACT -->|"priority → label + ping"| PING["ping · notify.js"]
     RBR["Ronnie's broker · broker-routes.js<br/>4 routes · own token"] ==>|"label / list / add / delete"| GM["Gmail / Calendar"]
@@ -244,9 +245,11 @@ Seven properties, each a decision made on purpose:
   consecutive `claude -p` failures and it opens: the queue piles up untouched and
   the cooldown grows exponentially (60s → 30 min), letting one probe through each
   time; any success closes it and the backlog drains. Only a *service* failure
-  (`HaikuDownError`) does this — a junk verdict fails that one message open, and a
-  poison message that keeps throwing is surfaced as priority (a ping) after 3
-  tries and dropped, so one bad message can't wedge everything behind it.
+  (`HaikuDownError`) does this. An unusable verdict (`UnparseableVerdictError`) is
+  a one-message problem: the message is retried, never pinged. A poison message
+  that keeps throwing is surfaced as priority (a ping) after 3 tries and dropped,
+  so one bad message can't wedge everything behind it. (A failure used to fall
+  back to priority; in the backfill that made 26 of 103 pings errors.)
 - **Two paths, invite first.** A forward from one of Kuba's own addresses that
   passes DKIM/DMARC (`sender-auth.js`) is the *only* thing that reaches the
   calendar routes. Past that gate a Haiku pass (`invite.js`) reads the forward —
@@ -256,31 +259,41 @@ Seven properties, each a decision made on purpose:
   the matching event; none (a bare REPLY, ordinary mail) falls through to triage.
   Anything that fails the gate — a forgery, a stranger's attachment — falls
   through too. The auth check *is* the licence; a prompt-injected invite can at
-  worst create a junk event, announced and undoable.
+  worst create a junk event, announced and undoable. After the calendar work —
+  add, remove, or "already there" — the forward itself is labelled **Meetings**
+  and archived, best-effort, so it does not sit in the inbox unlabelled.
 - **The paid step runs last and rarely.** `prefilter.js` decides for free in
   order — blocklist, allowlist, Gmail's own category (Promotions/Social → filed;
-  Updates/Primary go on), then a list-header (`mail-triage.js`). Only what's left
+  Updates/Primary go on), then a list-header (`mail-triage.js`). The list header
+  files mail as General only when the subject has no record or action words
+  (payment, statement, receipt, failed, action required, `Re:`/`Fwd:`, …): banks,
+  tax sites and job portals put list headers on those too. Only what's left
   `undecided` spends one Haiku call (`haiku.js`), the way Alfred runs Claude —
   subscription, no API key. `meter.js` logs every call to `ronnie-usage.jsonl` and
   estimates cost at official token rates; past a daily **call** cap Ronnie
   surfaces the rest as priority and posts a one-time notice. Haiku sorts into
-  three tiers: **Bulk** is *moved* (the label + `removeLabels: ["INBOX"]` is the
-  archive); **Interesting** is labelled but kept in the inbox, silent; **Priority**
-  is labelled, kept, and *pinged* with Haiku's one-sentence why (`notify.js`).
-- **Attention is three tiers; topic is a second axis nested under it**
-  (`topics.js`, `labels.js`). The parent is the tier by *urgency*: **Priority**
-  (interrupt now — the only tier that pings — kept in the inbox), **Interesting**
-  (keep + read later, silent, kept in the inbox), **Bulk** (noise, archived out).
-  A topic is a child *under* the tier, so the same mail is **Priority/Banking** (a
-  fraud alert), **Interesting/Banking** (a "new external account" confirmation), or
-  **Bulk/Banking** (a rewards blast). `entropy`/`banking`/`jobs` are
+  five tiers: **Records**, **General** and **Meetings** are *moved* (the label +
+  `removeLabels: ["INBOX"]` is the archive); **Interesting** is labelled but kept
+  in the inbox, silent; **Priority** is labelled, kept, and *pinged* with Haiku's
+  one-sentence why (`notify.js`).
+- **Attention is five tiers; topic is a second axis nested under it**
+  (`topics.js`, `labels.js`). The parent is the tier: **Priority** (interrupt now
+  — the only tier that pings — kept in the inbox), **Interesting** (keep + read
+  later, silent, kept in the inbox), **Records** (receipts, statements, payment
+  and autopay confirmations, ToS updates — archived), **General** (noise —
+  archived; the label was named Bulk and kept its id), **Meetings** (appointment
+  mail and forwarded invites — archived). Priority, Records and Meetings are
+  created by name at boot when their env id is unset. A topic is a child *under*
+  the tier, so the same mail is **Priority/Banking** (a fraud alert),
+  **Records/Banking** (a statement), or **General/Banking** (a rewards blast);
+  Meetings has no topic children. `entropy`/`banking`/`jobs` are
   deterministic sender-domain rules — matching a domain **or any subdomain** of it,
   since banks and boards mail from subdomains — and are never the model's to
   assert, so injection can't forge them; `taxes` (and an active `jobs` thread that
   isn't a known board) come from the same Haiku verdict, and a domain rule wins
-  over Haiku's guess. Two cross-axis rules: `taxes` is always Interesting (never
-  Bulk), and a job **board** is a listing (**Bulk/Jobs**) while an active thread is
-  **Interesting/Jobs**. The child-label ids are resolved (and created if missing) by
+  over Haiku's guess. Two cross-axis rules: `taxes` is always Interesting or
+  Records (never a ping, never General), and a job **board** is a listing
+  (**General/Jobs**) while an active thread is **Interesting/Jobs**. The child-label ids are resolved (and created if missing) by
   NAME at boot (`labels.js` → `google/gmail-labels.js`, the one spot allowed to
   *create* labels; the live broker can only apply ids that already exist). A
   one-time `scripts/ronnie-backfill.mjs` relabels the existing inbox through these
@@ -299,7 +312,7 @@ Seven properties, each a decision made on purpose:
 **Two Discord-side controls**, both caught in `bot.js`'s reader and run *without*
 a turn (no `claude -p`): an `undo cal:<eventId>` / `undo mail:<id>` reply — the only
 Discord→Ronnie action path — calls Ronnie's broker to delete the event Ronnie added
-or re-file a mistaken ping as bulk; and `/ronnie-metrics` runs `scripts/ronnie-dashboard.mjs`
+or re-file a mistaken ping as general; and `/ronnie-metrics` runs `scripts/ronnie-dashboard.mjs`
 over `ronnie-usage.jsonl`, posts a self-contained HTML cost dashboard, and drops it in
 today's daily folder for Alfred to surface. Both are gated on Ronnie being configured.
 

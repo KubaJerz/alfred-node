@@ -19,11 +19,11 @@
 const WEBHOOK_URL = process.env.RONNIE_DISCORD_WEBHOOK || "";
 
 // Embed colours. Green = a priority message worth interrupting you for (the only
-// tier that pings); blue = bulk that was filed quietly; amber = an action Ronnie
+// tier that pings); blue = general mail that was filed quietly; amber = an action Ronnie
 // took on the calendar; grey = that action being undone.
 export const COLORS = {
   priority: 0x2ecc71,
-  bulk: 0x3498db,
+  general: 0x3498db,
   invite: 0xe67e22,
   undo: 0x95a5a6,
 };
@@ -50,20 +50,20 @@ function clean(s, max = 240) {
 export function mailEmbed(entry = {}) {
   const from = clean(entry.from) || "unknown sender";
   const subject = clean(entry.subject) || "(no subject)";
-  const bulk = entry.category === "bulk";
+  const general = entry.category === "general";
   const id = String(entry.id ?? "").slice(0, 200);
   // The topic axis (taxes/jobs/banking/entropy), if any, rides in the author
   // line as a hashtag so a glance tells you what the mail is about.
   const topic = typeof entry.topic === "string" ? entry.topic : "";
   return {
-    color: bulk ? COLORS.bulk : COLORS.priority,
+    color: general ? COLORS.general : COLORS.priority,
     author: { name: topic ? `${from} · #${topic}` : from },
     title: subject,
     // The one-liner is the point of the ping — why this matters, in a sentence.
     description: entry.summary ? clean(entry.summary, 500) : undefined,
     // A pinged (personal) message carries its own undo handle: reply to re-file
-    // it as bulk if Ronnie got it wrong. Bulk mail is filed silently, no handle.
-    footer: { text: bulk ? "filed — bulk" : id ? `reply “undo mail:${id}” to file it` : "new mail" },
+    // it as general if Ronnie got it wrong. General mail is filed silently, no handle.
+    footer: { text: general ? "filed — general" : id ? `reply “undo mail:${id}” to file it` : "new mail" },
   };
 }
 

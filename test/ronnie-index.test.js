@@ -4,10 +4,10 @@ import assert from "node:assert/strict";
 import { handleMessage, makeBrokerClient } from "../ronnie/index.js";
 
 // A deterministic classify stub so unit tests never spawn `claude -p`. A
-// newsletter is bulk; a plain human message is priority (the ping tier).
+// newsletter is general; a plain human message is priority (the ping tier).
 const stubClassify = async (m) => {
   const bulk = !!(m.headers?.["list-unsubscribe"] || m.headers?.["list-id"] || /newsletter|news@/i.test(m.from || ""));
-  return { label: bulk ? "bulk" : "priority", summary: bulk ? "" : "why" };
+  return { label: bulk ? "general" : "priority", summary: bulk ? "" : "why" };
 };
 
 // A fake broker + notify that record what Ronnie tried to do. The broker is
@@ -40,11 +40,13 @@ function harness(state = {}) {
       labels: {
         priority: "L_PRI",
         interesting: "L_INT",
-        bulk: "L_BULK",
+        general: "L_BULK",
+        records: "L_REC",
+        meetings: "L_MEET",
         topics: {
           priority: { banking: "LP_BANK", jobs: "LP_JOB", entropy: "LP_ENT" },
           interesting: { banking: "LI_BANK", jobs: "LI_JOB", taxes: "LI_TAX", entropy: "LI_ENT" },
-          bulk: { banking: "LB_BANK", jobs: "LB_JOB", entropy: "LB_ENT" },
+          general: { banking: "LB_BANK", jobs: "LB_JOB", entropy: "LB_ENT" },
         },
       },
       owners: ["kuba@gmail.com"],
@@ -97,26 +99,26 @@ test("an interesting message is kept in the inbox but NOT pinged", async () => {
   assert.equal(h.posts.length, 0); // NO ping — review later
 });
 
-test("the SAME topic picks a different child under the bulk parent, archived + silent", async () => {
+test("the SAME topic picks a different child under the general parent, archived + silent", async () => {
   const h = harness();
-  h.deps.classify = async () => ({ label: "bulk", summary: "", topic: "entropy" });
+  h.deps.classify = async () => ({ label: "general", summary: "", topic: "entropy" });
   const r = await handleMessage({ id: "m4", from: "news@entrpy.co", subject: "digest" }, h.deps);
   assert.equal(r.action, "filed");
-  assert.deepEqual(h.calls[0].body.addLabels, ["LB_ENT"]); // bulk/entropy only
+  assert.deepEqual(h.calls[0].body.addLabels, ["LB_ENT"]); // general/entropy only
   assert.deepEqual(h.calls[0].body.removeLabels, ["INBOX"]); // archived out
-  assert.equal(h.posts.length, 0); // bulk is silent
+  assert.equal(h.posts.length, 0); // general is silent
 });
 
 test("an unresolved child id degrades to attention-only (no crash)", async () => {
   const h = harness();
-  h.deps.labels = { priority: "L_PRI", interesting: "L_INT", bulk: "L_BULK", topics: { priority: { jobs: "" }, interesting: {}, bulk: {} } };
+  h.deps.labels = { priority: "L_PRI", interesting: "L_INT", general: "L_BULK", topics: { priority: { jobs: "" }, interesting: {}, general: {} } };
   h.deps.classify = async () => ({ label: "priority", summary: "x", topic: "jobs" });
   const r = await handleMessage({ id: "m5", from: "a@b", subject: "s" }, h.deps);
   assert.deepEqual(h.calls[0].body.addLabels, ["L_PRI"]); // child id blank → skipped
   assert.equal(r.topic, "jobs");
 });
 
-test("a bulk message is labelled bulk and NOT pinged", async () => {
+test("a general message is labelled general and NOT pinged", async () => {
   const h = harness();
   const r = await handleMessage(
     { id: "m2", from: "newsletter@brand.com", subject: "SALE", headers: { "list-unsubscribe": "<u>" } },
@@ -147,6 +149,57 @@ test("an authenticated invite the model reads as 'add' is created and announced"
   assert.equal(add.body.start, "2026-07-01T09:00:00");
   // The undo handle in the embed is the created event id, not an iCalUID.
   assert.match(h.posts[0][0].footer.text, /undo cal:evt-new/);
+});
+
+test("an added invite's forward is filed under Meetings and archived", async () => {
+  const h = harness({ invite: { action: "add", event: EVENT } });
+  await handleMessage(authedForward(), h.deps);
+  const label = h.calls.find((c) => c.routeKey === "POST /mail/label");
+  assert.deepEqual(label.body, { id: "m1", addLabels: ["L_MEET"], removeLabels: ["INBOX"] });
+});
+
+test("a duplicate or cancelled invite's forward is filed under Meetings too", async () => {
+  const existing = [{ id: "evt-old", summary: "Kickoff", start: "2026-07-01T09:00:00" }];
+  for (const action of ["add", "delete"]) {
+    const h = harness({ invite: { action, event: EVENT }, existing, match: { matchId: "evt-old" } });
+    await handleMessage(authedForward(), h.deps);
+    const label = h.calls.find((c) => c.routeKey === "POST /mail/label");
+    assert.deepEqual(label.body.addLabels, ["L_MEET"], action);
+  }
+});
+
+test("a Meetings label failure does not send an added invite back through triage", async () => {
+  const h = harness({ invite: { action: "add", event: EVENT } });
+  const base = h.deps.broker;
+  h.deps.broker = async (routeKey, payload) => {
+    if (routeKey === "POST /mail/label") throw new Error("gmail hiccup");
+    return base(routeKey, payload);
+  };
+  const logs = [];
+  const r = await handleMessage(authedForward(), { ...h.deps, log: (m) => logs.push(m) });
+  assert.equal(r.action, "invite-added");
+  assert.ok(logs.some((m) => /could not file invite under Meetings/.test(m)));
+});
+
+test("records and meetings mail is labelled, archived, and silent", async () => {
+  for (const [tier, id] of [["records", "L_REC"], ["meetings", "L_MEET"]]) {
+    const h = harness();
+    h.deps.classify = async () => ({ label: tier, summary: "" });
+    const r = await handleMessage({ id: "m6", from: "a@b.com", subject: "s" }, h.deps);
+    assert.equal(r.action, "filed", tier);
+    assert.deepEqual(h.calls[0].body, { id: "m6", addLabels: [id], removeLabels: ["INBOX"] });
+    assert.equal(h.posts.length, 0, tier);
+  }
+});
+
+test("the triage log line names the sender domain", async () => {
+  const h = harness();
+  const logs = [];
+  await handleMessage(
+    { id: "m7", from: "Wells Fargo <alerts@notify.wellsfargo.com>", subject: "Statement ready" },
+    { ...h.deps, log: (m) => logs.push(m) }
+  );
+  assert.ok(logs.some((m) => m.includes("[notify.wellsfargo.com] — Statement ready")), logs.join("\n"));
 });
 
 test("a duplicate invite is skipped — no add, leans on the model's match", async () => {
@@ -269,7 +322,7 @@ test("a failed rejected-invite notice does not drop the message", async () => {
 
 test("labelling is skipped (not fatal) when no label id is configured", async () => {
   const h = harness();
-  h.deps.labels = { bulk: "", interesting: "" };
+  h.deps.labels = { general: "", interesting: "" };
   const r = await handleMessage({ id: "m1", from: "jane@gmail.com", subject: "hi" }, h.deps);
   assert.equal(r.action, "pinged");
   assert.ok(!h.calls.some((c) => c.routeKey === "POST /mail/label")); // no label call

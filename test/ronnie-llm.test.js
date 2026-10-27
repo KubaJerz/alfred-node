@@ -30,17 +30,17 @@ test("haiku parses a verdict and records usage + reported cost", async () => {
   assert.equal(recorded[0].cost, 0.0003);
 });
 
-test("haiku drops the summary on a bulk verdict", async () => {
-  const v = await classifyWithHaiku({ from: "a@b" }, { run: fakeRun({ label: "bulk", summary: "ignored" }) });
-  assert.equal(v.label, "bulk");
+test("haiku drops the summary on a general verdict", async () => {
+  const v = await classifyWithHaiku({ from: "a@b" }, { run: fakeRun({ label: "general", summary: "ignored" }) });
+  assert.equal(v.label, "general");
   assert.equal(v.summary, "");
 });
 
 test("haiku parses a taxes/jobs topic and clamps anything else to null", async () => {
   const jobs = await classifyWithHaiku({ from: "a@b" }, { run: fakeRun({ label: "priority", summary: "s", topic: "jobs" }) });
   assert.equal(jobs.topic, "jobs");
-  const bulkTaxes = await classifyWithHaiku({ from: "a@b" }, { run: fakeRun({ label: "bulk", summary: "", topic: "taxes" }) });
-  assert.equal(bulkTaxes.topic, "taxes"); // a topic rides on bulk too
+  const bulkTaxes = await classifyWithHaiku({ from: "a@b" }, { run: fakeRun({ label: "general", summary: "", topic: "taxes" }) });
+  assert.equal(bulkTaxes.topic, "taxes"); // a topic rides on general too
   // Haiku must not be able to assert a domain topic, or an unknown one.
   const forged = await classifyWithHaiku({ from: "a@b" }, { run: fakeRun({ label: "priority", summary: "s", topic: "banking" }) });
   assert.equal(forged.topic, null);
@@ -52,15 +52,31 @@ test("haiku sends the FULL body to the model", async () => {
   let prompt;
   const run = async (p) => {
     prompt = p;
-    return { text: '{"label":"bulk","summary":""}', usage: {} };
+    return { text: '{"label":"general","summary":""}', usage: {} };
   };
   await classifyWithHaiku({ from: "a@b", subject: "hi", body: "THE FULL BODY HERE" }, { run });
   assert.ok(prompt.includes("THE FULL BODY HERE"));
 });
 
-test("haiku fails open to priority when the runner throws", async () => {
+test("haiku accepts the records and meetings tiers", async () => {
+  for (const label of ["records", "meetings"]) {
+    const v = await classifyWithHaiku({ from: "a@b" }, { run: fakeRun({ label, summary: "ignored" }) });
+    assert.equal(v.label, label);
+    assert.equal(v.summary, ""); // only priority carries a summary
+  }
+});
+
+test("an unparseable verdict never pings: strict throws for a retry, else interesting", async () => {
+  const run = async () => ({ text: "not json", usage: {} });
+  await assert.rejects(classifyWithHaiku({}, { run, strict: true }), { name: "UnparseableVerdictError" });
+  const v = await classifyWithHaiku({}, { run });
+  assert.equal(v.label, "interesting");
+  assert.equal(v.error, "unparseable verdict");
+});
+
+test("haiku fails open to interesting (kept, no ping) when the runner throws", async () => {
   const v = await classifyWithHaiku({}, { run: async () => { throw new Error("claude down"); } });
-  assert.equal(v.label, "priority");
+  assert.equal(v.label, "interesting");
   assert.ok(v.error);
 });
 
@@ -87,17 +103,17 @@ test("classify: blocklist decides with no Haiku run", async () => {
     { from: "deals@krispykreme.com" },
     { block: ["krispykreme.com"], allow: [], run: async () => { called = true; return { text: "{}", usage: {} }; } }
   );
-  assert.deepEqual(r, { label: "bulk", summary: "", reason: "blocklist", topic: null, usedHaiku: false });
+  assert.deepEqual(r, { label: "general", summary: "", reason: "blocklist", topic: null, usedHaiku: false });
   assert.equal(called, false);
 });
 
-test("classify: a domain topic applies even to prefiltered bulk (no Haiku)", async () => {
+test("classify: a domain topic applies even to prefiltered general (no Haiku)", async () => {
   let called = false;
   const r = await classify(
     { from: "news@entropy.co", headers: { "list-unsubscribe": "<u>" } },
     { block: [], allow: [], entropy: ["entropy.co"], run: async () => { called = true; return { text: "{}", usage: {} }; } }
   );
-  assert.equal(r.label, "bulk"); // list header filed it
+  assert.equal(r.label, "general"); // list header filed it
   assert.equal(r.topic, "entropy"); // topic still tagged, for free
   assert.equal(called, false); // and no paid call
 });
@@ -118,14 +134,23 @@ test("classify: falls back to Haiku's topic when no domain rule matches", async 
   assert.equal(r.topic, "jobs");
 });
 
-test("classify: taxes is forced to the interesting tier even if Haiku said bulk", async () => {
+test("classify: taxes is forced to the interesting tier even if Haiku said general", async () => {
   const r = await classify(
     { from: "noreply@irs.gov", body: "your 1099 is available" },
-    { block: [], allow: [], run: fakeRun({ label: "bulk", summary: "", topic: "taxes" }) }
+    { block: [], allow: [], run: fakeRun({ label: "general", summary: "", topic: "taxes" }) }
   );
-  assert.equal(r.label, "interesting"); // taxes: kept, never bulk, but not a ping
+  assert.equal(r.label, "interesting"); // taxes: kept, never general, but not a ping
   assert.equal(r.topic, "taxes");
   assert.match(r.reason, /taxes forces interesting/);
+});
+
+test("classify: a tax record (return accepted) stays in records", async () => {
+  const r = await classify(
+    { from: "noreply@freetaxusa.com", subject: "2024 Federal Tax Return Accepted" },
+    { block: [], allow: [], run: fakeRun({ label: "records", summary: "", topic: "taxes" }) }
+  );
+  assert.equal(r.label, "records");
+  assert.equal(r.topic, "taxes");
 });
 
 test("classify: an undecided message goes to Haiku", async () => {

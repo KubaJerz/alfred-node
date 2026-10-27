@@ -1,21 +1,22 @@
 #!/usr/bin/env node
 // One-time backfill: relabel the existing inbox with Ronnie's nested scheme.
 //
-//   ATTENTION (parent)   Priority | Interesting | Bulk
-//                        Priority pings + stays; Interesting stays, silent; Bulk
-//                        is archived out of the inbox.
+//   ATTENTION (parent)   Priority | Interesting | Records | General | Meetings
+//                        Priority pings + stays; Interesting stays, silent;
+//                        Records, General (was Bulk) and Meetings are archived
+//                        out of the inbox.
 //   TOPIC (child)         Banking | Jobs | Taxes | Entropy
 //
 // So a message lands as `Priority/Banking` (a fraud alert), `Interesting/Banking`
-// (a "new external account" confirmation), or `Bulk/Banking` (a rewards blast).
-// Taxes is Interesting-only. It reuses the EXACT live decision primitives —
+// (a "new external account" confirmation), `Records/Banking` (a statement), or
+// `General/Banking` (a rewards blast). Taxes is Interesting or Records only. It reuses the EXACT live decision primitives —
 // credential screen, deterministic prefilter, domain topics, and (only when
 // undecided) one budgeted Haiku call — so a backfilled label matches what the
 // live bot would do. Nothing here touches the calendar or sends mail.
 //
 // Migration of your old flat labels: any message already wearing the flat `jobs`
 // or `taxes` label lands under `Interesting/Jobs` / `Interesting/Taxes`. A one-time
-// sweep also folds University Tees mail (a former employer) into `Bulk/UT` — NOT
+// sweep also folds University Tees mail (a former employer) into `General/UT` — NOT
 // a live rule, so future UT mail flows normally. On --apply the old flat labels
 // are stripped (and `--delete-old-labels` removes the now-empty flat labels).
 //
@@ -48,7 +49,10 @@ import { screen } from "../google/mail-filter.js";
 import { prefilter } from "../ronnie/prefilter.js";
 import { domainTopic, validHaikuTopic } from "../ronnie/topics.js";
 import { classifyWithHaiku } from "../ronnie/haiku.js";
-import { resolveRonnieLabels } from "../ronnie/labels.js";
+import { resolveRonnieLabels, TIERS } from "../ronnie/labels.js";
+
+// Tiers that leave the inbox — the same set the live handler archives.
+const ARCHIVED = new Set(["records", "general", "meetings"]);
 import { ensureLabels } from "../google/gmail-labels.js";
 
 const REPO = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -76,18 +80,21 @@ const log = (...a) => console.log(...a);
 const OLD_FLAT = { jobs: "jobs", taxes: "taxes" };
 
 // University Tees — a former employer. A ONE-TIME backfill sweep folds existing
-// UT mail (logos, t-shirt sales, artwork, orders) into Bulk/UT. This is NOT a
+// UT mail (logos, t-shirt sales, artwork, orders) into General/UT. This is NOT a
 // live rule (topics.js has no UT), so if UT ever emails again it flows normally
 // and can surface. The one exception is the seller-board account, which matters.
 const UT_SENDERS = ["utees.com", "universitytees.com"];
-const UT_LABEL = "Bulk/UT";
+// The UT child sits under the General parent, whatever that label is named now
+// (it was "Bulk"). resolveLabels reads the real name, so a renamed parent never
+// gets a second, stale "Bulk/UT" created next to it.
+const UT_CHILD = "UT";
 const isUT = (from) => {
   const dom = (/<([^>]+)>/.exec(from || "")?.[1] || from || "").toLowerCase().split("@")[1] || "";
   return UT_SENDERS.some((u) => dom === u || dom.endsWith("." + u));
 };
 const isSellerBoard = (subject) => /seller board/i.test(subject || "");
 
-// Resolve the nested label map (create only on --apply) + old flat ids + Bulk/UT.
+// Resolve the nested label map (create only on --apply) + old flat ids + General/UT.
 async function resolveLabels(gmail) {
   const interestingId = process.env.RONNIE_LABEL_INTERESTING;
   const bulkId = process.env.RONNIE_LABEL_BULK;
@@ -98,17 +105,27 @@ async function resolveLabels(gmail) {
   let priorityId = process.env.RONNIE_LABEL_PRIORITY;
   const list0 = await gmail.users.labels.list({ userId: "me" });
   const byName = new Map((list0.data?.labels || []).map((l) => [l.name, l.id]));
-  if (!priorityId) priorityId = byName.get("Priority") || (APPLY ? (await ensureLabels(["Priority"], { gmail })).ids["Priority"] : "");
+  // Priority, Records and Meetings are created by name when their id is unset,
+  // like the live bot does at boot — but only on --apply.
+  const parent = async (envId, name) =>
+    envId || byName.get(name) || (APPLY ? (await ensureLabels([name], { gmail })).ids[name] : "");
+  if (!priorityId) priorityId = await parent("", "Priority");
+  const recordsId = await parent(process.env.RONNIE_LABEL_RECORDS, "Records");
+  const meetingsId = await parent(process.env.RONNIE_LABEL_MEETINGS, "Meetings");
 
-  const labels = await resolveRonnieLabels({ gmail, priorityId, interestingId, bulkId, create: APPLY });
+  const labels = await resolveRonnieLabels({
+    gmail, priorityId, interestingId, recordsId, generalId: bulkId, meetingsId, create: APPLY,
+  });
   if (labels.created?.length) log(`\n  Created ${labels.created.length} child label(s): ${labels.created.join(", ")}\n`);
   else if (!APPLY) {
     const missing = [];
-    for (const tier of ["priority", "interesting", "bulk"]) for (const [t, id] of Object.entries(labels.topics[tier])) if (!id) missing.push(`${tier}/${t}`);
+    for (const tier of TIERS) for (const [t, id] of Object.entries(labels.topics[tier])) if (!id) missing.push(`${tier}/${t}`);
     if (missing.length) log(`\n  ${missing.length} child label(s) not created yet (dry run): ${missing.join(", ")}\n  --apply will create them.\n`);
   }
 
-  // Bulk/UT (backfill-only) + old flat label ids for the migration/strip.
+  // General/UT (backfill-only) + old flat label ids for the migration/strip.
+  const generalName = (list0.data?.labels || []).find((l) => l.id === bulkId)?.name || "General";
+  const UT_LABEL = `${generalName}/${UT_CHILD}`;
   let utId = byName.get(UT_LABEL) || "";
   if (!utId && APPLY) utId = (await ensureLabels([UT_LABEL], { gmail })).ids[UT_LABEL];
   const oldFlat = {};
@@ -136,10 +153,10 @@ async function decide(msg, oldFlat) {
   const has = (id) => id && (msg.labelIds || []).includes(id);
   let topic = domainTopic(msg);
 
-  // University Tees one-time sweep: former employer's mail → Bulk/UT, except the
+  // University Tees one-time sweep: former employer's mail → General/UT, except the
   // seller-board account (kept for normal triage — it's genuinely important).
   if (isUT(msg.from) && !isSellerBoard(msg.subject)) {
-    return { attention: "bulk", topic: "ut", reason: "University Tees (former employer) — one-pass", usedHaiku: false };
+    return { attention: "general", topic: "ut", reason: "University Tees (former employer) — one-pass", usedHaiku: false };
   }
 
   // Migration: a message you'd hand-labelled `jobs`/`taxes` keeps that meaning as
@@ -154,11 +171,11 @@ async function decide(msg, oldFlat) {
     attention = "interesting";
     reason = "migrated from flat label";
   } else if (pre.decision !== "undecided") {
-    attention = pre.decision; // "priority" (allowlist) or "bulk"
+    attention = pre.decision; // "priority" (allowlist) or "general"
     reason = pre.reason;
   } else if (haikuBudget > 0) {
     haikuBudget -= 1;
-    const v = await classifyWithHaiku(msg); // 3-tier; non-strict, fails open to priority
+    const v = await classifyWithHaiku(msg); // 5-tier; non-strict, fails open to interesting
     attention = v.label;
     topic = topic || validHaikuTopic(v.topic);
     reason = v.error ? `haiku error: ${v.error}` : "haiku";
@@ -167,8 +184,8 @@ async function decide(msg, oldFlat) {
     return { attention: null, topic, reason: "deferred (haiku budget spent)", deferred: true };
   }
 
-  // Taxes is always the Interesting tier (kept, never a ping, never bulk).
-  if (topic === "taxes" && attention !== "interesting") { attention = "interesting"; reason += " → taxes forces interesting"; }
+  // Taxes is kept and never pings: records stays records, anything else is interesting.
+  if (topic === "taxes" && attention !== "interesting" && attention !== "records") { attention = "interesting"; reason += " → taxes forces interesting"; }
   return { attention, topic, reason, usedHaiku };
 }
 
@@ -191,7 +208,13 @@ const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<
 
 function writeReport(rows, counts) {
   const chip = (t) => (t ? `<span class="chip t-${t}">${t}</span>` : "");
-  const TIER = { priority: { name: "Priority", cls: "prio" }, interesting: { name: "Interesting", cls: "keep" }, bulk: { name: "Bulk", cls: "bulk" } };
+  const TIER = {
+    priority: { name: "Priority", cls: "prio" },
+    interesting: { name: "Interesting", cls: "keep" },
+    records: { name: "Records", cls: "rec" },
+    general: { name: "General", cls: "gen" },
+    meetings: { name: "Meetings", cls: "meet" },
+  };
   const label = (r) => {
     if (r.action === "skip-withheld") return `<span class="a withheld">withheld — skipped</span>`;
     if (r.action === "deferred") return `<span class="a deferred">deferred</span>`;
@@ -207,7 +230,7 @@ function writeReport(rows, counts) {
   const html = `<!doctype html><meta charset="utf-8"><title>Ronnie backfill</title>
 <style>
   :root{--ink:#16150f;--paper:#faf8f4;--card:#fff;--muted:#6a675e;--hair:rgba(0,0,0,.12);
-        --bulk:#8a8781;--keep:#2563a8;--prio:#1f7a4d;--tax:#b4690e;--job:#2563a8;--bank:#7b3fa0;--ent:#127a74;--ut:#a05a2c;--wh:#a3382f;}
+        --gen:#8a8781;--rec:#5b6b7a;--meet:#b4690e;--keep:#2563a8;--prio:#1f7a4d;--tax:#b4690e;--job:#2563a8;--bank:#7b3fa0;--ent:#127a74;--ut:#a05a2c;--wh:#a3382f;}
   @media (prefers-color-scheme:dark){:root{--ink:#eceae3;--paper:#15140f;--card:#1e1c16;--muted:#9d9a90;--hair:rgba(255,255,255,.13);}}
   *{box-sizing:border-box}
   body{margin:0;font:15px/1.5 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:var(--ink);background:var(--paper);padding:2.2rem clamp(1rem,4vw,3rem)}
@@ -226,7 +249,7 @@ function writeReport(rows, counts) {
   .subj{max-width:40ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .why{color:var(--muted);white-space:nowrap;font-size:.82rem}
   .a{font-weight:600;white-space:nowrap}
-  .a.prio{color:var(--prio);font-weight:700} .a.keep{color:var(--keep)} .a.bulk{color:var(--bulk)} .a.deferred{color:var(--muted)} .a.withheld{color:var(--wh)}
+  .a.prio{color:var(--prio);font-weight:700} .a.keep{color:var(--keep)} .a.gen{color:var(--gen)} .a.rec{color:var(--rec)} .a.meet{color:var(--meet)} .a.deferred{color:var(--muted)} .a.withheld{color:var(--wh)}
   .chip{display:inline-block;padding:.08rem .5rem;border-radius:1rem;font-size:.76rem;font-weight:600;color:#fff}
   .t-taxes{background:var(--tax)} .t-jobs{background:var(--job)} .t-banking{background:var(--bank)} .t-entropy{background:var(--ent)} .t-ut{background:var(--ut)}
 </style>
@@ -256,7 +279,7 @@ async function main() {
   log(`  ${ids.length} messages match. ${Object.keys(cp.done).length} already decided in a previous run.\n`);
 
   const rows = [];
-  const counts = { total: 0, priority: 0, interesting: 0, bulk: 0, banking: 0, jobs: 0, taxes: 0, entropy: 0, ut: 0, withheld: 0, deferred: 0, migrated: 0, applied: 0 };
+  const counts = { total: 0, priority: 0, interesting: 0, records: 0, general: 0, meetings: 0, banking: 0, jobs: 0, taxes: 0, entropy: 0, ut: 0, withheld: 0, deferred: 0, migrated: 0, applied: 0 };
   let processed = 0;
 
   for (const id of ids) {
@@ -284,7 +307,7 @@ async function main() {
         row = { id, from: raw.from, subject: raw.subject, attention: null, topic: d.topic, reason: d.reason, action: "deferred" };
         counts.deferred++;
       } else {
-        const tier = d.attention; // priority | interesting | bulk
+        const tier = d.attention; // priority | interesting | records | general | meetings
         row = { id, from: raw.from, subject: raw.subject, attention: tier, topic: d.topic, reason: d.reason, action: "labelled" };
         if (counts[tier] != null) counts[tier]++;
         if (d.topic && counts[d.topic] != null) counts[d.topic]++;
@@ -293,11 +316,11 @@ async function main() {
         if (APPLY) {
           const parentId = labels[tier];
           // One label per message, like the live handler: the child topic when it
-          // resolved, else the bare tier. UT is a backfill-only child (Bulk/UT).
+          // resolved, else the bare tier. UT is a backfill-only child (General/UT).
           const childId = d.topic === "ut" ? utId : d.topic ? labels.topics[tier]?.[d.topic] || "" : "";
           const addLabelIds = [childId || parentId].filter(Boolean);
           const removeLabelIds = [
-            ...(tier === "bulk" ? ["INBOX"] : []),
+            ...(ARCHIVED.has(tier) ? ["INBOX"] : []),
             // Strip any old flat label as we migrate the message onto the tree.
             ...Object.values(oldFlat).filter((lid) => (raw.labelIds || []).includes(lid)),
           ];
@@ -330,7 +353,7 @@ async function main() {
   }
 
   log(`\nDone. ${counts.total} messages:`);
-  log(`  priority ${counts.priority} · interesting ${counts.interesting} · bulk ${counts.bulk} · withheld ${counts.withheld} · deferred ${counts.deferred} · migrated ${counts.migrated}`);
+  log(`  priority ${counts.priority} · interesting ${counts.interesting} · records ${counts.records} · general ${counts.general} · meetings ${counts.meetings} · withheld ${counts.withheld} · deferred ${counts.deferred} · migrated ${counts.migrated}`);
   log(`  topics — banking ${counts.banking} · jobs ${counts.jobs} · taxes ${counts.taxes} · entropy ${counts.entropy} · UT ${counts.ut}`);
   if (APPLY) log(`  applied to Gmail: ${counts.applied}`);
   if (counts.deferred) log(`  ${counts.deferred} deferred (Haiku budget spent) — run again to finish them.`);

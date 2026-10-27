@@ -18,13 +18,16 @@
 //      add / delete / none. An add is deduped against the calendar (read the day,
 //      let the model judge) then created; a delete finds the matching event and
 //      removes it; none falls through to triage. Every write is the same gcal
-//      operation bin/gcal.js uses. A forwarded invite (Fw: subject + .ics) that
-//      fails the gate gets a channel notice with the reason, then triage.
+//      operation bin/gcal.js uses. The forward itself is then labelled Meetings
+//      and archived, so it does not sit in the inbox unlabelled. A forwarded
+//      invite (Fw: subject + .ics) that fails the gate gets a channel notice with
+//      the reason, then triage.
 //
 //   2. Triage. Everything else runs the classify pipeline (blocklist → allowlist
-//      → grep → Haiku) into three tiers: priority → a label + a webhook ping
+//      → grep → Haiku) into five tiers: priority → a label + a webhook ping
 //      carrying Haiku's one-sentence why; interesting → a label, kept in the inbox
-//      but silent (review later); bulk → a label + archived out, in silence.
+//      but silent (review later); records, general and meetings → a label +
+//      archived out, in silence.
 //
 // The message is *enriched* by the caller (bot.js), which holds the token and so
 // is the thing that can read the .ics part and the Authentication-Results header.
@@ -42,14 +45,29 @@ import { mailEmbed, inviteEmbed, rejectedInviteEmbed, post } from "./notify.js";
 const LABELS = {
   priority: process.env.RONNIE_LABEL_PRIORITY || "",
   interesting: process.env.RONNIE_LABEL_INTERESTING || "",
-  bulk: process.env.RONNIE_LABEL_BULK || "",
+  records: process.env.RONNIE_LABEL_RECORDS || "",
+  // General was "Bulk". The Gmail label kept its id, so the env name stays.
+  general: process.env.RONNIE_LABEL_BULK || "",
+  meetings: process.env.RONNIE_LABEL_MEETINGS || "",
   // The topic axis is nested UNDER attention: a child label per (tier, topic),
   // e.g. topics.priority.banking = the id of "Priority/Banking". The real ids are
   // resolved at boot (labels.js) from the Gmail sidebar and injected; this default
   // is empty, so with nothing resolved a topic simply isn't applied (attention
   // still is) rather than erroring.
-  topics: { priority: {}, interesting: {}, bulk: {} },
+  topics: { priority: {}, interesting: {}, records: {}, general: {}, meetings: {} },
 };
+
+// Tiers that leave the inbox. Gmail has no folders; a label + removing INBOX is
+// the archive. Priority and interesting keep their inbox spot — the difference
+// between them is the ping, not the file.
+const ARCHIVED = new Set(["records", "general", "meetings"]);
+
+// The sender's domain, for the triage log line. The log is the only record of
+// what Ronnie decided, and a subject alone can't say who sent it.
+function senderDomain(from) {
+  const m = /@([^\s>]+)/.exec(from || "");
+  return m ? m[1].toLowerCase() : "";
+}
 
 // The day after a YYYY-MM-DD (or a date-time whose first 10 chars are the date),
 // as YYYY-MM-DD. Computed in UTC so it never slips across a DST boundary.
@@ -104,7 +122,8 @@ function whenOf(event) {
  * @param {{
  *   broker: (routeKey: string, payload: object) => Promise<any>,
  *   notify?: (embeds: any[]) => Promise<any>,
- *   labels?: {priority: string, interesting: string, bulk: string, topics?: object},
+ *   labels?: {priority: string, interesting: string, records?: string,
+ *            general: string, meetings?: string, topics?: object},
  *   owners?: string[],
  *   classify?: Function,
  *   extractInvite?: (msg: object) => Promise<object>,
@@ -124,6 +143,18 @@ export async function handleMessage(msg = {}, deps = {}) {
     log = () => {},
   } = deps;
 
+  // File the forward under Meetings and archive it. Best-effort: the calendar
+  // work is done, so a labelling failure is logged, not thrown — a throw here
+  // would send an already-added invite back through triage.
+  const fileMeeting = async () => {
+    if (!labels.meetings || !msg.id) return;
+    try {
+      await broker("POST /mail/label", { id: msg.id, addLabels: [labels.meetings], removeLabels: ["INBOX"] });
+    } catch (err) {
+      log(`⚠️  could not file invite under Meetings (${err.message})`);
+    }
+  };
+
   // ── 1. Invite path ────────────────────────────────────────────────────────
   // The gate first: only a DKIM-authenticated forward from an owner address is
   // allowed anywhere near the calendar. Everything past this point is wrapped so
@@ -141,6 +172,7 @@ export async function handleMessage(msg = {}, deps = {}) {
         const { matchId } = await matchEvent(ev, events);
         if (matchId) {
           log(`📅 invite already on calendar — skipping “${ev.summary}”`);
+          await fileMeeting();
           return { action: "invite-duplicate", summary: ev.summary, matchId };
         }
         const body = eventBody(ev);
@@ -162,6 +194,7 @@ export async function handleMessage(msg = {}, deps = {}) {
           inviteEmbed({ action: "added", summary: ev.summary, uid: created.id, when: whenOf(ev) }),
         ]);
         log(`📅 added invite ${created.id} — ${ev.summary}`);
+        await fileMeeting();
         return { action: "invite-added", id: created.id, summary: ev.summary };
       }
 
@@ -172,11 +205,13 @@ export async function handleMessage(msg = {}, deps = {}) {
         const { matchId } = await matchEvent(ev, events);
         if (!matchId) {
           log(`📅 cancellation with no matching event — “${ev.summary}”`);
+          await fileMeeting();
           return { action: "invite-cancel-nomatch", summary: ev.summary };
         }
         await broker("DELETE /calendar/events", { id: matchId });
         await notify([inviteEmbed({ action: "removed", summary: ev.summary, uid: matchId })]);
         log(`📅 removed cancelled invite ${matchId} — ${ev.summary}`);
+        await fileMeeting();
         return { action: "invite-removed", id: matchId, summary: ev.summary };
       }
       // verdict.action === "none": not an invite. Fall through to triage.
@@ -210,35 +245,35 @@ export async function handleMessage(msg = {}, deps = {}) {
   // mail below.
 
   // ── 2. Triage path ────────────────────────────────────────────────────────
-  // label is the attention tier: priority | interesting | bulk.
+  // label is the attention tier: priority | meetings | records | interesting | general.
   const { label: tier, summary, reason, capped, usedHaiku, topic } = await classify(msg, { log });
   const labelId = labels[tier];
-  // The topic is a child of the tier: Priority/Banking, Interesting/Banking and
-  // Bulk/Banking are three different ids. Apply exactly one label. Use the
+  // The topic is a child of the tier: Priority/Banking, Records/Banking and
+  // General/Banking are three different ids. Apply exactly one label. Use the
   // nested topic child when it resolved. Use the bare tier otherwise. Each
   // message then shows a single chip. A topic'd message lives only under its
   // sub-label. So the tier parent view lists only untopiced mail. An unresolved
-  // or absent topic falls back to the tier. Only Bulk removes INBOX; that logic
-  // is unchanged and lives just below.
+  // or absent topic falls back to the tier.
   const topicId = topic ? labels.topics?.[tier]?.[topic] || "" : "";
   const addLabels = [topicId || labelId].filter(Boolean);
   if (addLabels.length && msg.id) {
-    // Only Bulk is *moved* out of the inbox (Gmail has no folders; a label +
-    // removing INBOX is the archive). Priority and Interesting both keep their
-    // inbox spot — the difference between them is the ping, below, not the file.
     const body = { id: msg.id, addLabels };
-    if (tier === "bulk") body.removeLabels = ["INBOX"];
+    if (ARCHIVED.has(tier)) body.removeLabels = ["INBOX"];
     await broker("POST /mail/label", body);
   }
   // ONLY priority pings — it carries Haiku's one-liner. Interesting is kept in
-  // the inbox but silent (you review it later); bulk is filed in silence.
+  // the inbox but silent (you review it later); the archived tiers are silent.
   if (tier === "priority") {
     await notify([mailEmbed({ ...msg, category: "priority", summary, topic })]);
   }
-  log(`✉️  ${tier}${topic ? ` #${topic}` : ""} (${reason}) — ${msg.subject || "(no subject)"}`);
+  const domain = senderDomain(msg.from);
+  log(
+    `✉️  ${tier}${topic ? ` #${topic}` : ""} (${reason})${domain ? ` [${domain}]` : ""} — ` +
+      `${msg.subject || "(no subject)"}`
+  );
   // capped is surfaced so the runner can post a one-time "hit the cap" notice;
   // usedHaiku tells the consumer whether to credit the breaker with a success.
-  const action = tier === "priority" ? "pinged" : tier === "bulk" ? "filed" : "kept";
+  const action = tier === "priority" ? "pinged" : ARCHIVED.has(tier) ? "filed" : "kept";
   return { action, category: tier, topic, reason, capped, usedHaiku };
 }
 
