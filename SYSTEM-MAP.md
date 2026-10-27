@@ -60,6 +60,9 @@ flowchart TD
     GATE -->|"voice note / audio file"| TR["transcribe<br/>ffmpeg → Parakeet int8<br/>voice/transcribe.js"]
     TR -->|"transcript = message"| Q
     GATE -->|"text / files"| Q["enqueueTurn<br/>one turn at a time"]
+    PH["Kuba · phone (SMS)"] -->|text| TX["Telnyx"]
+    TX -->|"signed webhook<br/>via tunnel"| WH["telnyx/sms.js<br/>127.0.0.1:8788<br/>signature + allow list"]
+    WH -->|"[via SMS] text"| Q
     CTX["loadContext<br/>SOUL.md + USER.md + MEMORY.md + today's daily"] --> Q
     Q --> SPAWN["spawn: claude -p<br/>cwd = agent/"]
     SPAWN -.->|"skill matches"| SK["skills<br/>gmail · gcal · notion · intervals · strength · browser"]
@@ -68,15 +71,17 @@ flowchart TD
     BR --> G["Google Mail + Calendar"]
     BR --> N["Notion"]
     BR --> I["Intervals.icu<br/>(Garmin data)"]
-    SK -.->|"browser skill"| AB["agent-browser · headless Chrome<br/>agent-browser.json · browser.js"]
+    SK -.->|"browser skill"| AB["agent-browser · headed Chrome<br/>agent-browser.json · browser.js"]
     AB --> WEB["the open web"]
-    SPAWN -->|"stdout JSON"| R["reply → Discord"]
+    SPAWN -->|"stdout JSON"| R["reply → target<br/>Discord · SMS · both"]
     R --> U
+    R -->|"SMS reply"| TX
+    TX --> PH
     classDef external fill:#d6e2f2,stroke:#1f5fb8,color:#123f7d
     classDef gateway fill:#d8ebe2,stroke:#1b6b52,color:#12503c
     classDef stack fill:#f5e8d5,stroke:#b07a2a,color:#6e4a12
-    class U,G,N,I,WEB external
-    class BR gateway
+    class U,G,N,I,WEB,PH,TX external
+    class BR,WH gateway
     class SK,CLIS,AB stack
 ```
 
@@ -93,6 +98,16 @@ so a mishearing is visible before the turn acts on it. Provisioned once by
 `scripts/setup-voice.sh`; if it isn't set up, the note draws a graceful reply and
 no turn.
 
+**SMS** is the second way in. Telnyx posts each text to a webhook. A tunnel
+(Tailscale Funnel) forwards the public URL to `telnyx/sms.js` on loopback. The
+server rejects any request without a valid Ed25519 signature. It then drops a
+text that is not from `SMS_ALLOWED_NUMBERS`. These two checks are code, so they
+are guarantees. A text that passes runs the same turn as a Discord message, in
+the same session, with a `[via SMS]` tag. The turn answers through a *reply
+target*: Discord, SMS, or both. With `SMS_MIRROR_CHANNEL` set, that channel is
+the phone thread: texts and replies show there, and a message typed there is
+also answered by SMS.
+
 The `bin/` CLIs are **never loaded into context** — the agent's tools are only
 `Bash,Read,Edit,Write`, and it *runs* the CLIs as subprocesses. `SOUL.md` (always
 injected) names them; a matching skill body adds the rules `--help` can't express
@@ -101,12 +116,13 @@ instructions name a command → the agent runs it via `Bash` → the CLI asks th
 broker. The CLI is downstream and executed, not a thing that sits in the prompt.
 
 The **browser** is the one reach that skips the broker. `agent-browser` (an npm
-dependency) drives a headless Google Chrome. Chrome must be at
+dependency) drives Google Chrome with a window: on the desktop when one is
+there, else on an Xvfb screen that agent-browser starts itself. Chrome must be at
 `/opt/google/chrome/chrome`, because Ubuntu's AppArmor allows the Chrome sandbox
 only there. `agent/agent-browser.json` holds the static settings. The profile
-and screenshots go under `agent/var/`. `browser.js` adds two env values at boot:
-`node_modules/.bin` on `PATH`, and a user agent without "HeadlessChrome", with
-the version read from Chrome. The browser holds no logins. "Look, don't act" is
+and screenshots go under `agent/var/`. `browser.js` puts `node_modules/.bin` on
+`PATH`. Chrome uses `--password-store=basic`, so its cookies do not depend on
+the desktop keyring, which is not there after a reboot. The browser holds no logins. "Look, don't act" is
 a rule in the skill body only, so it is guidance, not a guarantee.
 
 The spawn, in full — the token reaches the agent through the environment, never
@@ -119,7 +135,7 @@ claude -p "<user message>" \
   --dangerously-skip-permissions \
   --resume <sessionId>
 # cwd = agent/    env: ALFRED_BROKER=<loopback url>  ALFRED_BROKER_TOKEN=<per-boot secret>
-#                      PATH=node_modules/.bin:…  AGENT_BROWSER_USER_AGENT=<Chrome UA>
+#                      PATH=node_modules/.bin:…
 ```
 
 ## Inbound mail (Pub/Sub)
