@@ -5,6 +5,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
 
 ## [Unreleased]
 ### Fixed
+- **Ronnie's Haiku call could read local files.** `claude -p` keeps its
+  read-only tools unless told otherwise, and Ronnie's call never said so. A
+  test run read a file on request, so a prompt-injected email could have had
+  Haiku read `.env` into the ping summary posted to Discord. The call now runs
+  with `--tools ""` and `--strict-mcp-config`: no tools, no MCP servers. A
+  test email that asked for a file got its tier and no file contents.
 - **The backfill left an old Ronnie label next to the new one.** Re-sorting a
   General/Banking message to Records/Banking kept both labels. Now every other
   Ronnie tier or topic label is removed. `--model` picks the model for a one-time

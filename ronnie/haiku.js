@@ -148,15 +148,21 @@ function parseVerdict(text) {
   }
 }
 
+// The argv for a one-shot classification. `--tools ""` removes every built-in
+// tool and `--strict-mcp-config` (with no --mcp-config) drops every MCP server.
+// Without them `claude -p` keeps its read-only tools: a test run read a file on
+// request, so a prompt-injected email could have had Haiku read `.env` and put
+// it in the ping summary. "No tools" has to be a flag, not a default. Do not
+// add `--bare`: it skips the subscription login, and every call then fails.
+export function claudeArgs(prompt, model) {
+  return ["-p", prompt, "--model", model, "--output-format", "json", "--tools", "", "--strict-mcp-config"];
+}
+
 // Default runner: `claude -p` over the subscription. No tools — a pure one-shot
 // classification. Returns { text, usage } from the JSON output.
 function runClaude(prompt, { model }) {
   return new Promise((resolve, reject) => {
-    const child = spawn(
-      "claude",
-      ["-p", prompt, "--model", model, "--output-format", "json"],
-      { stdio: ["ignore", "pipe", "pipe"] }
-    );
+    const child = spawn("claude", claudeArgs(prompt, model), { stdio: ["ignore", "pipe", "pipe"] });
     let out = "";
     let err = "";
     child.stdout.on("data", (d) => (out += d));
