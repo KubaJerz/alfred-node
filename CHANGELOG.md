@@ -4,6 +4,12 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [SemVer](https://semver.org/).
 
 ## [Unreleased]
+### Fixed
+- **The backfill left an old Ronnie label next to the new one.** Re-sorting a
+  General/Banking message to Records/Banking kept both labels. Now every other
+  Ronnie tier or topic label is removed. `--model` picks the model for a one-time
+  re-sort. Money received is Records, not Priority, and an "has been changed"
+  subject reaches the model instead of being filed as noise.
 ### Added
 - **Ronnie tags eight more topics.** `ut` (University Tees), `health`
   (Prisma/MyChart), `benefits` (payroll, retirement, USC onboarding),

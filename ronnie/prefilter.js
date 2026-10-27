@@ -48,7 +48,7 @@ const BULK_CATEGORIES = new Set(["CATEGORY_PROMOTIONS", "CATEGORY_SOCIAL"]);
 // backfill. With this check those reach Haiku, which picks records, priority or
 // meetings. The cost is roughly one extra Haiku call per ten list-header mails.
 const RECORD_OR_ACTION =
-  /^\s*(re|fwd?|accepted|declined|invitation)\s*:|receipt|thank(s| you) for (your )?(payment|order|purchase|applying|application)|application (received|status|submission)|confirm|payment|autopay|auto-pay|transfer|deposit|statement|summary|polic(y|ies)|terms of|tax return|export complete|enrolled|cancel|plan ends|check-?in|trip with|shipped|account data|invoice|declined|failed|past due|action (required|needed)|next steps|assessment|appointment/i;
+  /^\s*(re|fwd?|accepted|declined|invitation)\s*:|receipt|thank(s| you) for (your )?(payment|order|purchase|applying|application)|application (received|status|submission)|confirm|payment|autopay|auto-pay|transfer|deposit|statement|summary|polic(y|ies)|terms of|tax return|export complete|enrolled|cancel|plan ends|check-?in|trip with|shipped|account data|invoice|declined|failed|past due|action (required|needed)|next steps|assessment|appointment|(has|have) (been )?(changed|updated)|beneficiary/i;
 
 // Does this sender match a list entry — as an exact address or a domain?
 function listed(address, list) {

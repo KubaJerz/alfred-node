@@ -43,6 +43,8 @@ test("a list header with a record or action subject goes to Haiku, not general",
     "Your statement is ready",
     "[Action Required] Your Assessments Expire in 24 hours",
     "Re: I would like to update my policy",
+    "Your beneficiary designation has changed",
+    "Your password has been updated",
   ]) {
     assert.equal(prefilter({ ...listed, subject }, opts).decision, "undecided", subject);
   }
