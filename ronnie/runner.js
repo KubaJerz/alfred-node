@@ -21,6 +21,7 @@ import { makeClassifier } from "./classify.js";
 import { extractInvite as runExtractInvite, matchEvent as runMatchEvent } from "./invite.js";
 import { makeMeter } from "./meter.js";
 import { makeLedger } from "./ledger.js";
+import { makePolicy } from "./policy.js";
 import { makeQueue } from "./queue.js";
 import { makeBreaker } from "./breaker.js";
 import { makeConsumer } from "./consumer.js";
@@ -67,11 +68,15 @@ export function makeRonnie({
   const extractInvite = (m) => runExtractInvite(m, { meter });
   const matchEvent = (candidate, existing) => runMatchEvent(candidate, existing, { meter });
 
+  // The ToS check (policy.js): Opus with web research on a `policies` email,
+  // plus a 48-hour re-check drained by the same sweep as the queue.
+  const policy = makePolicy({ broker, notify, labels, enrichOne, log });
+
   // One-per-day "hit the daily cap" Discord notice, folded into the handle step.
   let capNotifiedOn = null;
   const handle = async (msg) => {
     const verdict = await handleMessage(msg, {
-      broker, notify, labels, owners, classify, extractInvite, matchEvent, log,
+      broker, notify, labels, owners, classify, extractInvite, matchEvent, policy, log,
     });
     if (verdict.capped) {
       const today = new Date().toISOString().slice(0, 10);
@@ -123,6 +128,12 @@ export function makeRonnie({
     breaker,
     undo,
     enqueue: (ids) => queue.enqueue(ids),
-    drain: consumer ? () => consumer.drain() : async () => ({ skipped: "no-enrich" }),
+    drain: consumer
+      ? async () => {
+          const stats = await consumer.drain();
+          await policy.drainRechecks().catch((err) => log(`⚠️  ToS re-check failed (${err.message})`));
+          return stats;
+        }
+      : async () => ({ skipped: "no-enrich" }),
   };
 }
