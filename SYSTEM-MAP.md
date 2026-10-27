@@ -187,10 +187,10 @@ flowchart TD
     SC -->|"safe"| H["handleMessage · index.js"]
     H -->|"DKIM forward · sender-auth.js · invite.js (model)<br/>event add/delete + forward → Meetings − INBOX"| RBR
     H -.->|"Fw: + .ics fails the gate → notice, then triage"| PING
-    H -->|"else · classify.js → prefilter.js<br/>block/allow/category/list-header (mail-triage.js)<br/>list header skipped for record/action subjects<br/>+ topics.js: domain → entropy/banking/jobs"| PF{"decided?"}
+    H -->|"else · classify.js → prefilter.js<br/>block/allow/category/list-header (mail-triage.js)<br/>list header skipped for record/action subjects<br/>+ topics.js: domain → entropy/banking/ut/health/<br/>benefits/taxes/jobs/receipts/usc"| PF{"decided?"}
     PF -->|"free"| ACT
     PF -->|"undecided"| BR{"breaker.js<br/>Haiku up?"}
-    BR -->|"ready"| HK["Haiku · haiku.js<br/>claude -p · meter.js · capped<br/>label + taxes/jobs topic"]
+    BR -->|"ready"| HK["Haiku · haiku.js<br/>claude -p · meter.js · capped<br/>label + taxes/jobs/ut/research/docs/policies topic"]
     BR -.->|"open → hold + back off 60s→30m"| Q
     HK -->|"ok → success"| ACT{"tier<br/>+ topic"}
     HK -.->|"down → trip"| BR
@@ -270,12 +270,16 @@ Seven properties, each a decision made on purpose:
   created by name at boot when their env id is unset. A topic is a child *under*
   the tier, so the same mail is **Priority/Banking** (a fraud alert),
   **Records/Banking** (a statement), or **General/Banking** (a rewards blast);
-  Meetings has no topic children. `entropy`/`banking`/`jobs` are
-  deterministic sender-domain rules — matching a domain **or any subdomain** of it,
-  since banks and boards mail from subdomains — and are never the model's to
-  assert, so injection can't forge them; `taxes` (and an active `jobs` thread that
-  isn't a known board) come from the same Haiku verdict, and a domain rule wins
-  over Haiku's guess. Two cross-axis rules: `taxes` is always Interesting or
+  Meetings has no topic children, and each tier lists the topics it carries
+  (`TIER_TOPICS`); a topic a tier doesn't list falls back to the bare tier.
+  `entropy`, `banking`, `health`, `benefits`, `receipts` and `usc` are
+  deterministic sender-domain rules only — matching a domain **or any subdomain**
+  of it, since banks and boards mail from subdomains (`usc` uses an exact-domain
+  entry, `=sc.edu`, so people at USC never match) — and are never the model's to
+  assert, so injection can't forge them. `taxes`, `jobs` and `ut` have domain
+  rules too, and Haiku may also tag them, plus `research`, `docs` and `policies`,
+  from the same verdict. A domain rule wins over Haiku's guess, except that
+  Haiku's `research` beats the `usc` rule. Two cross-axis rules: `taxes` is always Interesting or
   Records (never a ping, never General), and a job **board** is a listing
   (**General/Jobs**) while an active thread is **Interesting/Jobs**. The child-label ids are resolved (and created if missing) by
   NAME at boot (`labels.js` → `google/gmail-labels.js`, the one spot allowed to

@@ -1,7 +1,7 @@
 // Run with: npm test   (node's built-in runner, no network, no credentials)
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { domainTopic, validHaikuTopic, TOPICS } from "../ronnie/topics.js";
+import { domainTopic, validHaikuTopic, pickTopic, TOPICS } from "../ronnie/topics.js";
 
 const opts = { entropy: ["entropy.co"], banking: ["chase.com", "ally@ally.com"] };
 
@@ -35,19 +35,59 @@ test("entropy is checked before banking (stable precedence)", () => {
   assert.equal(domainTopic({ from: "x@shared.com" }, both), "entropy");
 });
 
-test("validHaikuTopic only admits the two semantic topics", () => {
-  assert.equal(validHaikuTopic("taxes"), "taxes");
-  assert.equal(validHaikuTopic("jobs"), "jobs");
-  // Haiku must never be able to assert a domain topic — those are ours.
-  assert.equal(validHaikuTopic("entropy"), null);
-  assert.equal(validHaikuTopic("banking"), null);
+test("validHaikuTopic only admits the semantic topics", () => {
+  for (const t of ["taxes", "jobs", "ut", "research", "docs", "policies"]) {
+    assert.equal(validHaikuTopic(t), t);
+  }
+  // Haiku must never be able to assert a domain-only topic — those are ours.
+  for (const t of ["entropy", "banking", "health", "benefits", "receipts", "usc"]) {
+    assert.equal(validHaikuTopic(t), null, t);
+  }
   assert.equal(validHaikuTopic("nonsense"), null);
   assert.equal(validHaikuTopic(null), null);
   assert.equal(validHaikuTopic(undefined), null);
 });
 
-test("TOPICS lists all four, domain topics first", () => {
-  assert.deepEqual(TOPICS, ["entropy", "banking", "jobs", "taxes"]);
+test("TOPICS lists every topic, domain topics first", () => {
+  assert.deepEqual(TOPICS, [
+    "entropy", "banking", "ut", "health", "benefits", "taxes", "jobs", "receipts", "usc",
+    "research", "docs", "policies",
+  ]);
+});
+
+test("the default lists tag the new domain topics", () => {
+  const none = { entropy: [], banking: [] };
+  const cases = [
+    ["MyChart <mychart@engage.prismahealth.org>", "health"],
+    ["orders@utees.com", "ut"],
+    ["noreply@freetaxusa.com", "taxes"],
+    ["noreply@irs.gov", "taxes"],
+    ["Uber Receipts <noreply@uber.com>", "receipts"],
+    ["jobs@indeedemail.com", "jobs"],
+    ["talent@optiver.us", "jobs"],
+    // USC onboarding is benefits, not the job hunt.
+    ["screening@hireright.com", "benefits"],
+    ["alerts@empower.com", "benefits"],
+  ];
+  for (const [from, topic] of cases) assert.equal(domainTopic({ from }, none), topic, from);
+});
+
+test("usc matches institutional senders, never people at USC", () => {
+  const none = { entropy: [], banking: [] };
+  assert.equal(domainTopic({ from: "alumni@sc.edu" }, none), "usc"); // =sc.edu: exact
+  assert.equal(domainTopic({ from: "news@emails.sc.edu" }, none), "usc");
+  // People mail from these subdomains; `=sc.edu` must not reach them.
+  assert.equal(domainTopic({ from: "prof@email.sc.edu" }, none), null);
+  assert.equal(domainTopic({ from: "student@mailbox.sc.edu" }, none), null);
+  assert.equal(domainTopic({ from: "lab@cse.sc.edu" }, none), null);
+});
+
+test("pickTopic: the domain rule wins, but research beats usc", () => {
+  assert.equal(pickTopic("usc", "research"), "research");
+  assert.equal(pickTopic("banking", "research"), "banking");
+  assert.equal(pickTopic("usc", "jobs"), "usc");
+  assert.equal(pickTopic(null, "docs"), "docs");
+  assert.equal(pickTopic(null, "health"), null); // health is domain-only
 });
 
 test("domainTopic tags job boards (a listing skips Haiku, so it needs a rule)", () => {

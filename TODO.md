@@ -26,7 +26,7 @@ and move to **Done** with the PR number. Anything with a GitHub issue links to i
 #84 split Bulk into Records and General and added Meetings. The rest of the
 redesign, from a five-agent audit of the 1,777-message backfill:
 
-- [ ] **Topics.** Make `ut` a real topic (424 backfill messages carry it, but
+- [x] ~~**Topics.**~~ Done in #86. Make `ut` a real topic (424 backfill messages carry it, but
       the code has no `ut`). Add `health` (Prisma/MyChart; reaches Priority),
       `research` (lab, AI Institute, Leo's group; needs Haiku), `usc` (alumni
       and admin senders only, not people at `email.sc.edu`), `receipts` (Uber,
