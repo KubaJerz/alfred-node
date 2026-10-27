@@ -206,9 +206,11 @@ flowchart TD
     H -->|"else · classify.js → prefilter.js<br/>block/allow/category/list-header (mail-triage.js)<br/>list header skipped for record/action subjects<br/>+ topics.js: domain → entropy/banking/ut/health/<br/>benefits/taxes/jobs/receipts/usc"| PF{"decided?"}
     PF -->|"free"| ACT
     PF -->|"undecided"| BR{"breaker.js<br/>Haiku up?"}
-    BR -->|"ready"| HK["Haiku · haiku.js<br/>claude -p · meter.js · capped<br/>label + taxes/jobs/ut/research/docs/policies topic"]
+    BR -->|"ready"| HK["Haiku · haiku.js<br/>claude -p · meter.js · capped<br/>label + taxes/jobs/ut/research/docs/policies topic + kind"]
     BR -.->|"open → hold + back off 60s→30m"| Q
-    HK -->|"ok → success"| ACT{"tier<br/>+ topic"}
+    HK -->|"ok → success"| LG{"ledger.js<br/>records + record-like kind?"}
+    LG <-.->|"check · record if DMARC passed"| LF["ronnie-ledger.json<br/>sender brand × kind · days seen"]
+    LG -->|"new or 60+ days → priority<br/>1–2 days → interesting<br/>3+ days → records"| ACT{"tier<br/>+ topic"}
     HK -.->|"down → trip"| BR
     HK -.->|"unusable verdict → retry"| Q
     ACT -->|"records / general / meetings → label − INBOX"| RBR
@@ -224,7 +226,7 @@ flowchart TD
     class GM,DIS external
     class SC,RBR gateway
     class HK agent
-    class Q,X store
+    class Q,X,LF store
 ```
 
 Seven properties, each a decision made on purpose:
@@ -276,6 +278,19 @@ Seven properties, each a decision made on purpose:
   `removeLabels: ["INBOX"]` is the archive); **Interesting** is labelled but kept
   in the inbox, silent; **Priority** is labelled, kept, and *pinged* with Haiku's
   one-sentence why (`notify.js`).
+- **The novelty ledger moves a routine-looking record up when it isn't routine**
+  (`ledger.js`, `agent/var/ronnie-ledger.json`). Haiku also names the *kind* of mail
+  (statement, autopay, payment confirmed, transfer, deposit, payment failed, …).
+  For a records verdict of a record-like kind, the ledger looks up the sender's
+  brand (registrable domain, with aliases such as gs.com → marcus.com) × kind:
+  never seen, or last seen 60+ days ago → **Priority**, with the why as the ping
+  text (a first autopay, a yearly charge); seen on 1–2 earlier days →
+  **Interesting**; 3+ days, or again the same day → **Records**. Failed payments,
+  bills due and security mail are never record-like, so the ledger can't make
+  them routine. A sighting is recorded only when DMARC passed, so a spoofed email
+  can't teach it that a sender is routine. `scripts/ronnie-ledger-seed.mjs` seeds
+  it from backfill history (the date comes from the Gmail id, the kind from the
+  subject).
 - **Attention is five tiers; topic is a second axis nested under it**
   (`topics.js`, `labels.js`). The parent is the tier: **Priority** (interrupt now
   — the only tier that pings — kept in the inbox), **Interesting** (keep + read

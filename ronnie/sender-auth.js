@@ -74,6 +74,36 @@ export function parseAuthResults(value = "") {
 }
 
 /**
+ * Gmail's own Authentication-Results verdict for a message, or null. A message
+ * can carry several of these headers; only the one Google stamped is trusted —
+ * a forged header carries a different authserv-id and is discarded.
+ *
+ * @param {{authResults?: string[]}} msg
+ * @param {{trustedAuthserv?: string}} [opts]
+ */
+export function trustedVerdict(msg = {}, opts = {}) {
+  const trusted = (opts.trustedAuthserv || TRUSTED_AUTHSERV).toLowerCase();
+  const results = (msg.authResults || [])
+    .map(parseAuthResults)
+    .filter((r) => r.authservId === trusted || r.authservId.endsWith(".google.com"));
+  return results[0] || null;
+}
+
+/**
+ * True when Gmail says DMARC passed for the message's own From domain. Weaker
+ * than isForwardFromOwner (any sender, not just the owner), and used where the
+ * question is only "is this really from that company?".
+ *
+ * @param {{from?: string, authResults?: string[]}} msg
+ */
+export function dmarcPass(msg = {}, opts = {}) {
+  const verdict = trustedVerdict(msg, opts);
+  if (!verdict || verdict.dmarc !== "pass") return false;
+  const domain = (parseAddress(msg.from || "").split("@")[1] || "").toLowerCase();
+  return !verdict.headerFrom || verdict.headerFrom === domain;
+}
+
+/**
  * Decide whether a message is a DKIM/DMARC-authenticated forward from an owner
  * address. `msg.authResults` is the list of Authentication-Results header values
  * (a message can carry several — we use only the Google-stamped one).
@@ -94,17 +124,13 @@ export function isForwardFromOwner(msg = {}, opts = {}) {
   // what makes it mean something.
   if (!owners.includes(address)) return { ok: false, reason: "sender is not an owner address" };
 
-  const results = (msg.authResults || [])
-    .map(parseAuthResults)
-    // Trust only Gmail's own verdict; a forged Authentication-Results carries a
-    // different authserv-id and is discarded here.
-    .filter((r) => r.authservId === trusted || r.authservId.endsWith(".google.com"));
-
-  if (!results.length) {
+  // Trust only Gmail's own verdict; a forged Authentication-Results carries a
+  // different authserv-id and is discarded.
+  const verdict = trustedVerdict(msg, { trustedAuthserv: trusted });
+  if (!verdict) {
     return { ok: false, reason: "no trusted (Google) Authentication-Results — failing closed" };
   }
 
-  const verdict = results[0];
   if (verdict.dmarc !== "pass") {
     return { ok: false, reason: `DMARC did not pass (dmarc=${verdict.dmarc ?? "absent"})` };
   }

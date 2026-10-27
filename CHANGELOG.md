@@ -17,6 +17,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
   re-sort. Money received is Records, not Priority, and an "has been changed"
   subject reaches the model instead of being filed as noise.
 ### Added
+- **Ronnie remembers which senders send which kinds of mail.** Haiku now names
+  the kind of each email (statement, autopay, payment confirmed, transfer,
+  deposit, payment failed, …). A records verdict of a record-like kind goes
+  through a novelty ledger per sender brand × kind. A sender's first one, or
+  the first in 60+ days (a yearly autopay), goes to Priority with the reason as
+  the ping text. The 2nd and 3rd stay in the inbox as Interesting, and from the
+  4th it is routine and filed as Records. Only mail that passed DMARC is
+  recorded. `scripts/ronnie-ledger-seed.mjs` seeds the ledger from backfill
+  history, reading each date from the Gmail id (#90).
 - **Ronnie tags eight more topics.** `ut` (University Tees), `health`
   (Prisma/MyChart), `benefits` (payroll, retirement, USC onboarding),
   `receipts` (rides, food orders, travel), `usc` (institutional senders only),
