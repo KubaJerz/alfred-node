@@ -8,7 +8,9 @@ step and is not built.
 | Question | Decision | Why |
 |---|---|---|
 | Provider | Telnyx | Lowest voice and SMS rates of Twilio, Plivo, Bird, and Telnyx. Real-time voice streaming and SIP. |
-| Number type | Toll-free, not 800 | Toll-free verification is free and accepts a sole proprietor. A local number needs paid 10DLC registration. 800 numbers cost $500 upfront. |
+| Number type | Local, +1 864-624-8580, on 10DLC | A local number was bought. It needs a 10DLC Sole Proprietor brand and campaign. Toll-free was the first plan. |
+| 10DLC campaign | Account Notification + Customer Care | Covers texts to Kuba, replies to people who text first, and texts to contacts who asked for them. The first campaign failed with 603 (no public terms page, a call-center opt-in). The new one was submitted on 2026-10-27. |
+| Public terms | kubajerzmanowski.com/sms/terms/ | Shows the number, the consent paths, and `sms@kubajerzmanowski.com`. Carriers can check it again at any time, so keep it up. |
 | Google Voice | No | No API. Porting a number out of Google Voice makes it a local number, which needs 10DLC. |
 | Inbound path | Webhook through a tunnel | Voice needs a real-time webhook anyway. The box has no public address. |
 | Tunnel | Tailscale Funnel | Free, no domain, supports WebSockets. It also covers the remote-access item in `TODO.md`. |
@@ -33,7 +35,21 @@ work before approval.
 A message typed in the mirror channel also gets its reply by SMS, to the first
 number in `SMS_ALLOWED_NUMBERS`. Other channels stay Discord only.
 
+The messaging profile answers STOP, START, and HELP itself (Keywords tab).
+Those texts start no turn. The reply texts there must stay the same as the
+ones in the campaign.
+
 Not built: MMS pictures in, and Alfred texting first (reminders).
+
+The campaign also allows replies to people who text first and texts to
+contacts who asked for them. The bot does not do that yet: it drops every
+number that is not in `SMS_ALLOWED_NUMBERS`. Before it texts anyone else, it
+must:
+
+- name "Jakub Jerzmanowski's assistant" and give STOP in the first text,
+- keep a record of each contact's consent (date and method),
+- send only scheduling and confirmation texts, and no links or phone numbers
+  (the campaign says it has none).
 
 ## Voice (next)
 
