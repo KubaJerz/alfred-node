@@ -38,6 +38,7 @@
 //   node scripts/ronnie-backfill.mjs --apply             # label + archive + migrate
 //   node scripts/ronnie-backfill.mjs --apply --delete-old-labels  # also drop flat jobs/taxes
 //   node scripts/ronnie-backfill.mjs --reset             # forget the checkpoint
+//   node scripts/ronnie-backfill.mjs --model claude-sonnet-5-5   # judge with another model
 
 import "dotenv/config";
 import path from "node:path";
@@ -74,6 +75,9 @@ const DELETE_OLD = flag("--delete-old-labels");
 const QUERY = opt("--query", "in:inbox");
 const MAX = Number(opt("--max", "0")) || Infinity;
 let haikuBudget = Number(opt("--max-haiku", "150"));
+// The model for the undecided messages. Defaults to the live triage model; a
+// one-time re-sort can pass a stronger one (--model claude-sonnet-5-5).
+const MODEL = opt("--model", undefined);
 
 const log = (...a) => console.log(...a);
 
@@ -152,7 +156,7 @@ async function decide(msg, oldFlat) {
     reason = pre.reason;
   } else if (haikuBudget > 0) {
     haikuBudget -= 1;
-    const v = await classifyWithHaiku(msg); // 5-tier; non-strict, fails open to interesting
+    const v = await classifyWithHaiku(msg, MODEL ? { model: MODEL } : {}); // 5-tier; non-strict, fails open to interesting
     attention = v.label;
     topic = pickTopic(topic, v.topic);
     reason = v.error ? `haiku error: ${v.error}` : "haiku";
@@ -249,6 +253,13 @@ async function main() {
 
   const gmail = await gmailClient();
   const { labels, oldFlat } = await resolveLabels(gmail);
+  // Every Ronnie label id: the tier parents and all their topic children.
+  const ronnieIds = new Set(
+    [
+      ...TIERS.map((t) => labels[t]),
+      ...TIERS.flatMap((t) => Object.values(labels.topics[t] || {})),
+    ].filter(Boolean)
+  );
 
   const cp = loadCheckpoint();
   cp.done = cp.done || {};
@@ -300,11 +311,16 @@ async function main() {
           // resolved, else the bare tier.
           const childId = d.topic ? labels.topics[tier]?.[d.topic] || "" : "";
           const addLabelIds = [childId || parentId].filter(Boolean);
-          const removeLabelIds = [
-            ...(ARCHIVED.has(tier) ? ["INBOX"] : []),
-            // Strip any old flat label as we migrate the message onto the tree.
-            ...Object.values(oldFlat).filter((lid) => (raw.labelIds || []).includes(lid)),
-          ];
+          // Strip every other Ronnie label the message wears: an earlier run's
+          // tier or topic (General/Banking re-sorted to Records/Banking must not
+          // keep both) and any old flat label. INBOX is only ever removed, never
+          // added, so archived mail re-sorted to priority or interesting stays
+          // archived.
+          const has = new Set(raw.labelIds || []);
+          const stale = [...ronnieIds, ...Object.values(oldFlat)].filter(
+            (lid) => has.has(lid) && !addLabelIds.includes(lid)
+          );
+          const removeLabelIds = [...(ARCHIVED.has(tier) ? ["INBOX"] : []), ...stale];
           await gmail.users.messages.modify({ userId: "me", id, requestBody: { addLabelIds, removeLabelIds } });
           counts.applied++;
           row.action = "labelled ✓";
