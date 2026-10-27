@@ -23,14 +23,28 @@
 import { ensureLabels } from "../google/gmail-labels.js";
 
 // Display titles for the child labels (parents keep whatever name they have).
-export const TOPIC_TITLES = { banking: "Banking", jobs: "Jobs", taxes: "Taxes", entropy: "Entropy" };
+// "UT" matches the General/UT label the first backfill made.
+export const TOPIC_TITLES = {
+  banking: "Banking", jobs: "Jobs", taxes: "Taxes", entropy: "Entropy", ut: "UT",
+  health: "Health", benefits: "Benefits", receipts: "Receipts", usc: "USC",
+  research: "Research", docs: "Docs", policies: "Policies",
+};
 
-// Which topics exist under each tier. Taxes is interesting or records only.
+// Which topics exist under each tier. A topic left off a tier falls back to the
+// bare tier label: no Priority/Receipts (an Uber sign-in alert is just Priority),
+// no General/Research (lab mail is never noise), no Records/Docs. Taxes is
+// interesting or records only. Policies is records only. Meetings has none.
 export const TIER_TOPICS = {
-  priority: ["banking", "jobs", "entropy"],
-  interesting: ["banking", "jobs", "taxes", "entropy"],
-  records: ["banking", "jobs", "taxes", "entropy"],
-  general: ["banking", "jobs", "entropy"],
+  priority: ["banking", "jobs", "entropy", "ut", "health", "benefits", "usc", "research"],
+  interesting: [
+    "banking", "jobs", "taxes", "entropy", "ut", "health", "benefits", "receipts", "usc",
+    "research", "docs",
+  ],
+  records: [
+    "banking", "jobs", "taxes", "entropy", "ut", "health", "benefits", "receipts", "usc",
+    "policies",
+  ],
+  general: ["banking", "jobs", "entropy", "ut", "health", "usc"],
   meetings: [],
 };
 

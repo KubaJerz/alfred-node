@@ -58,6 +58,15 @@ test("haiku sends the FULL body to the model", async () => {
   assert.ok(prompt.includes("THE FULL BODY HERE"));
 });
 
+test("haiku may tag the semantic topics but never a domain-only one", async () => {
+  for (const topic of ["ut", "research", "docs", "policies"]) {
+    const v = await classifyWithHaiku({ from: "a@b" }, { run: fakeRun({ label: "interesting", summary: "", topic }) });
+    assert.equal(v.topic, topic);
+  }
+  const forged = await classifyWithHaiku({ from: "a@b" }, { run: fakeRun({ label: "interesting", summary: "", topic: "health" }) });
+  assert.equal(forged.topic, null);
+});
+
 test("haiku accepts the records and meetings tiers", async () => {
   for (const label of ["records", "meetings"]) {
     const v = await classifyWithHaiku({ from: "a@b" }, { run: fakeRun({ label, summary: "ignored" }) });
