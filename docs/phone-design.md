@@ -9,8 +9,8 @@ step and is not built.
 |---|---|---|
 | Provider | Telnyx | Lowest voice and SMS rates of Twilio, Plivo, Bird, and Telnyx. Real-time voice streaming and SIP. |
 | Number type | Local, +1 864-624-8580, on 10DLC | A local number was bought. It needs a 10DLC Sole Proprietor brand and campaign. Toll-free was the first plan. |
-| 10DLC campaign | Account Notification + Customer Care | Two opt-in methods: a first text to the number, or verbal consent given to Kuba. Each has its own confirmation text. The first campaign failed with 603 (no public terms page, a call-center opt-in). The second failed Telnyx review on 2026-10-27 because it listed three opt-in paths without the details each needs; it was edited and is back in review. |
-| Public terms | kubajerzmanowski.com/sms/terms/ | Shows the number, both opt-ins, the verbal script, both confirmation texts, and `sms@kubajerzmanowski.com`. Carriers can check it again at any time, so keep it up. |
+| 10DLC campaign | Account Notification + Customer Care | One opt-in method: verbal consent given to Kuba, then a confirmation text. The first campaign failed with 603 (no public terms page, a call-center opt-in). The second failed Telnyx review twice on 2026-10-27/28 for listing more than one opt-in method; it now lists only verbal consent. After approval the message flow cannot change, so adding "text the number" later needs a new campaign. |
+| Public terms | kubajerzmanowski.com/sms/terms/ | Shows the verbal consent script, the confirmation text, and `sms@kubajerzmanowski.com`. It does not show Alfred's number. Carriers can check it again at any time, so keep it up. |
 | Google Voice | No | No API. Porting a number out of Google Voice makes it a local number, which needs 10DLC. |
 | Inbound path | Webhook through a tunnel | Voice needs a real-time webhook anyway. The box has no public address. |
 | Tunnel | Tailscale Funnel | Free, no domain, supports WebSockets. It also covers the remote-access item in `TODO.md`. |
@@ -41,17 +41,25 @@ ones in the campaign.
 
 Not built: MMS pictures in, and Alfred texting first (reminders).
 
-The campaign allows texts to people who opted in, and to no one else. There
-are two ways in: the person texts the number, or the person gives Kuba verbal
-consent. The bot does not text anyone but Kuba yet: it drops every number that
-is not in `SMS_ALLOWED_NUMBERS`. Before it texts anyone else, it must:
+The campaign allows texts only to people who gave Kuba verbal consent. Kuba
+reads them this script:
 
-- answer a first text from a new number with the inbound confirmation
-  ("Thanks for texting Jakub Jerzmanowski's assistant. You are subscribed…"),
-- start a verbal contact with the verbal confirmation ("You have agreed to
-  receive SMS updates from Jakub Jerzmanowski…"),
-- keep a record of each opt-in (number, date, method), and text only numbers
-  on it that have not sent STOP since,
+> By providing your phone number, you agree to receive SMS notifications,
+> scheduling, and confirmation messages from Jakub Jerzmanowski, sent by his
+> AI assistant. Message frequency may vary. Standard message and data rates
+> may apply. Reply STOP to opt out. Reply HELP for help. We will not share
+> mobile information with third parties for promotional or marketing
+> purposes.
+
+The bot does not text anyone but Kuba yet: it drops every number that is not
+in `SMS_ALLOWED_NUMBERS`. A stranger who texts first gets no reply, and that
+must stay true. Before it texts anyone else, it must:
+
+- start each new contact with the confirmation text ("You have agreed to
+  receive SMS updates from Jakub Jerzmanowski. Msg freq may vary. Std msg &
+  data rates apply. Reply STOP to opt out, HELP for help."),
+- keep a record of each opt-in (number and date), and text only numbers on
+  it that have not sent STOP since,
 - name "Jakub Jerzmanowski's assistant" in its texts,
 - send only scheduling and confirmation texts, and no links or phone numbers
   (the campaign says it has none).
