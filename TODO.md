@@ -195,11 +195,9 @@ risky jobs to small least-privilege agents instead of widening his reach.
 - [ ] **Tiered memory (L1/L2).** `agent/var/memories/MEMORY.md` is injected into
       every new session; it's empty today, but the split plan is already noted in
       that file's header (issue #8). Do it when size actually becomes a problem.
-- [ ] **Give Alfred a phone number — voice calls.** SMS shipped in #82 on a
-      Telnyx toll-free number. Next: Kuba calls the same number and talks to
-      Alfred. The design is in `docs/phone-design.md`: Telnyx sends the call by
-      SIP to the OpenAI Realtime API, and one `ask_alfred` tool runs a normal
-      turn for anything real. Open a new issue for it.
+- [ ] **Give Alfred a phone number — voice calls (#98).** A Telnyx AI
+      Assistant does the audio, and bot.js is its model. The test plan is in
+      #98 and `docs/phone-design.md`.
 - [ ] **Food logging + a database.** Let Kuba log meals to Alfred (a Discord line
       first, a photo later) and keep them queryable — what and when, ideally
       calories/macros. Two open questions: the schema, and whether Alfred

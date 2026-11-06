@@ -20,7 +20,8 @@ import { parseClearCommand } from "./commands.js";
 import { transcribe, transcriptionAvailable } from "./voice/transcribe.js";
 import { isVoiceInput } from "./voice/detect.js";
 import { browserEnv } from "./browser.js";
-import { startTelnyxWebhook, makeMessagingRoute, sendSms, smsText, parseNumberList } from "./telnyx/sms.js";
+import { startTelnyxWebhook, makeMessagingRoute, sendSms, smsText, parseNumberList, normalizeNumber } from "./telnyx/sms.js";
+import { makeVoiceLlmRoutes } from "./telnyx/voice.js";
 
 // ── Config ──────────────────────────────────────────────────────────────────
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
@@ -50,6 +51,18 @@ const SMS_WEBHOOK_PORT = parseInt(process.env.SMS_WEBHOOK_PORT || "8788");
 const smsConfigured = !!(TELNYX_API_KEY && TELNYX_PUBLIC_KEY && TELNYX_PHONE_NUMBER && SMS_ALLOWED_NUMBERS.length);
 // Alfred reads this tag at the top of an SMS turn (see agent/SOUL.md).
 const SMS_TAG = "[via SMS]";
+
+// Phone calls over a Telnyx AI Assistant (telnyx/voice.js). Telnyx does the
+// audio. bot.js is the assistant's model: each caller turn is an Alfred turn.
+// Off unless VOICE_LLM_TOKEN is set. The allow list falls back to the SMS one,
+// and the mirror channel falls back to the SMS mirror.
+const VOICE_LLM_TOKEN = process.env.VOICE_LLM_TOKEN || "";
+const VOICE_ALLOWED_NUMBERS = parseNumberList(process.env.VOICE_ALLOWED_NUMBERS || process.env.SMS_ALLOWED_NUMBERS);
+const VOICE_MIRROR_CHANNEL = process.env.VOICE_MIRROR_CHANNEL || SMS_MIRROR_CHANNEL;
+const voiceConfigured = !!(VOICE_LLM_TOKEN && VOICE_ALLOWED_NUMBERS.length);
+// Alfred reads this tag at the top of a phone-call turn (see agent/SOUL.md).
+const CALL_TAG = "[via phone call]";
+const VIA_TAGS = { sms: SMS_TAG, call: CALL_TAG };
 
 // ── Layout ──────────────────────────────────────────────────────────────────
 // Three kinds of files live here and they don't mix:
@@ -820,7 +833,7 @@ async function handleTurn(target, userMessage, attachments = []) {
       : userMessage;
     // The tag rides on this message only, like the attachment block, so a
     // resumed session still sees it. A /clear above already took its prefix off.
-    if (target.via === "sms") messageBody = `${SMS_TAG} ${messageBody}`;
+    if (VIA_TAGS[target.via]) messageBody = `${VIA_TAGS[target.via]} ${messageBody}`;
 
     let finalMessage = messageBody;
     if (shouldResume) {
@@ -1105,7 +1118,7 @@ async function sendReply(msg, text, files) {
 // answer in Discord, by SMS, or in both. A target has:
 //
 //   who             { tag, id, channel } for the transcript and the console
-//   via             "sms" when the reply goes out by SMS, else undefined
+//   via             "sms" or "call" when the reply does not go to Discord only
 //   typing()        show that Alfred is working. It never throws.
 //   react(emoji)    react to the inbound message. It never throws.
 //   send(text, files)  deliver a reply. It throws only if no copy arrived.
@@ -1186,6 +1199,50 @@ async function onSmsText({ from, text, media }) {
   if (media.length) text += "\n(The user also sent a picture by MMS. You cannot see it.)";
   if (pendingTurns > 0) target.react("⏳");
   await enqueueTurn(() => handleTurn(target, text));
+}
+
+// A phone call. The reply is spoken, so send() keeps the text for the voice
+// route to stream back, and posts a copy in the mirror channel (if set). A late
+// send, for example a deferred strength follow-up, reaches the mirror only.
+function callTarget({ discord = null, who, onReply }) {
+  return {
+    who,
+    via: "call",
+    typing: () => discord?.typing() ?? Promise.resolve(),
+    react: (emoji) => discord?.react(emoji) ?? Promise.resolve(),
+    send: async (text, files = []) => {
+      onReply(text);
+      if (discord) await discord.send(text, files).catch((err) => console.error(`⚠️  Call mirror post failed: ${err.message}`));
+    },
+  };
+}
+
+// One caller turn from telnyx/voice.js. It runs the same path as a Discord
+// message, in the same session, and resolves to the text to speak.
+async function onCallTurn({ text, caller, takeMissed }) {
+  let discord = null;
+  if (VOICE_MIRROR_CHANNEL) {
+    try {
+      const channel = await client.channels.fetch(VOICE_MIRROR_CHANNEL);
+      const posted = await channel.send({ content: `📞 ${text}`.slice(0, 2000), allowedMentions: { parse: [] } });
+      discord = discordTarget(posted);
+    } catch (err) {
+      console.error(`⚠️  Couldn't post the call turn in the mirror channel: ${err.message}`);
+    }
+  }
+  let reply = "";
+  const target = callTarget({
+    discord,
+    who: { tag: `call:${caller}`, id: caller, channel: VOICE_MIRROR_CHANNEL || "call" },
+    onReply: (t) => { reply = reply ? `${reply}\n${t}` : t; },
+  });
+  await enqueueTurn(() => {
+    // Read the flag when the turn starts. A reply that the caller talked over
+    // can finish while this turn waits in the queue.
+    const note = takeMissed() ? "(The caller talked over your last reply and did not hear it.)\n" : "";
+    return handleTurn(target, note + text);
+  });
+  return reply;
 }
 
 // ── Launch ──────────────────────────────────────────────────────────────────
@@ -1283,24 +1340,35 @@ startMailListener({ gmail: sharedGmail, enqueue: ronnie?.enqueue, onDrained: ron
   console.error(`⚠️  Gmail push listener failed to start: ${err.message}`)
 );
 
-// SMS over Telnyx. Off unless configured. The webhook server binds loopback
-// only. A tunnel forwards the public URL to it (see env.example). A failure to
-// start is logged and swallowed — SMS is an add-on, like mail.
-if (smsConfigured) {
+// SMS and phone calls over Telnyx. Each is off unless configured. They share
+// one webhook server, which binds loopback only. A tunnel forwards the public
+// URL to it (see env.example). A failure to start is logged and swallowed —
+// both are add-ons, like mail.
+if (smsConfigured || voiceConfigured) {
   startTelnyxWebhook({
     port: SMS_WEBHOOK_PORT,
     publicKey: TELNYX_PUBLIC_KEY,
-    routes: {
+    routes: smsConfigured ? {
       "/telnyx/messaging": makeMessagingRoute({
         ourNumber: TELNYX_PHONE_NUMBER,
         allowFrom: SMS_ALLOWED_NUMBERS,
         onText: onSmsText,
       }),
-    },
+    } : {},
+    httpRoutes: voiceConfigured ? makeVoiceLlmRoutes({
+      token: VOICE_LLM_TOKEN,
+      allowFrom: VOICE_ALLOWED_NUMBERS,
+      normalize: normalizeNumber,
+      onTurn: onCallTurn,
+    }) : {},
   })
-    .then((hook) => console.log(`📱 SMS is on — Telnyx webhook on ${hook.url}/telnyx/messaging${SMS_MIRROR_CHANNEL ? ", mirrored to Discord" : ""}`))
+    .then((hook) => {
+      if (smsConfigured) console.log(`📱 SMS is on — Telnyx webhook on ${hook.url}/telnyx/messaging${SMS_MIRROR_CHANNEL ? ", mirrored to Discord" : ""}`);
+      if (voiceConfigured) console.log(`📞 Calls are on — model endpoint on ${hook.url}/telnyx/voice/v1${VOICE_MIRROR_CHANNEL ? ", mirrored to Discord" : ""}`);
+    })
     .catch((err) => console.error(`⚠️  Telnyx webhook failed to start: ${err.message}`));
-} else if (TELNYX_API_KEY || TELNYX_PUBLIC_KEY || TELNYX_PHONE_NUMBER) {
+}
+if (!smsConfigured && (TELNYX_API_KEY || TELNYX_PUBLIC_KEY || TELNYX_PHONE_NUMBER)) {
   console.warn("⚠️  SMS is off — set TELNYX_API_KEY, TELNYX_PUBLIC_KEY, TELNYX_PHONE_NUMBER, and SMS_ALLOWED_NUMBERS");
 }
 

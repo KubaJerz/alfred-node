@@ -63,6 +63,9 @@ flowchart TD
     PH["Kuba · phone (SMS)"] -->|text| TX["Telnyx"]
     TX -->|"signed webhook<br/>via tunnel"| WH["telnyx/sms.js<br/>127.0.0.1:8788<br/>signature + allow list"]
     WH -->|"[via SMS] text"| Q
+    CALL["Kuba · phone (call)"] -->|speech| VA["Telnyx AI Assistant<br/>speech-to-text · turns · text-to-speech"]
+    VA -->|"bearer token<br/>via tunnel"| VR["telnyx/voice.js<br/>/telnyx/voice/v1<br/>token + allow list"]
+    VR -->|"[via phone call] text"| Q
     CTX["loadContext<br/>SOUL.md + USER.md + MEMORY.md + today's daily"] --> Q
     Q --> SPAWN["spawn: claude -p<br/>cwd = agent/"]
     SPAWN -.->|"skill matches"| SK["skills<br/>gmail · gcal · notion · intervals · strength · browser"]
@@ -73,15 +76,16 @@ flowchart TD
     BR --> I["Intervals.icu<br/>(Garmin data)"]
     SK -.->|"browser skill"| AB["agent-browser · headed Chrome<br/>agent-browser.json · browser.js"]
     AB --> WEB["the open web"]
-    SPAWN -->|"stdout JSON"| R["reply → target<br/>Discord · SMS · both"]
+    SPAWN -->|"stdout JSON"| R["reply → target<br/>Discord · SMS · call"]
     R --> U
     R -->|"SMS reply"| TX
+    R -->|"spoken reply"| VA
     TX --> PH
     classDef external fill:#d6e2f2,stroke:#1f5fb8,color:#123f7d
     classDef gateway fill:#d8ebe2,stroke:#1b6b52,color:#12503c
     classDef stack fill:#f5e8d5,stroke:#b07a2a,color:#6e4a12
-    class U,G,N,I,WEB,PH,TX external
-    class BR,WH gateway
+    class U,G,N,I,WEB,PH,TX,CALL,VA external
+    class BR,WH,VR gateway
     class SK,CLIS,AB stack
 ```
 
@@ -107,6 +111,16 @@ the same session, with a `[via SMS]` tag. The turn answers through a *reply
 target*: Discord, SMS, or both. With `SMS_MIRROR_CHANNEL` set, that channel is
 the phone thread: texts and replies show there, and a message typed there is
 also answered by SMS.
+
+**A phone call** is the third way in. A Telnyx AI Assistant answers the call.
+Telnyx does the audio: speech-to-text, turn detection, interruption, and
+text-to-speech. The assistant's model is `telnyx/voice.js`, on the same
+loopback server as SMS. Telnyx sends each caller turn as an OpenAI-style
+`/chat/completions` request with a bearer token. The route rejects a request
+without the token, then refuses a caller not in `VOICE_ALLOWED_NUMBERS`. A turn
+that passes runs in the same session with a `[via phone call]` tag. The reply
+streams back as text, and Telnyx speaks it. If the caller talks over a reply,
+the next turn tells Alfred that they did not hear it.
 
 The `bin/` CLIs are **never loaded into context** — the agent's tools are only
 `Bash,Read,Edit,Write`, and it *runs* the CLIs as subprocesses. `SOUL.md` (always

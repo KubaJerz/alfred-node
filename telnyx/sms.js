@@ -134,7 +134,11 @@ export function makeMessagingRoute({ ourNumber, allowFrom, onText, log = console
 }
 
 // The public-facing webhook server. routes maps a path to a handler that gets
-// the event's `data` object. The server answers 200 before it runs the handler:
+// the event's `data` object. httpRoutes maps a path to a plain handler
+// (req, res, rawBody) that does its own auth and writes its own response. The
+// voice model endpoint (telnyx/voice.js) is one: Telnyx does not sign those
+// requests, so they skip the signature check and carry a bearer token.
+// The server answers 200 before it runs the handler:
 // Telnyx wants a 2xx inside 2 seconds, and a turn takes far longer. Telnyx
 // retries a delivery that did not get a 2xx, so the same event can arrive more
 // than once. The server remembers the last SEEN_CAP event ids and drops a
@@ -143,7 +147,8 @@ export async function startTelnyxWebhook({
   port = 0,
   host = "127.0.0.1",
   publicKey,
-  routes,
+  routes = {},
+  httpRoutes = {},
   log = console.log,
   now = () => Date.now(),
 }) {
@@ -156,8 +161,10 @@ export async function startTelnyxWebhook({
   const server = http.createServer(async (req, res) => {
     const end = (code) => { res.writeHead(code).end(); };
     try {
-      const route = routes[new URL(req.url, "http://x").pathname];
-      if (req.method !== "POST" || !route) return end(404);
+      const path = new URL(req.url, "http://x").pathname;
+      const route = routes[path];
+      const httpRoute = httpRoutes[path];
+      if (!httpRoute && (req.method !== "POST" || !route)) return end(404);
 
       const chunks = [];
       let size = 0;
@@ -167,6 +174,7 @@ export async function startTelnyxWebhook({
         chunks.push(c);
       }
       const rawBody = Buffer.concat(chunks);
+      if (httpRoute) return await httpRoute(req, res, rawBody);
 
       const ok = verifySignature({
         publicKey,
