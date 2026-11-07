@@ -26,6 +26,12 @@ import fs from "fs/promises";
 
 export const VOICE_MODEL_ID = "alfred";
 export const KEEPALIVE_MS = 5000;
+// A slow turn gets a short spoken line, so the caller knows the call is alive.
+// The first comes after FILLER_MS, then one every FILLER_REPEAT_MS. A quick
+// reply gets none.
+export const FILLER_MS = 7000;
+export const FILLER_REPEAT_MS = 20000;
+export const FILLERS = ["One sec, still on it.", "Still working on it.", "Bear with me, almost there."];
 const STATE_TTL_MS = 2 * 60 * 1000; // forget a caller's turn state after this idle time
 
 // Compare a request's Authorization header with the token, in constant time.
@@ -158,6 +164,8 @@ export function makeVoiceLlmRoutes({
   onTurn,
   log = console.log,
   keepAliveMs = KEEPALIVE_MS,
+  fillerMs = FILLER_MS,
+  fillerRepeatMs = FILLER_REPEAT_MS,
   state = makeCallState(),
   backgroundAudio = null,
 }) {
@@ -220,6 +228,17 @@ export function makeVoiceLlmRoutes({
     // An SSE comment line keeps the stream alive while Alfred works. It
     // carries no text, so Telnyx speaks nothing.
     const ping = setInterval(() => res.write(": ping\n\n"), keepAliveMs);
+    // Filler lines go out in the same assistant message as the reply. Telnyx
+    // speaks each one when it arrives.
+    let fillers = 0;
+    let fillerTimer;
+    const sayFiller = () => {
+      if (res.writableEnded || res.destroyed) return;
+      res.write(sseChunk(id, { content: `${FILLERS[fillers % FILLERS.length]} ` }));
+      fillers++;
+      fillerTimer = setTimeout(sayFiller, fillerRepeatMs);
+    };
+    if (fillerMs > 0) fillerTimer = setTimeout(sayFiller, fillerMs);
     let closedEarly = false;
     res.on("close", () => {
       if (!res.writableEnded) {
@@ -233,6 +252,7 @@ export function makeVoiceLlmRoutes({
       out = speakable(await onTurn({ text, caller: key, takeMissed: () => state.takeMissed(key) }));
     } finally {
       clearInterval(ping);
+      clearTimeout(fillerTimer);
     }
     if (closedEarly) {
       state.missed(key);
@@ -243,7 +263,7 @@ export function makeVoiceLlmRoutes({
     res.write(sseChunk(id, {}, "stop"));
     res.end("data: [DONE]\n\n");
     state.heard(key);
-    log(`📞 Voice reply after ${Date.now() - t0} ms (${out.length} chars)`);
+    log(`📞 Voice reply after ${Date.now() - t0} ms (${out.length} chars${fillers ? `, ${fillers} filler line(s)` : ""})`);
   };
 
   const routes = { [`${base}/chat/completions`]: completions, [`${base}/models`]: models };

@@ -55,7 +55,7 @@ test("makeCallState does not send the same caller words two times", () => {
   assert.equal(st.takeMissed(OWNER), false);
 });
 
-async function withServer(onTurn, fn) {
+async function withServer(onTurn, fn, opts = {}) {
   const logs = [];
   const hook = await startTelnyxWebhook({
     publicKey: "",
@@ -66,6 +66,7 @@ async function withServer(onTurn, fn) {
       onTurn,
       log: (m) => logs.push(m),
       keepAliveMs: 10,
+      ...opts,
     }),
     log: () => {},
   });
@@ -129,6 +130,18 @@ test("the voice route streams Alfred's reply as speakable text", async () => {
     assert.equal(turns[0].text, "when is the gym");
     assert.equal(turns[0].caller, OWNER);
   });
+});
+
+test("a slow turn speaks a filler line before the reply, a fast one does not", async () => {
+  let delay = 60;
+  await withServer(async () => {
+    await new Promise((r) => setTimeout(r, delay));
+    return "Here it is.";
+  }, async ({ post }) => {
+    assert.equal(sseText(await (await post(req("slow"))).text()), "One sec, still on it. Here it is.");
+    delay = 0;
+    assert.equal(sseText(await (await post(req("fast"))).text()), "Here it is.");
+  }, { fillerMs: 25, fillerRepeatMs: 1000 });
 });
 
 test("the voice route answers a JSON request when stream is off", async () => {
