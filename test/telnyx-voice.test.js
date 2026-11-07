@@ -138,7 +138,7 @@ test("a slow turn speaks a filler line before the reply, a fast one does not", a
     await new Promise((r) => setTimeout(r, delay));
     return "Here it is.";
   }, async ({ post }) => {
-    assert.equal(sseText(await (await post(req("slow"))).text()), "One sec, still on it. Here it is.");
+    assert.equal(sseText(await (await post(req("slow"))).text()), "On it, one sec. Here it is.");
     delay = 0;
     assert.equal(sseText(await (await post(req("fast"))).text()), "Here it is.");
   }, { fillerMs: 25, fillerRepeatMs: 1000 });

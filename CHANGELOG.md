@@ -5,6 +5,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
 
 ## [Unreleased]
 ### Fixed
+- **A slow call turn speaks its first filler line after 2 seconds, not 7.** At
+  7 seconds the line came only 1 to 2 seconds before most replies, so the
+  caller heard a long silence and then the filler run into the reply. A short
+  line now repeats every 5 seconds while Alfred works. `VOICE_FILLER_MS` and
+  `VOICE_FILLER_REPEAT_MS` change the timing. Each filler is logged with its
+  time (#98).
+### Fixed
 - **The voice setup script sets recording off and no background sound.**
   Telnyx records calls by default, and a background loop played under every
   reply. Both were fixed by hand on the live assistant. A second run of the
