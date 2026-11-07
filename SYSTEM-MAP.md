@@ -66,6 +66,9 @@ flowchart TD
     CALL["Kuba · phone (call)"] -->|speech| VA["Telnyx AI Assistant<br/>speech-to-text · turns · text-to-speech"]
     VA -->|"bearer token<br/>via tunnel"| VR["telnyx/voice.js<br/>/telnyx/voice/v1<br/>token + allow list"]
     VR -->|"[via phone call] text"| Q
+    CALL -->|"speech (v2, opt-in)"| CC["Telnyx Call Control<br/>media stream · STT · TTS"]
+    CC -->|"signed webhook + media socket<br/>via tunnel"| VP["telnyx/pipeline.js<br/>audio.js · speech.js<br/>signature + token + allow list"]
+    VP -->|"[via phone call] text"| Q
     CTX["loadContext<br/>SOUL.md + USER.md + MEMORY.md + today's daily"] --> Q
     Q --> SPAWN["spawn: claude -p<br/>cwd = agent/"]
     SPAWN -.->|"skill matches"| SK["skills<br/>gmail · gcal · notion · intervals · strength · browser"]
@@ -80,12 +83,13 @@ flowchart TD
     R --> U
     R -->|"SMS reply"| TX
     R -->|"spoken reply"| VA
+    R -->|"spoken reply (v2)"| VP
     TX --> PH
     classDef external fill:#d6e2f2,stroke:#1f5fb8,color:#123f7d
     classDef gateway fill:#d8ebe2,stroke:#1b6b52,color:#12503c
     classDef stack fill:#f5e8d5,stroke:#b07a2a,color:#6e4a12
-    class U,G,N,I,WEB,PH,TX,CALL,VA external
-    class BR,WH,VR gateway
+    class U,G,N,I,WEB,PH,TX,CALL,VA,CC external
+    class BR,WH,VR,VP gateway
     class SK,CLIS,AB stack
 ```
 
@@ -121,6 +125,18 @@ without the token, then refuses a caller not in `VOICE_ALLOWED_NUMBERS`. A turn
 that passes runs in the same session with a `[via phone call]` tag. The reply
 streams back as text, and Telnyx speaks it. If the caller talks over a reply,
 the next turn tells Alfred that they did not hear it.
+
+**A phone call over the v2 pipeline** is opt-in and runs next to v1. The phone
+number's setting in the Telnyx portal decides which path answers. Telnyx Call
+Control posts a signed `call.initiated` to `telnyx/pipeline.js`, which answers an
+allowed caller with a media stream. Telnyx opens a WebSocket back to the same
+loopback server. The upgrade needs a secret token in the URL and an Ed25519
+signature over that URL. `telnyx/speech.js` sends the caller audio to Telnyx
+speech-to-text (Deepgram Flux). Flux decides the end of a turn, and the turn
+runs the same `onCallTurn` as v1. The reply goes to Telnyx text-to-speech one
+sentence at a time. `telnyx/audio.js` converts it to 8 kHz mu-law, and it goes
+back over the socket. If the caller talks over it, the pipeline clears the audio
+and the next turn tells Alfred.
 
 The `bin/` CLIs are **never loaded into context** — the agent's tools are only
 `Bash,Read,Edit,Write`, and it *runs* the CLIs as subprocesses. `SOUL.md` (always

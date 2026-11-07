@@ -22,6 +22,7 @@ import { isVoiceInput } from "./voice/detect.js";
 import { browserEnv } from "./browser.js";
 import { startTelnyxWebhook, makeMessagingRoute, sendSms, smsText, parseNumberList, normalizeNumber } from "./telnyx/sms.js";
 import { makeVoiceLlmRoutes } from "./telnyx/voice.js";
+import { makeVoicePipeline, EVENTS_PATH as VOICE_EVENTS_PATH } from "./telnyx/pipeline.js";
 
 // ── Config ──────────────────────────────────────────────────────────────────
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
@@ -64,6 +65,18 @@ const voiceConfigured = !!(VOICE_LLM_TOKEN && VOICE_ALLOWED_NUMBERS.length);
 // Unset keeps the defaults in telnyx/voice.js (1 s, then every 5 s).
 const VOICE_FILLER_MS = process.env.VOICE_FILLER_MS ? parseInt(process.env.VOICE_FILLER_MS) : undefined;
 const VOICE_FILLER_REPEAT_MS = process.env.VOICE_FILLER_REPEAT_MS ? parseInt(process.env.VOICE_FILLER_REPEAT_MS) : undefined;
+// Phone calls over our own pipeline (telnyx/pipeline.js), the opt-in "v2".
+// Telnyx Call Control streams the call audio to us, and we run Telnyx
+// speech-to-text and text-to-speech. Each caller turn is the same onCallTurn
+// as v1. Off unless VOICE_PIPELINE_TOKEN and VOICE_PUBLIC_URL are set. It also
+// needs the API key, the public key, and an allow list. Which path answers a
+// call is the phone number's setting in the Telnyx portal, not this flag.
+const VOICE_PIPELINE_TOKEN = process.env.VOICE_PIPELINE_TOKEN || "";
+const VOICE_PUBLIC_URL = process.env.VOICE_PUBLIC_URL || "";
+const VOICE_PIPELINE_VOICE = process.env.VOICE_PIPELINE_VOICE || undefined;
+const VOICE_PIPELINE_TTS_RATE = parseInt(process.env.VOICE_PIPELINE_TTS_RATE || "0") || undefined;
+const VOICE_PIPELINE_SIGNED_MEDIA = process.env.VOICE_PIPELINE_SIGNED_MEDIA !== "0";
+const voicePipelineConfigured = !!(VOICE_PIPELINE_TOKEN && VOICE_PUBLIC_URL && TELNYX_API_KEY && TELNYX_PUBLIC_KEY && VOICE_ALLOWED_NUMBERS.length);
 // Alfred reads this tag at the top of a phone-call turn (see agent/SOUL.md).
 const CALL_TAG = "[via phone call]";
 const VIA_TAGS = { sms: SMS_TAG, call: CALL_TAG };
@@ -1243,8 +1256,9 @@ function callTarget({ discord = null, who, onReply }) {
   };
 }
 
-// One caller turn from telnyx/voice.js. It runs the same path as a Discord
-// message, in the same session, and resolves to the text to speak.
+// One caller turn from telnyx/voice.js (v1) or telnyx/pipeline.js (v2). It
+// runs the same path as a Discord message, in the same session, and resolves
+// to the text to speak.
 async function onCallTurn({ text, caller, takeMissed, signal }) {
   let discord = null;
   if (VOICE_MIRROR_CHANNEL) {
@@ -1375,17 +1389,46 @@ startMailListener({ gmail: sharedGmail, enqueue: ronnie?.enqueue, onDrained: ron
 // one webhook server, which binds loopback only. A tunnel forwards the public
 // URL to it (see env.example). A failure to start is logged and swallowed —
 // both are add-ons, like mail.
-if (smsConfigured || voiceConfigured) {
+//
+// The v2 call pipeline adds one signed route (call events) and the media
+// WebSocket upgrade to the same server. A bad pipeline config is logged, and
+// SMS and v1 calls still start.
+let voicePipeline = null;
+if (voicePipelineConfigured) {
+  try {
+    voicePipeline = makeVoicePipeline({
+      publicUrl: VOICE_PUBLIC_URL,
+      token: VOICE_PIPELINE_TOKEN,
+      publicKey: TELNYX_PUBLIC_KEY,
+      apiKey: TELNYX_API_KEY,
+      allowFrom: VOICE_ALLOWED_NUMBERS,
+      ourNumber: TELNYX_PHONE_NUMBER,
+      normalize: normalizeNumber,
+      onTurn: onCallTurn,
+      voice: VOICE_PIPELINE_VOICE,
+      ttsRate: VOICE_PIPELINE_TTS_RATE,
+      requireSignature: VOICE_PIPELINE_SIGNED_MEDIA,
+    });
+  } catch (err) {
+    console.error(`⚠️  Call pipeline v2 is off: ${err.message}`);
+  }
+} else if (VOICE_PIPELINE_TOKEN) {
+  console.warn("⚠️  Call pipeline v2 is off — set VOICE_PUBLIC_URL, TELNYX_API_KEY, TELNYX_PUBLIC_KEY, and VOICE_ALLOWED_NUMBERS");
+}
+if (smsConfigured || voiceConfigured || voicePipeline) {
   startTelnyxWebhook({
     port: SMS_WEBHOOK_PORT,
     publicKey: TELNYX_PUBLIC_KEY,
-    routes: smsConfigured ? {
-      "/telnyx/messaging": makeMessagingRoute({
-        ourNumber: TELNYX_PHONE_NUMBER,
-        allowFrom: SMS_ALLOWED_NUMBERS,
-        onText: onSmsText,
-      }),
-    } : {},
+    routes: {
+      ...(smsConfigured ? {
+        "/telnyx/messaging": makeMessagingRoute({
+          ourNumber: TELNYX_PHONE_NUMBER,
+          allowFrom: SMS_ALLOWED_NUMBERS,
+          onText: onSmsText,
+        }),
+      } : {}),
+      ...(voicePipeline ? voicePipeline.routes : {}),
+    },
     httpRoutes: voiceConfigured ? makeVoiceLlmRoutes({
       token: VOICE_LLM_TOKEN,
       allowFrom: VOICE_ALLOWED_NUMBERS,
@@ -1399,6 +1442,10 @@ if (smsConfigured || voiceConfigured) {
     .then((hook) => {
       if (smsConfigured) console.log(`📱 SMS is on — Telnyx webhook on ${hook.url}/telnyx/messaging${SMS_MIRROR_CHANNEL ? ", mirrored to Discord" : ""}`);
       if (voiceConfigured) console.log(`📞 Calls are on — model endpoint on ${hook.url}/telnyx/voice/v1${VOICE_MIRROR_CHANNEL ? ", mirrored to Discord" : ""}`);
+      if (voicePipeline) {
+        hook.server.on("upgrade", voicePipeline.handleUpgrade);
+        console.log(`📞 Call pipeline v2 is on — events on ${hook.url}${VOICE_EVENTS_PATH}, media socket for ${VOICE_PUBLIC_URL}`);
+      }
     })
     .catch((err) => console.error(`⚠️  Telnyx webhook failed to start: ${err.message}`));
 }

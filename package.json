@@ -1,6 +1,6 @@
 {
   "name": "alfred-node",
-  "version": "2.23.2",
+  "version": "2.24.0",
   "description": "",
   "main": "bot.js",
   "type": "module",

@@ -211,5 +211,7 @@ export async function startTelnyxWebhook({
 
   await new Promise((resolve) => server.listen(port, host, resolve));
   const url = `http://${host}:${server.address().port}`;
-  return { url, close: () => new Promise((r) => server.close(r)) };
+  // `server` lets a caller add an "upgrade" handler (the v2 call pipeline's
+  // media WebSocket, telnyx/pipeline.js).
+  return { url, server, close: () => new Promise((r) => server.close(r)) };
 }

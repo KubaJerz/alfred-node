@@ -25,6 +25,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
   reply. Both were fixed by hand on the live assistant. A second run of the
   script now gives the same result (#98).
 ### Added
+- **Calls can use our own audio pipeline (v2, opt-in).** v1 stays the default.
+  With `VOICE_PIPELINE_TOKEN` and `VOICE_PUBLIC_URL` set, a Telnyx Call Control
+  application posts call events to a new signed route,
+  `/telnyx/voice/events`. bot.js answers an allowed caller with a media
+  stream and does the audio itself: Telnyx speech-to-text (Deepgram Flux) for
+  the turns, the same `onCallTurn` as v1 for the reply, and Telnyx
+  text-to-speech (the same Ultra voice), converted to 8 kHz mu-law
+  (`telnyx/pipeline.js`, `telnyx/speech.js`, `telnyx/audio.js`). The media
+  WebSocket needs a secret token and a Telnyx Ed25519 signature before any
+  audio flows. Barge-in clears Alfred's audio and tells the next turn. A slow
+  turn speaks a filler line. Each reply logs its latency from the end of
+  speech to the first audio sent. The estimated cost is about $0.02-0.03 a
+  minute, against about $0.055 for v1.
+  `scripts/telnyx-voice-pipeline-setup.mjs` creates the application. It does
+  not move the phone number. `docs/phone-design.md` gives the manual switch
+  in both directions (#98).
 - **A slow call turn says "One sec, still on it."** If Alfred has no reply
   after 7 seconds, the caller hears a short filler line, then one every 20
   seconds. A quick reply gets none. This replaces the background whoosh, which
