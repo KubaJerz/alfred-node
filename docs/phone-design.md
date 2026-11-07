@@ -399,6 +399,64 @@ So, without Alfred's own time, a reply starts about 0.65 s (silence) + 0.2-0.5 s
 (Parakeet) + 0.45-0.75 s (Kokoro) + about 0.1 s (frames, network) after the
 caller stops: about 1.4-2 s. A slow turn speaks a filler line at 1 s.
 
+### Streaming replies
+
+`claude -p --output-format json` gives the reply only when Alfred is done.
+Through Alfred's real setup, the first text comes 1.6-2.8 s after the start,
+and the whole reply 3.0-4.1 s after it. So the pipeline speaks the reply while
+Alfred writes it. This starts a reply about 1-2 s sooner, and more for a long
+reply. `VOICE_STREAM_REPLY` is on by default. It works for both engines.
+
+```
+claude -p --output-format stream-json --include-partial-messages --verbose
+   │ one JSON line per event (claude-stream.js reads them)
+   ▼ text deltas ─► onCallTurn onText ─► pipeline: makeReplyChunker
+   units (one sentence each) ─► speakable ─► one TTS request per unit
+   all units are parts of ONE reply utterance (marks, barge-in, heard)
+   "result" line ─► handleTurn as before: state.json, log, mirror post
+```
+
+1. Only a pipeline call turn uses stream-json. Discord, SMS, v1 calls and
+   the strength follow-ups keep `--output-format json`. The last line of
+   stream-json is the same "result" object as json mode, so the timeout,
+   login check, abort and session id do not change.
+2. The text deltas include text before a tool call ("Let me check.") and the
+   text of each assistant message. The result has only the last text. The
+   caller hears all of it. The parser adds a newline at the end of each text
+   block. So the text before a tool call is a complete unit at once, and does
+   not wait for the tool. In a real test run, "Let me check the time for
+   you." was ready at 1.8 s, and not at 3.9 s after the tool.
+3. The chunker ends a unit at a newline, or at `.` `!` `?` with a space after
+   it. A unit under 12 characters, an abbreviation ("Dr.", "e.g.") or an
+   initial does not end a unit. "3.5" has no space after the point, so it does
+   not split. The sidecar splits long units at clauses, as before.
+4. Tokens never reach speech, also when they come in two deltas. Text from
+   `<` is held while it can be a tag, and a complete tag (`<no_reply>`) is
+   dropped. Text from `{` is held while it can be `{img:…}`, `{pdf:…}`,
+   `{file:…}` or `{bg:…}`, and the complete token is dropped. Other text is
+   released ("3 < 5"). So a `<no_reply>` turn speaks nothing.
+5. The first unit stops the filler lines and opens the reply utterance. The
+   next unit is fetched while the current one plays. If no text comes for
+   `VOICE_FILLER_REPEAT_MS` after the audio ends (a tool runs), a filler line
+   plays in the same utterance. The echo guard hears "not playing" in the wait.
+6. A barge-in clears all the audio of the reply, stops the TTS requests, and
+   ignores later text. The reply counts as not heard. A turn cancelled in the
+   drop window stops its speech and is not a missed reply. A newer turn
+   stops the speech of an older one.
+7. At the end, the rest of the stream is spoken. If the turn failed after
+   some text (timeout, login), the held rest is dropped, and the error text
+   is spoken. A default line ("On it — pulling your workout") is also spoken
+   whole. The mirror channel gets the whole reply, as before.
+8. The 1200-character cap counts the streamed units. At the cap, the reply
+   ends with "The rest is in Discord."
+
+Logs: `First streamed text N ms after the transcript (M ms after the end of
+speech)`, then the usual `Latency` line with "— streamed" at the end. In it,
+"Alfred" is the time to the first unit, not to the whole reply. Compare it
+with the line of a turn with `VOICE_STREAM_REPLY=0`.
+
+To turn it off, set `VOICE_STREAM_REPLY=0` and restart the bot.
+
 ### Cost
 
 Per call minute, from telnyx.com/pricing (read 2026-11-06): Voice API inbound
@@ -438,5 +496,8 @@ and v1 is about $0.055.
   about half under load. Two calls at the same time share one sidecar: one
   Parakeet and one Kokoro job run at a time.
 - Memory: the sidecar holds 1.3-1.9 GB for as long as the bot runs.
+- Streaming replies: does the caller hear a gap between units, and does the
+  text before a tool call sound natural? Does Alfred write text that the
+  chunker splits badly?
 - Kokoro voice: `bm_george` is the default. `bm_lewis` is the other candidate.
   Listen to both on a call.
