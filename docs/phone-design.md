@@ -1,7 +1,7 @@
 # Phone: SMS and voice
 
-Design notes for Alfred's phone number. SMS shipped in #82. Voice is the next
-step and is not built.
+Design notes for Alfred's phone number. SMS shipped in #82. Voice calls (#98)
+use a Telnyx AI Assistant with bot.js as its model.
 
 ## Decisions
 
@@ -35,43 +35,61 @@ number in `SMS_ALLOWED_NUMBERS`. Other channels stay Discord only.
 
 Not built: MMS pictures in, and Alfred texting first (reminders).
 
-## Voice (next)
+## Voice (#98)
 
-### Transport: SIP to OpenAI Realtime
+The plan changed from SIP to OpenAI Realtime. Telnyx sells the full voice loop
+as an AI Assistant, and the assistant can use any OpenAI-compatible endpoint as
+its model (`external_llm`). So Telnyx does the audio, and Alfred is the model.
+
+### Flow
 
 ```
-phone ──► Telnyx number ──SIP──► OpenAI Realtime (audio in and out)
-                                   │ webhook: realtime.call.incoming
-                                   ▼
-                            bot.js (through the tunnel)
-                            ├─ accept the call: instructions, voice, tools
-                            └─ side WebSocket: tool calls, transcript events
+phone ──► Telnyx number ──► Telnyx AI Assistant
+                              speech-to-text (Deepgram Flux)
+                              turn detection, interruption
+                              text-to-speech
+                                 │ POST /telnyx/voice/v1/chat/completions
+                                 │ Authorization: Bearer <VOICE_LLM_TOKEN>
+                                 ▼  (Tailscale Funnel → 127.0.0.1:8788)
+                              telnyx/voice.js → enqueueTurn → claude -p
 ```
 
-The audio never passes through this box. OpenAI speaks back on the SIP call.
-The first task is to prove that a Telnyx SIP connection to
-`sip:<project>@sip.api.openai.com;transport=tls` works.
+1. Telnyx sends the whole conversation on each caller turn.
+2. `voice.js` takes the caller messages after the last assistant message. It
+   removes the ones that it already sent to Alfred.
+3. bot.js runs them as one turn with a `[via phone call]` tag.
+4. `voice.js` streams the reply as server-sent events. It sends an SSE comment
+   every 5 seconds while Alfred works, so the stream stays open.
 
-Fallback, if SIP fails: Telnyx Media Streaming. Telnyx opens a WebSocket to
-`bot.js` with 20 ms PCMU frames in both directions. `bot.js` relays them to
-the OpenAI Realtime WebSocket, which also accepts PCMU. This gives full control
-(recording, local models) but more code and more latency.
+### Security
 
-### Context
+- The model route does not get the Ed25519 signature. It checks a bearer
+  token in constant time. Telnyx stores the token as an integration secret.
+- `forward_metadata` adds the caller number. The route refuses a number that
+  is not in `VOICE_ALLOWED_NUMBERS`.
+- Caller ID can be spoofed. Before calls can send, buy, or delete, add a
+  spoken PIN.
 
-1. **At call start — instructions.** Build them like `loadContext()`: a short
-   voice version of `SOUL.md`, `USER.md`, `MEMORY.md`, today's daily note, and
-   the last ~20 entries of `messages.jsonl`.
-2. **During the call — one tool, `ask_alfred(request)`.** It runs a normal
-   `claude -p` turn through `enqueueTurn`, in the shared session. The voice
-   model says "one moment" while it waits, then speaks the result. All skills,
-   brokers, and guards stay in one place.
-3. **After the call — write back.** Log the transcript to `messages.jsonl` and
-   the daily note. Post a short summary in the mirror channel.
+### Interruption
+
+Telnyx stops its speech when the caller talks over it. On our side, Telnyx may
+close the stream, and a new request may arrive while a turn runs. An Alfred turn
+is never killed. A reply that the caller did not hear goes to the mirror, and
+the next turn tells Alfred.
+
+### Test plan
+
+See #98. In order:
+
+1. Option 3, plain: every reply comes from Alfred. Measure latency. Find how
+   long Telnyx waits for the first token.
+2. `delegation_settings` (beta): a fast front model talks, and Alfred is the
+   backend.
+3. The Telnyx model with an `ask_alfred` tool.
+4. Speech-to-speech models (OpenAI realtime, Gemini Live, Ultravox, Hume).
 
 ### Open points
 
-- Cost: the Realtime API costs much more per minute than Telnyx. Compare
-  `gpt-realtime` and `gpt-realtime-mini` on the current price page.
-- Security: caller ID can be spoofed. Before `ask_alfred` can act, require a
-  spoken PIN, or allow only read actions on a call.
+- Alfred turns take seconds to tens of seconds. Silence that long may make
+  Telnyx time out or make the call feel dead. Test 1 measures this.
+- Telnyx's exact behavior on an interruption is not known. The route logs it.
