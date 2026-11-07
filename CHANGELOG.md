@@ -4,6 +4,27 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [SemVer](https://semver.org/).
 
 ## [Unreleased]
+### Added
+- **The call pipeline can run its speech on this machine (v3).** With
+  `VOICE_PIPELINE_ENGINE=local` (the default of the pipeline), a Python
+  sidecar (`voice/local_speech.py`) does the speech steps with no paid
+  service: Silero voice detection (energy detection when Silero is not in the
+  cache) and a silence timer for the end of a turn, Parakeet for
+  speech-to-text, and Kokoro (British voice `bm_george`) for text-to-speech.
+  bot.js starts the sidecar once and keeps the models in memory. It starts
+  the sidecar again if it stops. Only the phone line and the media stream stay
+  paid, about $0.009 a minute, and audio does not leave the machine.
+  `VOICE_PIPELINE_ENGINE=telnyx` keeps v2. Each reply logs the latency from
+  the end of speech to the transcript, to Alfred's reply, and to the first
+  audio sent. The `VOICE_LOCAL_*` settings are in `env.example`.
+### Fixed
+- **A pipeline call turn is cancelled when the caller keeps talking.** The
+  pipeline ends a turn after a short silence. If the caller starts to talk
+  again within 1.5 s of that turn going to Alfred, the turn was only the first
+  part of the sentence. Now that turn is cancelled (its `claude` process stops,
+  or it leaves the queue), and its words go in front of the next turn. This is
+  the v1 fix for early guesses, in the v2 and v3 pipeline. A later start of
+  speech is a new question, and the running turn finishes as before.
 ### Fixed
 - **A call turn that Telnyx drops is cancelled.** Telnyx guesses the end of a
   turn early. When the caller keeps talking, it drops that request within
