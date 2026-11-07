@@ -13,3 +13,6 @@ agent/var/
 
 # Editor scratch
 *.swp
+
+# Python bytecode (voice/ sidecar, self-test)
+__pycache__/

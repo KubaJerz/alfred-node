@@ -4,6 +4,27 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [SemVer](https://semver.org/).
 
 ## [Unreleased]
+### Added
+- **The call pipeline can run its speech on this machine (v3).** With
+  `VOICE_PIPELINE_ENGINE=local` (the default of the pipeline), a Python
+  sidecar (`voice/local_speech.py`) does the speech steps with no paid
+  service: Silero voice detection (energy detection when Silero is not in the
+  cache) and a silence timer for the end of a turn, Parakeet for
+  speech-to-text, and Kokoro (British voice `bm_george`) for text-to-speech.
+  bot.js starts the sidecar once and keeps the models in memory. It starts
+  the sidecar again if it stops. Only the phone line and the media stream stay
+  paid, about $0.009 a minute, and audio does not leave the machine.
+  `VOICE_PIPELINE_ENGINE=telnyx` keeps v2. Each reply logs the latency from
+  the end of speech to the transcript, to Alfred's reply, and to the first
+  audio sent. The `VOICE_LOCAL_*` settings are in `env.example`.
+### Fixed
+- **A pipeline call turn is cancelled when the caller keeps talking.** The
+  pipeline ends a turn after a short silence. If the caller starts to talk
+  again within 1.5 s of that turn going to Alfred, the turn was only the first
+  part of the sentence. Now that turn is cancelled (its `claude` process stops,
+  or it leaves the queue), and its words go in front of the next turn. This is
+  the v1 fix for early guesses, in the v2 and v3 pipeline. A later start of
+  speech is a new question, and the running turn finishes as before.
 ### Fixed
 - **A call turn that Telnyx drops is cancelled.** Telnyx guesses the end of a
   turn early. When the caller keeps talking, it drops that request within
@@ -25,6 +46,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
   reply. Both were fixed by hand on the live assistant. A second run of the
   script now gives the same result (#98).
 ### Added
+- **Calls can use our own audio pipeline (v2, opt-in).** v1 stays the default.
+  With `VOICE_PIPELINE_TOKEN` and `VOICE_PUBLIC_URL` set, a Telnyx Call Control
+  application posts call events to a new signed route,
+  `/telnyx/voice/events`. bot.js answers an allowed caller with a media
+  stream and does the audio itself: Telnyx speech-to-text (Deepgram Flux) for
+  the turns, the same `onCallTurn` as v1 for the reply, and Telnyx
+  text-to-speech (the same Ultra voice), converted to 8 kHz mu-law
+  (`telnyx/pipeline.js`, `telnyx/speech.js`, `telnyx/audio.js`). The media
+  WebSocket needs a secret token and a Telnyx Ed25519 signature before any
+  audio flows. Barge-in clears Alfred's audio and tells the next turn. A slow
+  turn speaks a filler line with the same timing as v1 (1 second, then every
+  5), and `VOICE_FILLER_MS` and `VOICE_FILLER_REPEAT_MS` apply to it too. An
+  answered call whose stream does not start in 15 seconds is hung up. Each
+  reply logs its latency from the end of speech to the first audio sent. The estimated cost is about $0.02-0.03 a
+  minute, against about $0.055 for v1.
+  `scripts/telnyx-voice-pipeline-setup.mjs` creates the application. It does
+  not move the phone number. `docs/phone-design.md` gives the manual switch
+  in both directions (#98).
 - **A slow call turn says "One sec, still on it."** If Alfred has no reply
   after 7 seconds, the caller hears a short filler line, then one every 20
   seconds. A quick reply gets none. This replaces the background whoosh, which

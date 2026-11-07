@@ -93,3 +93,350 @@ See #98. In order:
 - Alfred turns take seconds to tens of seconds. Silence that long may make
   Telnyx time out or make the call feel dead. Test 1 measures this.
 - Telnyx's exact behavior on an interruption is not known. The route logs it.
+
+## v2 pipeline (opt-in)
+
+v1 costs about $0.055 a minute. $0.05 of that is the AI Assistant voice
+engine. v2 removes the engine. Telnyx Call Control streams the raw call audio
+to bot.js, and bot.js calls the Telnyx speech services itself. v2 does not
+replace v1. The phone number setting in the Telnyx portal decides which path
+answers a call.
+
+### Flow
+
+```
+phone ──► Telnyx number ──► Call Control app "Alfred (phone pipeline)"
+             │ signed webhook: call.initiated
+             ▼  (Tailscale Funnel → 127.0.0.1:8788/telnyx/voice/events)
+          telnyx/pipeline.js ── answer + media stream (PCMU 8 kHz, rtp) ──► Telnyx
+             ▲ wss://<public>/telnyx/voice/media?token=… (Telnyx is the client)
+             │
+   caller audio ─► Telnyx STT WebSocket (Deepgram Flux, mu-law 8 kHz)
+   Flux EndOfTurn ─► onCallTurn (same as v1) ─► enqueueTurn ─► claude -p
+   reply ─► Telnyx TTS REST, one request per sentence (Ultra voice, PCM 24 kHz)
+         ─► telnyx/audio.js: low-pass, 24 kHz → 8 kHz, mu-law
+         ─► media frames, 100 ms each, at real-time pace ─► caller
+```
+
+1. `call.initiated` (incoming, parked) from a number in
+   `VOICE_ALLOWED_NUMBERS`, to `TELNYX_PHONE_NUMBER`: the route answers with a
+   bidirectional media stream. Any other caller gets a reject (`CALL_REJECTED`).
+   A third call at the same time gets `USER_BUSY`.
+2. Telnyx opens the media WebSocket. The "start" frame names the call. The
+   session opens the STT WebSocket and speaks "Hey, it's Alfred."
+3. Caller audio goes to STT with no conversion. Frames that come out of order
+   are put back in order by their chunk number. If the chunk number starts
+   again or jumps back, the order starts again from that frame.
+4. Flux `EndOfTurn` starts a turn. The turn runs `onCallTurn`, the same
+   function as v1, with the same `[via phone call]` tag and mirror channel.
+5. The reply loses its markdown (`speakable`), and long replies stop at 1200
+   characters with "The rest is in Discord." Each sentence is one TTS request.
+   The next request starts while the current sentence streams.
+6. After each reply the session sends a "mark". When Telnyx sends the mark
+   back, the caller heard the whole reply. If the mark does not come back by
+   the estimated end of the audio plus 1.5 seconds, the reply also counts as
+   heard, and the log says that the echo was missing.
+7. Each reply logs `Latency N ms: end of speech → first audio sent`, with the
+   turn time and the speech time.
+
+Barge-in: Flux `StartOfTurn` while Alfred speaks sends Telnyx the "clear"
+event, aborts the TTS requests, and marks the reply as not heard. The next turn
+tells Alfred, as in v1. A new caller turn while an old turn still runs drops the
+old reply, and the next turn tells Alfred. A slow turn speaks a filler line
+with the same timing and lines as v1 (`FILLER_MS`, `FILLER_REPEAT_MS` and
+`FILLERS` in `telnyx/voice.js`; now 1 second, then every 5).
+`VOICE_FILLER_MS` and `VOICE_FILLER_REPEAT_MS` change both paths. The greeting and the filler audio are
+kept in memory after the first call, so they cost no TTS characters again.
+
+### Security
+
+- `/telnyx/voice/events` is a signed route. It gets the same Ed25519 check,
+  replay window, and event-id de-duplication as SMS.
+- The media WebSocket upgrade needs two things before the 101:
+  - the `VOICE_PIPELINE_TOKEN` in the URL query, compared in constant time
+  - a valid `telnyx-signature-ed25519` over `"<telnyx-timestamp>|<stream_url>"`
+    with the account key. The server builds `stream_url` from
+    `VOICE_PUBLIC_URL`, not from the Host header.
+- A socket also needs an answered call that has no socket yet. Its "start"
+  frame must name that call. One call has one session. A socket that sends no
+  "start" in 10 seconds is closed.
+- Frames over 64 KB close the socket. A frame that is not a JSON object is
+  ignored, and an error in one frame is logged; it cannot stop the bot. A TTS reply over 8 MB stops.
+- A lost media socket, a lost STT socket (after 3 tries in a row with no
+  speech event between them), a `streaming.failed` event, or an answered
+  call whose stream does not start in 15 seconds hangs up the call. Hangup ends the session and
+  closes every socket and timer.
+- Caller ID can be spoofed. The same caveat as v1 applies.
+
+### Cost estimate
+
+Per call minute, from telnyx.com/pricing (read 2026-11-06):
+
+| Item | Rate |
+|---|---|
+| Voice API (Call Control) inbound | $0.002/min |
+| Media streaming over WebSocket | $0.0025-0.0035/min (the page lists both) |
+| STT, Deepgram Flux over WebSocket | $0.0074/min |
+| TTS, Telnyx Ultra | $0.000032/char |
+| SIP inbound (same for v1 and v2) | from $0.0032/min |
+
+If Alfred talks 40% of a minute at about 15 characters a second, TTS is about
+360 characters, or $0.0115. The total is about $0.024 a minute plus SIP, against
+v1's $0.05 engine fee alone. The TTS part grows with how much Alfred talks, not
+with the call length. A cheaper voice would bring it below $0.02.
+
+### Switch the number between v1 and v2
+
+The setup script creates the Call Control application only. It never moves
+the number. Both paths can be on in bot.js at the same time.
+
+1. Set `VOICE_PIPELINE_TOKEN` and `VOICE_PUBLIC_URL` in `.env`.
+2. Run `node scripts/telnyx-voice-pipeline-setup.mjs https://<public> --dry-run`,
+   then again without `--dry-run`.
+3. Restart the bot. The log shows "Call pipeline v2 (Telnyx speech) is on" (with
+   `VOICE_PIPELINE_ENGINE=telnyx`).
+4. To use v2: portal > Numbers > the number > Voice settings > Connection or
+   App = "Alfred (phone pipeline)".
+5. To go back to v1: portal > AI Assistants > "Alfred (phone)" > Calling >
+   assign the number again.
+
+### Open points (need a live call)
+
+- Does Telnyx sign the media WebSocket upgrade on every connection? If the log
+  shows "no telnyx-signature-ed25519 header", set
+  `VOICE_PIPELINE_SIGNED_MEDIA=0`. The token still guards the socket.
+- Does Tailscale Funnel pass the WebSocket upgrade and its headers unchanged?
+- Does Ultra REST give raw PCM for `response_format: "pcm"`, at what rate, and
+  how fast is the first byte? The code reads a WAV header if one comes, and
+  refuses MP3. If the voice is too slow or too deep, the rate is wrong. Change
+  `VOICE_PIPELINE_TTS_RATE`.
+- In rtp mode, does Telnyx want raw PCMU bytes (what we send) or full RTP
+  packets? Do 100 ms frames at real-time pace avoid error 100005?
+- Does the phone's own echo of Alfred's voice make Flux send `StartOfTurn`
+  (a false barge-in)?
+- Does the "chunk" number of inbound media count up by one per frame for the
+  whole stream? The log shows out-of-order, late, and restart counts at the
+  end of each call.
+- In rtp mode, does Telnyx echo each mark when the audio before it has played?
+  If the log shows "No mark echo", it does not, and "heard" comes from the
+  time estimate only.
+- If the stream cannot connect, does Telnyx send `streaming.failed`? If not,
+  the call hangs up 15 seconds after the answer.
+- The real latency of the whole chain. The log line gives it per reply.
+
+## v3 local speech (opt-in, the pipeline default)
+
+v3 is the v2 pipeline with the two paid speech engines replaced by models on
+this machine. The call plumbing is the same code: Call Control, the media
+WebSocket, the greeting, fillers, barge-in, marks, and `onCallTurn`. Only the
+phone line and the media stream stay paid. Caller audio does not leave the
+machine. `VOICE_PIPELINE_ENGINE` selects the engine: `local` (v3, the default)
+or `telnyx` (v2).
+
+### Flow
+
+```
+phone ──► Telnyx number ──► Call Control app "Alfred (phone pipeline)"
+             ▼  (same answer, media socket, and checks as v2)
+          telnyx/pipeline.js ── PCMU 8 kHz frames ──► voice/local-speech.js
+                                                        │ JSON lines, base64 audio
+                                                        ▼ (stdin / stdout pipes)
+                                   voice/local_speech.py (one process, models in memory)
+   caller audio ─► mu-law decode ─► VAD (Silero, 32 ms windows) ─► turn detector
+   speech ≥ 200 ms ─► "speech_start" ─► StartOfTurn (barge-in, drop window)
+   silence ≥ 650 ms ─► "eot" ─► Parakeet TDT 0.6B int8 on the utterance ─► "turn"
+   "turn" ─► EndOfTurn ─► onCallTurn (same as v1/v2) ─► reply
+   reply ─► one request per sentence ─► Kokoro (bm_george, en-gb), clause by clause
+         ─► PCM16 24 kHz ─► telnyx/audio.js: low-pass, 8 kHz, mu-law ─► caller
+```
+
+1. bot.js starts the sidecar once, when the pipeline is on and the engine is
+   `local`. It loads Parakeet, Kokoro and the VAD, and runs each model once
+   (warm-up). The log shows `Local speech ready ... VAD silero`. Load takes
+   about 3.5 s.
+2. Each call opens one stream in the sidecar. Each media frame goes to it as it
+   comes. A stream that opens while the sidecar loads waits, and keeps up to
+   5 s of audio.
+3. The turn detector has three states: idle, starting, speaking. 200 ms of
+   speech (`VOICE_LOCAL_MIN_SPEECH_MS`) is a start. A gap over 120 ms before
+   that is a noise blip, and the state goes back to idle. In "speaking", 650 ms
+   of silence (`VOICE_LOCAL_EOT_MS`) ends the turn. A turn over 30 s ends
+   by force. The utterance keeps 300 ms of audio from before the start and
+   200 ms of the end silence.
+4. Parakeet runs on the 8 kHz utterance. onnx_asr resamples it to 16 kHz.
+5. The client gives the pipeline the same events as Flux: `StartOfTurn`, and
+   `EndOfTurn` with the transcript, the end-of-speech time, and the STT time.
+6. Text-to-speech: the pipeline sends one sentence per request, and asks for
+   the next sentence while the current one plays, as in v2. The sidecar splits
+   a long sentence at commas, semicolons, colons and dashes. The first clause
+   is at least 20 characters. Later clauses are joined up to 120 characters,
+   with 120 ms of silence between clauses. Kokoro gives no audio until a piece
+   is done, so this brings the first audio of a long sentence from 2.6 s to
+   0.7 s. An abort (barge-in) cancels the request in the sidecar.
+7. The greeting and filler audio go in the same memory cache as in v2.
+
+### Why pipes and JSON lines
+
+The sidecar talks to bot.js over its stdin and stdout, one JSON object per
+line, with audio as base64. A socket is not necessary:
+
+- There is no port to guard. No other process can connect.
+- The sidecar stops when its stdin closes, so it cannot outlive bot.js.
+- The data rate is low: 8 kB/s of caller audio per call, plus 48 kB/s of TTS
+  audio for a short time. Base64 adds a third.
+- The format is text. A test can drive the client with a fake sidecar.
+
+The sidecar writes its log lines to stderr. bot.js logs them with a
+`sidecar:` prefix.
+
+Requests: `open`, `audio`, `playing`, `close` (per call), `tts`, `cancel`,
+`ping`. Events: `ready`, `speech_start`, `eot`, `turn`, `tts_chunk`,
+`tts_done`, `tts_error`, `pong`, `error`. `voice/local_speech.py` has the full
+list in its header.
+
+### Failure handling
+
+- Any error in the client is logged. It never stops the bot.
+- If the sidecar stops, each open call stream gets a close. The pipeline tries
+  again (3 times, 1 s apart, as for v2). Each open TTS request fails. The client
+  starts the sidecar again after 1 s, then 2, 4, up to 60 s. A run of 60 s
+  resets the delay. A stream that opens while the sidecar loads waits for it.
+- If the sidecar cannot load its models, it exits with code 2, and the client
+  tries again with the delay. A call in that time ends with "speech-to-text
+  lost".
+- An event line over 4 MB is dropped. A line that is not JSON is logged.
+- One TTS sentence has 30 s. Then the request fails.
+
+### Voice activity detection
+
+`VOICE_LOCAL_VAD=auto` (the default) uses Silero if
+`onnx_asr.load_vad("silero")` finds the model in the local cache, with
+downloads off. Otherwise it uses the energy detector. The ready log line names
+the VAD in use.
+
+- **Silero** (active on this machine): the ONNX model streams at 8 kHz, in
+  256-sample (32 ms) windows with its recurrent state. Speech starts at a
+  score over 0.5 and stops under 0.35. One window takes 0.12 ms.
+- **Energy** (the fallback): the RMS level of each 20 ms frame against a noise
+  floor. The floor falls fast and rises slowly, only when there is no speech.
+  Speech starts 12 dB over the floor and stops under 6 dB over it. A level
+  under -50 dBFS is never speech.
+
+To get Silero on another machine, download it once (2.3 MB):
+
+```sh
+source ~/.virenv/base/bin/activate
+HF_HUB_OFFLINE=0 python -c "import onnx_asr; onnx_asr.load_vad('silero')"
+```
+
+### Echo
+
+Telnyx sends only the caller's track (`stream_track: inbound_track`), and the
+phone cancels most of the echo of Alfred's voice. For what is left, two guards
+apply while Alfred plays:
+
+1. For 500 ms after his audio starts (`VOICE_LOCAL_ECHO_GUARD_MS`), no speech
+   counts. The audio reaches the phone some hundred ms after we send it.
+2. Until his audio ends, a start needs more: a Silero score over 0.8, or 10 dB
+   more energy.
+
+A real barge-in is louder than an echo, so it still works after the guard.
+The pipeline tells the sidecar "playing" when the first audio frame of an
+utterance goes out, and "not playing" when no utterance is active.
+
+### Drop window (the v1 fix from #103)
+
+The silence timer can end a turn while the caller only paused. If the caller
+starts to talk again within 1.5 s (`DROP_WINDOW_MS`) after the turn went to
+Alfred, the pipeline aborts that turn with the `signal` of `onCallTurn`. The
+turn leaves the queue, or its `claude` process stops. Its words go in front of
+the next turn, also when the next speech has no words (a cough). The window is
+measured to the start of the new speech: the end of the new turn comes at
+least 650 ms later, so a window to the next end of turn would almost never
+match. A start of speech after 1.5 s is a new question. The running turn then
+finishes, and its reply is not spoken (as in v2). This works for both engines.
+
+### Latency (measured)
+
+Each reply logs one line:
+
+```
+📞 Latency N ms: end of speech → first audio sent (transcript A ms, Alfred B ms, speech C ms)
+```
+
+- transcript: from the end of speech to the transcript. This is the
+  end-of-turn silence (650 ms) plus Parakeet.
+- Alfred: the `onCallTurn` time.
+- speech: from the reply to the first audio frame sent. This is Kokoro on the
+  first clause.
+
+The sidecar also logs `Parakeet: N ms of audio in M ms` and
+`Kokoro: N chars, M ms of audio in K ms (RTF, first chunk)`.
+
+Measured on this machine (i7-8700, 6 cores, no GPU), 2026-11-06, with
+`python voice/local_speech_selftest.py --runs 5`. Phone audio is Kokoro speech
+put through the 8 kHz mu-law path. Medians:
+
+| Step | Time |
+|---|---|
+| Sidecar start: Parakeet load / Kokoro load / Silero / warm-up | 2.1 s / 0.7 s / 0.3 s / 0.5 s (3.4-3.6 s in all) |
+| Parakeet, 2 s of audio | 229 ms (RTF 0.11) |
+| Parakeet, 5 s of audio | 359 ms (RTF 0.07) |
+| Parakeet, 10 s of audio | 749 ms (RTF 0.07) |
+| Kokoro, short sentence (18 chars, 1.4 s audio): first chunk | 451 ms (RTF 0.33) |
+| Kokoro, long sentence (169 chars, 10.9 s audio): first chunk | 743 ms, all 3.3 s (RTF 0.30). One piece: 3.6 s |
+| Round trip, Node client and sidecar: end of speech → transcript (6.5 s utterance) | 1108 ms (672 ms silence + 436 ms Parakeet) |
+| Sidecar memory (RSS) | 1.3 GB after load, 1.8 GB after the benchmark |
+
+Round trip: Kokoro said "Please remind me to call the dentist on Friday at
+three." Parakeet heard "Please remind me to call the dentist on Friday at 3."
+
+With `--threads 4`, the numbers stay about the same (10 s: 617 ms, long
+sentence first chunk 806 ms). With 4 other cores kept busy, the times grow by
+about half: Parakeet 10 s 951 ms, Kokoro short first chunk 718 ms.
+
+So, without Alfred's own time, a reply starts about 0.65 s (silence) + 0.2-0.5 s
+(Parakeet) + 0.45-0.75 s (Kokoro) + about 0.1 s (frames, network) after the
+caller stops: about 1.4-2 s. A slow turn speaks a filler line at 1 s.
+
+### Cost
+
+Per call minute, from telnyx.com/pricing (read 2026-11-06): Voice API inbound
+$0.002, media streaming $0.0025-0.0035, SIP inbound from $0.0032. That is
+about $0.008-0.009 a minute, with no speech fees. v2 is about $0.024 a minute,
+and v1 is about $0.055.
+
+### Enable v3
+
+1. Make sure that the models are in the cache. The self-test shows it:
+   `source ~/.virenv/base/bin/activate && python voice/local_speech_selftest.py --runs 1`.
+2. In `.env`, set the v2 values (`VOICE_PIPELINE_TOKEN`, `VOICE_PUBLIC_URL`,
+   and the Telnyx keys), and `VOICE_PIPELINE_ENGINE=local` (or leave it unset).
+3. Run the setup script once, if the Call Control application does not exist:
+   `node scripts/telnyx-voice-pipeline-setup.mjs https://<public> --dry-run`,
+   then again without `--dry-run`.
+4. Restart the bot. The log shows `Local speech ready ... VAD silero` and
+   `Call pipeline v3 (local speech) is on`.
+5. Portal > Numbers > the number > Voice settings > Connection or App =
+   "Alfred (phone pipeline)".
+6. To go back to v1: portal > AI Assistants > "Alfred (phone)" > Calling >
+   assign the number again. To use v2 on the same number, set
+   `VOICE_PIPELINE_ENGINE=telnyx` and restart the bot.
+
+### Open points (need a live call)
+
+- Turn quality against Flux. A fixed 650 ms silence cuts a caller who pauses
+  to think, and waits too long after a short "yes". Flux uses the words to
+  decide. The drop window covers the first case in part. Tune
+  `VOICE_LOCAL_EOT_MS` from real calls.
+- Parakeet on phone audio. The tests use clean Kokoro speech through the
+  mu-law path. Real phone audio has noise and a narrow band. Parakeet writes
+  numbers as digits ("7.15"). Alfred reads the text, so that is no problem.
+- Echo: do the guards stop false barge-ins on a speakerphone, and do they let
+  a real barge-in through?
+- CPU: Parakeet, Kokoro and a `claude` turn share 6 cores. The timings grow by
+  about half under load. Two calls at the same time share one sidecar: one
+  Parakeet and one Kokoro job run at a time.
+- Memory: the sidecar holds 1.3-1.9 GB for as long as the bot runs.
+- Kokoro voice: `bm_george` is the default. `bm_lewis` is the other candidate.
+  Listen to both on a call.
