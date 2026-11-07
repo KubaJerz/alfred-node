@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [SemVer](https://semver.org/).
 
 ## [Unreleased]
+### Fixed
+- **The voice setup script sets recording off and no background sound.**
+  Telnyx records calls by default, and a background loop played under every
+  reply. Both were fixed by hand on the live assistant. A second run of the
+  script now gives the same result (#98).
 ### Added
 - **A slow call turn says "One sec, still on it."** If Alfred has no reply
   after 7 seconds, the caller hears a short filler line, then one every 20
