@@ -29,9 +29,13 @@ export const KEEPALIVE_MS = 5000;
 // A slow turn gets a short spoken line, so the caller knows the call is alive.
 // The first comes after FILLER_MS, then one every FILLER_REPEAT_MS. A quick
 // reply gets none.
-export const FILLER_MS = 7000;
-export const FILLER_REPEAT_MS = 20000;
-export const FILLERS = ["One sec, still on it.", "Still working on it.", "Bear with me, almost there."];
+//
+// The first line must come early. At 7 s it arrived only 1-2 s before most
+// replies, and Telnyx's own speech delay made the two sound like one. Short
+// lines keep each one under a second of speech.
+export const FILLER_MS = 2000;
+export const FILLER_REPEAT_MS = 5000;
+export const FILLERS = ["On it, one sec.", "Still on it.", "Working on it.", "Almost there.", "Hang on."];
 const STATE_TTL_MS = 2 * 60 * 1000; // forget a caller's turn state after this idle time
 
 // Compare a request's Authorization header with the token, in constant time.
@@ -234,8 +238,10 @@ export function makeVoiceLlmRoutes({
     let fillerTimer;
     const sayFiller = () => {
       if (res.writableEnded || res.destroyed) return;
-      res.write(sseChunk(id, { content: `${FILLERS[fillers % FILLERS.length]} ` }));
+      const line = FILLERS[fillers % FILLERS.length];
+      res.write(sseChunk(id, { content: `${line} ` }));
       fillers++;
+      log(`📞 Filler ${fillers} at ${Date.now() - t0} ms: "${line}"`);
       fillerTimer = setTimeout(sayFiller, fillerRepeatMs);
     };
     if (fillerMs > 0) fillerTimer = setTimeout(sayFiller, fillerMs);

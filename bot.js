@@ -60,6 +60,10 @@ const VOICE_LLM_TOKEN = process.env.VOICE_LLM_TOKEN || "";
 const VOICE_ALLOWED_NUMBERS = parseNumberList(process.env.VOICE_ALLOWED_NUMBERS || process.env.SMS_ALLOWED_NUMBERS);
 const VOICE_MIRROR_CHANNEL = process.env.VOICE_MIRROR_CHANNEL || SMS_MIRROR_CHANNEL;
 const voiceConfigured = !!(VOICE_LLM_TOKEN && VOICE_ALLOWED_NUMBERS.length);
+// When a slow call turn speaks its first filler line, and how often it repeats.
+// Unset keeps the defaults in telnyx/voice.js (2 s, then every 5 s).
+const VOICE_FILLER_MS = process.env.VOICE_FILLER_MS ? parseInt(process.env.VOICE_FILLER_MS) : undefined;
+const VOICE_FILLER_REPEAT_MS = process.env.VOICE_FILLER_REPEAT_MS ? parseInt(process.env.VOICE_FILLER_REPEAT_MS) : undefined;
 // Alfred reads this tag at the top of a phone-call turn (see agent/SOUL.md).
 const CALL_TAG = "[via phone call]";
 const VIA_TAGS = { sms: SMS_TAG, call: CALL_TAG };
@@ -1360,6 +1364,8 @@ if (smsConfigured || voiceConfigured) {
       allowFrom: VOICE_ALLOWED_NUMBERS,
       normalize: normalizeNumber,
       onTurn: onCallTurn,
+      fillerMs: VOICE_FILLER_MS,
+      fillerRepeatMs: VOICE_FILLER_REPEAT_MS,
       backgroundAudio: path.join(REPO_DIR, "telnyx", "assets", "whoosh.mp3"),
     }) : {},
   })
