@@ -56,15 +56,15 @@ const assistant = {
   },
   voice_settings: {
     voice: VOICE,
-    // A quiet whoosh every 4.5 s, served by bot.js (telnyx/assets/whoosh.mp3).
-    // It plays for the whole call, so the line never sounds dead while Alfred
-    // works. The MP3 sets the volume: media_url has no volume field.
-    background_audio: { type: "media_url", value: `${publicUrl}/telnyx/voice/v1/background.mp3` },
+    // No background sound. A background loop plays for the whole call, also
+    // under quick replies. A slow turn gets a spoken filler from voice.js.
+    background_audio: { type: "predefined_media", value: "silence" },
   },
   // Flux decides the end of a turn from the speech, not from a silence timer.
   transcription: { model: "deepgram/flux" },
   enabled_features: ["telephony"],
-  telephony_settings: { time_limit_secs: 1800 },
+  // Telnyx turns recording on by default. The transcript goes to Discord.
+  telephony_settings: { time_limit_secs: 1800, recording_settings: { enabled: false } },
 };
 
 async function call(method, path, body) {

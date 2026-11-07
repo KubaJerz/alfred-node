@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [SemVer](https://semver.org/).
 
 ## [Unreleased]
+### Fixed
+- **The voice setup script sets recording off and no background sound.**
+  Telnyx records calls by default, and a background loop played under every
+  reply. Both were fixed by hand on the live assistant. A second run of the
+  script now gives the same result (#98).
 ### Added
 - **You can call Alfred.** A Telnyx AI Assistant answers the phone and does the
   audio: speech-to-text, turn detection, interruption, and text-to-speech. Its
