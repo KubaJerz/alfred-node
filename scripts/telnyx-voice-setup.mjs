@@ -4,23 +4,34 @@
 // Telnyx sends the secret as a bearer token on each model request, and
 // telnyx/voice.js checks it.
 //
-//   node scripts/telnyx-voice-setup.mjs https://<machine>.<tailnet>.ts.net [--dry-run]
+//   node scripts/telnyx-voice-setup.mjs https://<machine>.<tailnet>.ts.net \
+//     [--secret <id>] [--voice <voice id>] [--dry-run]
 //
-// Reads TELNYX_API_KEY and VOICE_LLM_TOKEN from .env. With --dry-run it prints
-// the requests and sends nothing. It does not assign the phone number. Do that
+// Reads TELNYX_API_KEY and VOICE_LLM_TOKEN from .env. --secret names the
+// integration secret (lowercase). If it exists, the script keeps it, so its
+// token must equal VOICE_LLM_TOKEN. --voice picks the text-to-speech voice.
+// With --dry-run it prints the requests and sends nothing. It does not assign the phone number. Do that
 // in the portal (AI Assistants > the assistant > Calling > Assign number).
 
 import "dotenv/config";
 
-const SECRET_ID = "alfred-voice-llm";
 const API = "https://api.telnyx.com/v2";
+// Rupert: a warm, mature British male Telnyx Ultra voice. Change it with
+// --voice. List the voices: GET /v2/text-to-speech/voices?provider=telnyx
+const DEFAULT_VOICE = "Telnyx.Ultra.0ad65e7f-006c-47cf-bd31-52279d487913";
 
 const args = process.argv.slice(2);
+const flag = (name, dflt) => {
+  const i = args.indexOf(name);
+  return i >= 0 && args[i + 1] ? args.splice(i, 2)[1] : dflt;
+};
+const SECRET_ID = flag("--secret", "alfred-voice-llm");
+const VOICE = flag("--voice", DEFAULT_VOICE);
 const dryRun = args.includes("--dry-run");
 const publicUrl = args.find((a) => !a.startsWith("--"))?.replace(/\/+$/, "");
 
 if (!publicUrl || args.includes("--help") || args.includes("-h")) {
-  console.log("usage: node scripts/telnyx-voice-setup.mjs https://<machine>.<tailnet>.ts.net [--dry-run]");
+  console.log("usage: node scripts/telnyx-voice-setup.mjs https://<machine>.<tailnet>.ts.net [--secret <id>] [--voice <voice id>] [--dry-run]");
   process.exit(publicUrl ? 0 : 1);
 }
 const { TELNYX_API_KEY, VOICE_LLM_TOKEN } = process.env;
@@ -42,6 +53,13 @@ const assistant = {
     llm_api_key_ref: SECRET_ID,
     authentication_method: "token",
     forward_metadata: true,
+  },
+  voice_settings: {
+    voice: VOICE,
+    // A quiet whoosh every 4.5 s, served by bot.js (telnyx/assets/whoosh.mp3).
+    // It plays for the whole call, so the line never sounds dead while Alfred
+    // works. The MP3 sets the volume: media_url has no volume field.
+    background_audio: { type: "media_url", value: `${publicUrl}/telnyx/voice/v1/background.mp3` },
   },
   // Flux decides the end of a turn from the speech, not from a silence timer.
   transcription: { model: "deepgram/flux" },

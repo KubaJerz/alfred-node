@@ -1360,6 +1360,7 @@ if (smsConfigured || voiceConfigured) {
       allowFrom: VOICE_ALLOWED_NUMBERS,
       normalize: normalizeNumber,
       onTurn: onCallTurn,
+      backgroundAudio: path.join(REPO_DIR, "telnyx", "assets", "whoosh.mp3"),
     }) : {},
   })
     .then((hook) => {

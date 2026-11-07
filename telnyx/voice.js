@@ -22,6 +22,7 @@
 // to the mirror, and the next turn tells Alfred that the caller did not hear it.
 
 import crypto from "crypto";
+import fs from "fs/promises";
 
 export const VOICE_MODEL_ID = "alfred";
 export const KEEPALIVE_MS = 5000;
@@ -141,8 +142,10 @@ export function makeCallState({ now = () => Date.now() } = {}) {
   };
 }
 
-// The handler for <base>/chat/completions and <base>/models. It returns a
-// function (req, res, rawBody) for startTelnyxWebhook's `httpRoutes`.
+// The handlers for <base>/chat/completions and <base>/models, as a path map
+// for startTelnyxWebhook's `httpRoutes`. With backgroundAudio (a local MP3
+// path), <base>/background.mp3 serves that file with no auth. Telnyx loops it
+// under the call (voice_settings.background_audio). It is only a sound.
 //
 // onTurn({ text, caller, takeMissed }) runs one Alfred turn and resolves to the
 // reply text. takeMissed() returns true once if the caller did not hear the
@@ -156,6 +159,7 @@ export function makeVoiceLlmRoutes({
   log = console.log,
   keepAliveMs = KEEPALIVE_MS,
   state = makeCallState(),
+  backgroundAudio = null,
 }) {
   const allowed = new Set(allowFrom.map(normalize));
 
@@ -242,7 +246,16 @@ export function makeVoiceLlmRoutes({
     log(`📞 Voice reply after ${Date.now() - t0} ms (${out.length} chars)`);
   };
 
-  return { [`${base}/chat/completions`]: completions, [`${base}/models`]: models };
+  const routes = { [`${base}/chat/completions`]: completions, [`${base}/models`]: models };
+  if (backgroundAudio) {
+    routes[`${base}/background.mp3`] = async (req, res) => {
+      if (req.method !== "GET" && req.method !== "HEAD") return sendJson(res, 405, { error: { message: "GET only" } });
+      const mp3 = await fs.readFile(backgroundAudio);
+      res.writeHead(200, { "Content-Type": "audio/mpeg", "Content-Length": mp3.length, "Cache-Control": "max-age=3600" });
+      res.end(req.method === "HEAD" ? undefined : mp3);
+    };
+  }
+  return routes;
 }
 
 // A complete reply, as a stream or as one JSON body, to match the request.

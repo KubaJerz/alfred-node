@@ -177,3 +177,24 @@ test("a stream that Telnyx closes early marks the reply as not heard", async () 
     assert.deepEqual(seen, [{ text: "first", missed: false }, { text: "second", missed: true }]);
   });
 });
+
+test("the voice route serves the background MP3 with no token", async () => {
+  const hook = await startTelnyxWebhook({
+    publicKey: "",
+    httpRoutes: makeVoiceLlmRoutes({
+      token: TOKEN,
+      onTurn: async () => "",
+      log: () => {},
+      backgroundAudio: new URL("../telnyx/assets/whoosh.mp3", import.meta.url).pathname,
+    }),
+    log: () => {},
+  });
+  try {
+    const res = await fetch(`${hook.url}${BASE}/background.mp3`);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get("content-type"), "audio/mpeg");
+    assert.ok((await res.arrayBuffer()).byteLength > 1000);
+  } finally {
+    await hook.close();
+  }
+});

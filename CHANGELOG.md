@@ -13,8 +13,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
   removed. The route checks a bearer token (`VOICE_LLM_TOKEN`) and the caller
   number. Keep-alive pings hold the stream open while Alfred works. If the
   caller talks over a reply, the next turn says so. Each turn and reply also
-  shows in the mirror channel. `scripts/telnyx-voice-setup.mjs` creates the
-  assistant (#98).
+  shows in the mirror channel. A quiet whoosh loops under the call, so the
+  line never sounds dead while Alfred works. `scripts/telnyx-voice-setup.mjs`
+  creates the assistant (#98).
 - **Ronnie checks whether a terms-of-service change is a big deal.** When Haiku
   tags an email `policies`, Ronnie files it as Records and starts a separate
   Opus run in the background with WebSearch and an allowlisted WebFetch (Open
