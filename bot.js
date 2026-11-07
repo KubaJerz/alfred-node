@@ -61,7 +61,7 @@ const VOICE_ALLOWED_NUMBERS = parseNumberList(process.env.VOICE_ALLOWED_NUMBERS 
 const VOICE_MIRROR_CHANNEL = process.env.VOICE_MIRROR_CHANNEL || SMS_MIRROR_CHANNEL;
 const voiceConfigured = !!(VOICE_LLM_TOKEN && VOICE_ALLOWED_NUMBERS.length);
 // When a slow call turn speaks its first filler line, and how often it repeats.
-// Unset keeps the defaults in telnyx/voice.js (2 s, then every 5 s).
+// Unset keeps the defaults in telnyx/voice.js (1 s, then every 5 s).
 const VOICE_FILLER_MS = process.env.VOICE_FILLER_MS ? parseInt(process.env.VOICE_FILLER_MS) : undefined;
 const VOICE_FILLER_REPEAT_MS = process.env.VOICE_FILLER_REPEAT_MS ? parseInt(process.env.VOICE_FILLER_REPEAT_MS) : undefined;
 // Alfred reads this tag at the top of a phone-call turn (see agent/SOUL.md).
@@ -330,8 +330,11 @@ function isAuthFailure(stdout, stderr) {
   return AUTH_FAILURE_PATTERNS.some((re) => re.test(head));
 }
 
-function runClaude(message, sessionId) {
+// signal (optional) stops the child early: a phone turn that Telnyx dropped.
+// The promise then resolves with is_aborted and no result.
+function runClaude(message, sessionId, { signal } = {}) {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) return resolve({ result: "", session_id: null, is_aborted: true });
     const args = [
       "-p", message,
       "--output-format", "json",
@@ -377,6 +380,13 @@ function runClaude(message, sessionId) {
       setTimeout(() => proc.kill("SIGKILL"), 2000).unref();
     }, TIMEOUT_MS);
 
+    let aborted = false;
+    signal?.addEventListener("abort", () => {
+      aborted = true;
+      proc.kill("SIGTERM");
+      setTimeout(() => proc.kill("SIGKILL"), 2000).unref();
+    }, { once: true });
+
     let stdout = "";
     let stderr = "";
 
@@ -385,6 +395,10 @@ function runClaude(message, sessionId) {
 
     proc.on("close", (code, signal) => {
       clearTimeout(killer);
+      if (aborted) {
+        resolve({ result: "", session_id: null, is_aborted: true });
+        return;
+      }
       if (code !== 0) {
         console.error(`⚠️  Claude exited ${code}${signal ? ` (${signal})` : ""}${timedOut ? " [timed out]" : ""}: ${stderr}`);
       }
@@ -758,7 +772,7 @@ async function runRonnieMetrics(msg) {
 // single global state.json, so overlapping turns would resume the same session
 // twice and race to write the new session id back. `target` is where the turn
 // answers — Discord, SMS, or both (see "Reply targets" below).
-async function handleTurn(target, userMessage, attachments = []) {
+async function handleTurn(target, userMessage, attachments = [], { signal } = {}) {
   // "/clear" / "/c" as a prefix: bare = clear and wait; "/c <text>" = clear,
   // then run <text> as the fresh session's first turn (one message does both).
   const clear = parseClearCommand(userMessage);
@@ -850,7 +864,15 @@ async function handleTurn(target, userMessage, attachments = []) {
     }
 
     // Run Claude
-    const response = await runClaude(finalMessage, sessionId);
+    const response = await runClaude(finalMessage, sessionId, { signal });
+
+    // A dropped phone turn: Telnyx sent a longer version of the same words.
+    // Keep no state and send nothing. The next turn carries the words.
+    if (response.is_aborted) {
+      console.log("✂️  Turn cancelled (Telnyx dropped an early guess)");
+      await logTurn({ dir: "out", kind: "cancelled", text: "" });
+      return;
+    }
 
     // An auth lapse or timeout produced no session and did no work — recording
     // it as the session's latest turn would just push the real one out of view.
@@ -1223,7 +1245,7 @@ function callTarget({ discord = null, who, onReply }) {
 
 // One caller turn from telnyx/voice.js. It runs the same path as a Discord
 // message, in the same session, and resolves to the text to speak.
-async function onCallTurn({ text, caller, takeMissed }) {
+async function onCallTurn({ text, caller, takeMissed, signal }) {
   let discord = null;
   if (VOICE_MIRROR_CHANNEL) {
     try {
@@ -1241,10 +1263,15 @@ async function onCallTurn({ text, caller, takeMissed }) {
     onReply: (t) => { reply = reply ? `${reply}\n${t}` : t; },
   });
   await enqueueTurn(() => {
+    // Telnyx dropped this early guess while it waited in the queue.
+    if (signal?.aborted) {
+      console.log("✂️  Call turn dropped before it started");
+      return;
+    }
     // Read the flag when the turn starts. A reply that the caller talked over
     // can finish while this turn waits in the queue.
     const note = takeMissed() ? "(The caller talked over your last reply and did not hear it.)\n" : "";
-    return handleTurn(target, note + text);
+    return handleTurn(target, note + text, [], { signal });
   });
   return reply;
 }

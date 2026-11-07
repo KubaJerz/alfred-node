@@ -61,7 +61,9 @@ const assistant = {
     background_audio: { type: "predefined_media", value: "silence" },
   },
   // Flux decides the end of a turn from the speech, not from a silence timer.
-  transcription: { model: "deepgram/flux" },
+  // eot_timeout_ms caps the wait when Flux is unsure the caller is done. The
+  // default (5 s) made some turns feel slow.
+  transcription: { model: "deepgram/flux", settings: { eot_timeout_ms: 2000 } },
   enabled_features: ["telephony"],
   // Telnyx turns recording on by default. The transcript goes to Discord.
   telephony_settings: { time_limit_secs: 1800, recording_settings: { enabled: false } },

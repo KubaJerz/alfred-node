@@ -33,8 +33,14 @@ export const KEEPALIVE_MS = 5000;
 // The first line must come early. At 7 s it arrived only 1-2 s before most
 // replies, and Telnyx's own speech delay made the two sound like one. Short
 // lines keep each one under a second of speech.
-export const FILLER_MS = 2000;
+export const FILLER_MS = 1000;
 export const FILLER_REPEAT_MS = 5000;
+// Telnyx guesses the end of a turn early (eager end-of-turn). When the caller
+// keeps talking, it closes that request, usually within ~0.7 s, and sends the
+// longer text. A close inside DROP_WINDOW_MS is such a guess: the turn is
+// cancelled, so it does not hold the queue. A later close is a real
+// interruption: the turn finishes, because it can be half way through work.
+export const DROP_WINDOW_MS = 1500;
 export const FILLERS = ["On it, one sec.", "Still on it.", "Working on it.", "Almost there.", "Hang on."];
 const STATE_TTL_MS = 2 * 60 * 1000; // forget a caller's turn state after this idle time
 
@@ -142,6 +148,11 @@ export function makeCallState({ now = () => Date.now() } = {}) {
     missed(caller) {
       get(caller).missed = true;
     },
+    // A turn was cancelled before Alfred answered. Forget its texts, so the
+    // next request sends them to Alfred again with the caller's new words.
+    dropped(caller) {
+      get(caller).submitted = [];
+    },
     // Read the "did not hear" flag and clear it.
     takeMissed(caller) {
       const s = get(caller);
@@ -157,9 +168,11 @@ export function makeCallState({ now = () => Date.now() } = {}) {
 // path), <base>/background.mp3 serves that file with no auth. Telnyx loops it
 // under the call (voice_settings.background_audio). It is only a sound.
 //
-// onTurn({ text, caller, takeMissed }) runs one Alfred turn and resolves to the
-// reply text. takeMissed() returns true once if the caller did not hear the
-// last reply. Call it when the turn starts, not when it is queued.
+// onTurn({ text, caller, takeMissed, signal }) runs one Alfred turn and
+// resolves to the reply text. takeMissed() returns true once if the caller did
+// not hear the last reply. Call it when the turn starts, not when it is queued.
+// signal aborts when Telnyx drops an early guess (see DROP_WINDOW_MS). The turn
+// should then stop and resolve to "".
 export function makeVoiceLlmRoutes({
   base = "/telnyx/voice/v1",
   token,
@@ -170,6 +183,7 @@ export function makeVoiceLlmRoutes({
   keepAliveMs = KEEPALIVE_MS,
   fillerMs = FILLER_MS,
   fillerRepeatMs = FILLER_REPEAT_MS,
+  dropWindowMs = DROP_WINDOW_MS,
   state = makeCallState(),
   backgroundAudio = null,
 }) {
@@ -246,21 +260,31 @@ export function makeVoiceLlmRoutes({
     };
     if (fillerMs > 0) fillerTimer = setTimeout(sayFiller, fillerMs);
     let closedEarly = false;
+    const abort = new AbortController();
     res.on("close", () => {
-      if (!res.writableEnded) {
-        closedEarly = true;
-        log(`📞 Telnyx closed the stream after ${Date.now() - t0} ms (interrupt or timeout)`);
+      if (res.writableEnded) return;
+      closedEarly = true;
+      const ms = Date.now() - t0;
+      if (ms < dropWindowMs) {
+        // Reset the turn state now: the next request can arrive before this
+        // turn stops.
+        state.dropped(key);
+        abort.abort();
+        log(`📞 Telnyx dropped an early guess after ${ms} ms — turn cancelled`);
+      } else {
+        log(`📞 Telnyx closed the stream after ${ms} ms (interrupt or timeout)`);
       }
     });
 
     let out = "";
     try {
-      out = speakable(await onTurn({ text, caller: key, takeMissed: () => state.takeMissed(key) }));
+      out = speakable(await onTurn({ text, caller: key, takeMissed: () => state.takeMissed(key), signal: abort.signal }));
     } finally {
       clearInterval(ping);
       clearTimeout(fillerTimer);
     }
     if (closedEarly) {
+      if (abort.signal.aborted) return;
       state.missed(key);
       log(`📞 The caller did not hear this reply (${out.length} chars)`);
       return;
