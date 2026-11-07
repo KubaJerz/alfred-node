@@ -35,8 +35,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
   (`telnyx/pipeline.js`, `telnyx/speech.js`, `telnyx/audio.js`). The media
   WebSocket needs a secret token and a Telnyx Ed25519 signature before any
   audio flows. Barge-in clears Alfred's audio and tells the next turn. A slow
-  turn speaks a filler line. Each reply logs its latency from the end of
-  speech to the first audio sent. The estimated cost is about $0.02-0.03 a
+  turn speaks a filler line with the same timing as v1 (1 second, then every
+  5), and `VOICE_FILLER_MS` and `VOICE_FILLER_REPEAT_MS` apply to it too. An
+  answered call whose stream does not start in 15 seconds is hung up. Each
+  reply logs its latency from the end of speech to the first audio sent. The estimated cost is about $0.02-0.03 a
   minute, against about $0.055 for v1.
   `scripts/telnyx-voice-pipeline-setup.mjs` creates the application. It does
   not move the phone number. `docs/phone-design.md` gives the manual switch

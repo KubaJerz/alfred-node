@@ -125,22 +125,27 @@ phone ──► Telnyx number ──► Call Control app "Alfred (phone pipeline
 2. Telnyx opens the media WebSocket. The "start" frame names the call. The
    session opens the STT WebSocket and speaks "Hey, it's Alfred."
 3. Caller audio goes to STT with no conversion. Frames that come out of order
-   are put back in order by their chunk number.
+   are put back in order by their chunk number. If the chunk number starts
+   again or jumps back, the order starts again from that frame.
 4. Flux `EndOfTurn` starts a turn. The turn runs `onCallTurn`, the same
    function as v1, with the same `[via phone call]` tag and mirror channel.
 5. The reply loses its markdown (`speakable`), and long replies stop at 1200
    characters with "The rest is in Discord." Each sentence is one TTS request.
    The next request starts while the current sentence streams.
 6. After each reply the session sends a "mark". When Telnyx sends the mark
-   back, the caller heard the whole reply.
+   back, the caller heard the whole reply. If the mark does not come back by
+   the estimated end of the audio plus 1.5 seconds, the reply also counts as
+   heard, and the log says that the echo was missing.
 7. Each reply logs `Latency N ms: end of speech → first audio sent`, with the
    turn time and the speech time.
 
 Barge-in: Flux `StartOfTurn` while Alfred speaks sends Telnyx the "clear"
 event, aborts the TTS requests, and marks the reply as not heard. The next turn
 tells Alfred, as in v1. A new caller turn while an old turn still runs drops the
-old reply, and the next turn tells Alfred. A turn with no reply after 7 seconds
-speaks a filler line (the v1 `FILLERS`). The greeting and the filler audio are
+old reply, and the next turn tells Alfred. A slow turn speaks a filler line
+with the same timing and lines as v1 (`FILLER_MS`, `FILLER_REPEAT_MS` and
+`FILLERS` in `telnyx/voice.js`; now 1 second, then every 5).
+`VOICE_FILLER_MS` and `VOICE_FILLER_REPEAT_MS` change both paths. The greeting and the filler audio are
 kept in memory after the first call, so they cost no TTS characters again.
 
 ### Security
@@ -155,9 +160,11 @@ kept in memory after the first call, so they cost no TTS characters again.
 - A socket also needs an answered call that has no socket yet. Its "start"
   frame must name that call. One call has one session. A socket that sends no
   "start" in 10 seconds is closed.
-- Frames over 64 KB close the socket. A TTS reply over 8 MB stops.
-- A lost media socket, a lost STT socket (after 3 tries), or a
-  `streaming.failed` event hangs up the call. Hangup ends the session and
+- Frames over 64 KB close the socket. A frame that is not a JSON object is
+  ignored, and an error in one frame is logged; it cannot stop the bot. A TTS reply over 8 MB stops.
+- A lost media socket, a lost STT socket (after 3 tries in a row with no
+  speech event between them), a `streaming.failed` event, or an answered
+  call whose stream does not start in 15 seconds hangs up the call. Hangup ends the session and
   closes every socket and timer.
 - Caller ID can be spoofed. The same caveat as v1 applies.
 
@@ -206,6 +213,12 @@ the number. Both paths can be on in bot.js at the same time.
   packets? Do 100 ms frames at real-time pace avoid error 100005?
 - Does the phone's own echo of Alfred's voice make Flux send `StartOfTurn`
   (a false barge-in)?
-- Does the "chunk" number of inbound media count up by one per frame? The log
-  shows out-of-order and late frame counts at the end of each call.
+- Does the "chunk" number of inbound media count up by one per frame for the
+  whole stream? The log shows out-of-order, late, and restart counts at the
+  end of each call.
+- In rtp mode, does Telnyx echo each mark when the audio before it has played?
+  If the log shows "No mark echo", it does not, and "heard" comes from the
+  time estimate only.
+- If the stream cannot connect, does Telnyx send `streaming.failed`? If not,
+  the call hangs up 15 seconds after the answer.
 - The real latency of the whole chain. The log line gives it per reply.

@@ -18,6 +18,7 @@ import {
   OVERFLOW_LINE,
 } from "../telnyx/pipeline.js";
 import { startTelnyxWebhook, normalizeNumber } from "../telnyx/sms.js";
+import { FILLERS, FILLER_MS } from "../telnyx/voice.js";
 
 // A real Ed25519 pair, so the checks run the same code path as production.
 const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
@@ -110,7 +111,29 @@ test("makeReorder puts frames back in order, drops late ones, and skips a gap", 
   assert.deepEqual(out, ["a", "b", "c", "f", "g", "h"]);
   r.push(undefined, "nochunk");
   assert.equal(out.at(-1), "nochunk");
-  assert.deepEqual(r.stats, { late: 1, reordered: 4, skipped: 1 });
+  assert.deepEqual(r.stats, { late: 1, reordered: 4, skipped: 1, resyncs: 0 });
+});
+
+test("makeReorder starts again when the chunk count goes back", () => {
+  // A restart far back: the first frame of the new count starts again.
+  const out = [];
+  const r = makeReorder((p) => out.push(p));
+  for (let n = 100; n <= 104; n++) r.push(String(n), n);
+  for (let n = 1; n <= 19; n++) r.push(String(n), n);
+  assert.equal(out.length, 24);
+  assert.deepEqual(out.slice(5), Array.from({ length: 19 }, (_, i) => i + 1));
+  assert.deepEqual(r.stats, { late: 0, reordered: 0, skipped: 0, resyncs: 1 });
+
+  // A small step back: a few late frames are dropped, then it starts again.
+  const out2 = [];
+  const r2 = makeReorder((p) => out2.push(p), { window: 4 });
+  for (let n = 10; n <= 12; n++) r2.push(String(n), n);
+  for (let n = 9; n <= 15; n++) r2.push(String(n), n);
+  // 9, 10 and 11 are late and dropped. 12 is the 4th late frame in a row, so
+  // the order starts again from it.
+  assert.deepEqual(out2, [10, 11, 12, 12, 13, 14, 15]);
+  assert.equal(r2.stats.resyncs, 1);
+  assert.equal(r2.stats.late, 3);
 });
 
 test("makePlayer paces audio, keeps marks in order, pads short chunks, and clears", async () => {
@@ -200,7 +223,7 @@ async function startFakeStt() {
 }
 
 // The pipeline on a real webhook server, with fake Telnyx parts around it.
-async function setup({ onTurn, ttsDelayMs = 0, session = {}, requireSignature = true } = {}) {
+async function setup({ onTurn, ttsDelayMs = 0, session = {}, requireSignature = true, pipelineOpts = {} } = {}) {
   const logs = [];
   const commands = [];
   const callControl = {
@@ -229,7 +252,9 @@ async function setup({ onTurn, ttsDelayMs = 0, session = {}, requireSignature = 
     callControl,
     sttEndpoint: stt.url.replace(/\?.*$/, ""),
     ttsEndpoint: tts.url,
-    session: { fillerMs: 0, player: { leadMs: 1e9 }, ...session },
+    fillerMs: 0,
+    session: { player: { leadMs: 1e9 }, ...session },
+    ...pipelineOpts,
   });
   const hook = await startTelnyxWebhook({ publicKey: PUB_B64, routes: pipeline.routes, log: (l) => logs.push(l) });
   hook.server.on("upgrade", pipeline.handleUpgrade);
@@ -493,7 +518,8 @@ test("pipeline: a slow turn speaks a filler line, and a newer turn drops the old
   let release;
   const gate = new Promise((r) => (release = r));
   const s = await setup({
-    session: { fillerMs: 40, fillerRepeatMs: 10_000 },
+    // fillerMs at the top level, as bot.js passes VOICE_FILLER_MS.
+    pipelineOpts: { fillerMs: 40, fillerRepeatMs: 10_000 },
     onTurn: async (t, n) => {
       if (n === 1) {
         await gate;
@@ -509,7 +535,8 @@ test("pipeline: a slow turn speaks a filler line, and a newer turn drops the old
     peer.start("v3:s");
     await waitFor(() => s.stt.peers.length === 1);
     s.stt.say("EndOfTurn", "first question");
-    await waitFor(() => s.tts.texts.includes("One sec, still on it."));
+    // Well before the default FILLER_MS, so the top-level fillerMs was used.
+    await waitFor(() => s.tts.texts.includes(FILLERS[0]), FILLER_MS - 300);
     await waitFor(() => peer.marks().includes("f2:end"));
     // The caller asks again before the first reply comes.
     s.stt.say("EndOfTurn", "second question");
@@ -569,6 +596,99 @@ test("pipeline: streaming.failed hangs up, and the webhook stays signed", async 
     await s.postEvent("streaming.failed", { call_control_id: "v3:sf", failure_reason: "connection_failed" });
     await waitFor(() => s.commands.some((c) => c.cmd === "hangup"));
     assert.equal(s.pipeline.calls.size, 0);
+  } finally {
+    await s.close();
+  }
+});
+
+test("pipeline: frames that are not JSON objects are ignored, before and after start", async () => {
+  const s = await setup();
+  try {
+    await s.incoming("v3:n");
+    const peer = s.connectMedia();
+    await peer.open();
+    // JSON null, a number, a string, an array: none may throw in the listener.
+    for (const f of ["null", "5", '"x"', "[]"]) peer.ws.send(f);
+    peer.start("v3:n");
+    await waitFor(() => s.stt.peers.length === 1);
+    for (const f of ["null", "5", '"x"', "[]"]) peer.ws.send(f);
+    peer.audio(3);
+    s.stt.say("EndOfTurn", "still there?");
+    await waitFor(() => s.logs.some((l) => /Call reply heard/.test(l)));
+    assert.equal(peer.closed, null);
+  } finally {
+    await s.close();
+  }
+});
+
+test("pipeline: an answered call whose stream never starts is hung up", async () => {
+  const s = await setup({ pipelineOpts: { streamWaitMs: 50 } });
+  try {
+    await s.incoming("v3:p");
+    await waitFor(() => s.commands.some((c) => c.cmd === "hangup" && c.id === "v3:p"));
+    assert.equal(s.pipeline.calls.size, 0);
+    assert.ok(s.logs.some((l) => /no media stream after 50 ms/.test(l)));
+  } finally {
+    await s.close();
+  }
+});
+
+test("pipeline: a stream that starts in time is not hung up by the wait timer", async () => {
+  const s = await setup({ pipelineOpts: { streamWaitMs: 150 } });
+  try {
+    await s.incoming("v3:q");
+    const peer = s.connectMedia();
+    await peer.open();
+    peer.start("v3:q");
+    await waitFor(() => s.stt.peers.length === 1);
+    await sleep(250);
+    assert.ok(!s.commands.some((c) => c.cmd === "hangup"));
+    assert.ok(s.pipeline.calls.get("v3:q")?.session);
+  } finally {
+    await s.close();
+  }
+});
+
+test("pipeline: speech-to-text drops do not add up when a speech event comes between them", async () => {
+  const s = await setup({ session: { sttRetryMs: 5 } });
+  try {
+    await s.incoming("v3:sr");
+    const peer = s.connectMedia();
+    await peer.open();
+    peer.start("v3:sr");
+    // Six drops, more than the 3 tries, but each new link delivers an event.
+    for (let i = 1; i <= 6; i++) {
+      await waitFor(() => s.stt.peers.length === i);
+      s.stt.say("Update");
+      await sleep(20);
+      s.stt.peers.at(-1).close(1011);
+    }
+    await waitFor(() => s.stt.peers.length === 7);
+    assert.ok(!s.commands.some((c) => c.cmd === "hangup"));
+    assert.ok(!s.logs.some((l) => /speech-to-text lost/.test(l)));
+  } finally {
+    await s.close();
+  }
+});
+
+test("pipeline: a reply whose end mark never comes back counts as heard after the audio ends", async () => {
+  const s = await setup({ onTurn: async () => "Okay.", session: { markGraceMs: 50 } });
+  try {
+    await s.incoming("v3:m");
+    const peer = s.connectMedia({ echo: false });
+    await peer.open();
+    peer.start("v3:m");
+    await waitFor(() => s.stt.peers.length === 1);
+    s.stt.say("EndOfTurn", "ping");
+    await waitFor(() => s.logs.some((l) => /Call reply heard/.test(l)));
+    assert.ok(s.logs.some((l) => /No mark echo for reply/.test(l)));
+    // The next StartOfTurn is no barge-in, and the next turn missed nothing.
+    s.stt.say("StartOfTurn");
+    s.stt.say("EndOfTurn", "and again");
+    await waitFor(() => s.turns.length === 2);
+    assert.ok(!s.logs.some((l) => /Barge-in/.test(l)));
+    assert.equal(s.turns[1].missed, false);
+    assert.ok(!peer.frames.some((f) => f.event === "clear"));
   } finally {
     await s.close();
   }

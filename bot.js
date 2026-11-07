@@ -1408,6 +1408,8 @@ if (voicePipelineConfigured) {
       voice: VOICE_PIPELINE_VOICE,
       ttsRate: VOICE_PIPELINE_TTS_RATE,
       requireSignature: VOICE_PIPELINE_SIGNED_MEDIA,
+      fillerMs: VOICE_FILLER_MS,
+      fillerRepeatMs: VOICE_FILLER_REPEAT_MS,
     });
   } catch (err) {
     console.error(`⚠️  Call pipeline v2 is off: ${err.message}`);

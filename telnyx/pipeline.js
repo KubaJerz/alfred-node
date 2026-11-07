@@ -39,6 +39,8 @@ const CALL_API = "https://api.telnyx.com/v2";
 const MAX_FRAME_BYTES = 64 * 1024; // one media frame is about 200 bytes
 const START_TIMEOUT_MS = 10_000; // a socket must send "start" in this time
 const PENDING_TTL_MS = 60_000; // an answered call must open its stream in this time
+const STREAM_WAIT_MS = 15_000; // hang up an answered call whose stream did not start in this time
+const MARK_GRACE_MS = 1500; // after this past the audio end, a mark that did not come back counts as heard
 const MAX_CALLS = 2;
 const STT_RETRIES = 3;
 const STT_RETRY_MS = 1000;
@@ -131,10 +133,23 @@ export function capSpoken(text, maxChars = MAX_SPOKEN_CHARS) {
 // Put media frames back in chunk order. Telnyx does not promise the order.
 // A frame that comes after we passed its place is dropped. When more than
 // `window` frames wait for a gap, we skip the gap.
-export function makeReorder(emit, { window = REORDER_WINDOW } = {}) {
+//
+// If the chunk count starts again or jumps back (more than `restartGap` back,
+// or `window` late frames in a row), we start again from that frame. Without
+// this, every frame after the jump is "late" and speech-to-text hears nothing.
+export function makeReorder(emit, { window = REORDER_WINDOW, restartGap = 4 * window, log = () => {} } = {}) {
   let expected = null;
+  let lateRun = 0;
   const held = new Map();
-  const stats = { late: 0, reordered: 0, skipped: 0 };
+  const stats = { late: 0, reordered: 0, skipped: 0, resyncs: 0 };
+  const resync = (n) => {
+    stats.resyncs++;
+    log(`⚠️  Media chunk count went back to ${n} (expected ${expected}) — starting again from it`);
+    for (const k of [...held.keys()].sort((a, b) => a - b)) emit(held.get(k));
+    held.clear();
+    expected = n;
+    lateRun = 0;
+  };
   const drain = () => {
     while (held.has(expected)) {
       emit(held.get(expected));
@@ -149,9 +164,15 @@ export function makeReorder(emit, { window = REORDER_WINDOW } = {}) {
       if (!Number.isInteger(n)) return emit(payload);
       if (expected === null) expected = n;
       if (n < expected) {
-        stats.late++;
-        return;
+        if (n < expected - restartGap || lateRun + 1 >= window) {
+          resync(n);
+        } else {
+          stats.late++;
+          lateRun++;
+          return;
+        }
       }
+      lateRun = 0;
       if (n === expected) {
         emit(payload);
         expected++;
@@ -191,6 +212,7 @@ export function makePlayer({ send, chunkBytes = 800, leadMs = 400, tickMs = 20, 
       if (head.mark) {
         send({ event: "mark", mark: { name: head.mark } });
         queue.shift();
+        head.onSent?.();
         continue;
       }
       let avail = 0;
@@ -228,8 +250,9 @@ export function makePlayer({ send, chunkBytes = 800, leadMs = 400, tickMs = 20, 
       if (buf.length) queue.push({ buf, off: 0, onFirst });
       pump();
     },
-    mark(name) {
-      queue.push({ mark: name });
+    // onSent runs when the mark goes to Telnyx, after the audio before it.
+    mark(name, onSent) {
+      queue.push({ mark: name, onSent });
       pump();
     },
     // Throw away our queue and tell Telnyx to stop and empty its queue.
@@ -241,6 +264,10 @@ export function makePlayer({ send, chunkBytes = 800, leadMs = 400, tickMs = 20, 
     },
     get busy() {
       return queue.length > 0 || playEndAt > now();
+    },
+    // When the audio sent so far ends on the caller's side (estimate).
+    get playEndAt() {
+      return playEndAt;
     },
     close() {
       queue = [];
@@ -269,6 +296,7 @@ export function makeCallSession({
   audioCache = new Map(),
   player: playerOpts = {},
   sttRetryMs = STT_RETRY_MS,
+  markGraceMs = MARK_GRACE_MS,
 }) {
   const player = makePlayer({ send: sendFrame, now, ...playerOpts });
   const active = new Map(); // utterance id -> utterance
@@ -284,13 +312,30 @@ export function makeCallSession({
   let sttFails = 0;
   let sttTimer = null;
   let ended = false;
-  const reorder = makeReorder((b64) => stt?.send(Buffer.from(b64, "base64")));
+  const reorder = makeReorder((b64) => stt?.send(Buffer.from(b64, "base64")), { log });
 
   const finish = (utt, result) => {
     if (utt.result) return;
     utt.result = result;
+    clearTimeout(utt.echoTimer);
     active.delete(utt.id);
     utt.resolve(result);
+  };
+
+  // Send the end mark of an utterance. Telnyx echoes it when the audio before
+  // it has played. If no echo comes by the estimated audio end plus
+  // markGraceMs, the utterance counts as heard anyway. Otherwise it stays
+  // active, and the next StartOfTurn is a false barge-in.
+  const markEnd = (utt) => {
+    player.mark(`${utt.id}:end`, () => {
+      if (utt.result || ended) return;
+      const wait = Math.max(0, player.playEndAt - now()) + markGraceMs;
+      utt.echoTimer = setTimeout(() => {
+        if (utt.result || ended) return;
+        log(`⚠️  No mark echo for ${utt.kind} ${utt.id} — counted as heard`);
+        finish(utt, "heard");
+      }, wait);
+    });
   };
 
   // Stream one sentence into the player. Returns false when it stopped early.
@@ -313,7 +358,7 @@ export function makeCallSession({
     const cached = audioCache.get(utt.text);
     if (cached) {
       player.push(cached, utt.onFirst);
-      player.mark(`${utt.id}:end`);
+      markEnd(utt);
       return;
     }
     const sentences = splitSentences(utt.text);
@@ -335,7 +380,7 @@ export function makeCallSession({
       audioCache.set(utt.text, Buffer.concat(utt.audio));
       if (audioCache.size > AUDIO_CACHE_CAP) audioCache.delete(audioCache.keys().next().value);
     }
-    player.mark(`${utt.id}:end`);
+    markEnd(utt);
   };
 
   // Queue text to speak. kind is "reply", "filler" or "greeting". The result
@@ -448,6 +493,7 @@ export function makeCallSession({
 
   const onSttEvent = (m) => {
     if (ended) return;
+    sttFails = 0; // the link works again, so earlier drops do not count
     if (m.event === "StartOfTurn") {
       if (active.size || player.busy) bargeIn();
     } else if (m.event === "EndOfTurn") {
@@ -497,7 +543,7 @@ export function makeCallSession({
       if (greeting) speak(greeting, "greeting");
     },
     onFrame(msg) {
-      if (ended) return;
+      if (ended || !msg || typeof msg !== "object") return;
       switch (msg.event) {
         case "media":
           if (msg.media?.track && msg.media.track !== "inbound") return;
@@ -549,6 +595,9 @@ export function makeVoicePipeline({
   fetchImpl = fetch,
   WebSocketImpl,
   maxCalls = MAX_CALLS,
+  streamWaitMs = STREAM_WAIT_MS,
+  fillerMs, // undefined keeps the default of makeCallSession
+  fillerRepeatMs,
   session: sessionOpts = {},
 }) {
   if (!publicUrl || !token) throw new Error("The voice pipeline needs a public URL and a token");
@@ -573,8 +622,18 @@ export function makeVoicePipeline({
   const synth = (text, signal) =>
     synthesize({ text, apiKey, voice, sampleRate: ttsRate, signal, fetchImpl, ...(ttsEndpoint ? { url: ttsEndpoint } : {}) });
 
+  // Forget an answered call whose media stream never started, and hang it up,
+  // so the caller does not sit on a silent call.
+  const dropPending = (id, why) => {
+    const c = calls.get(id);
+    if (!c || c.session) return;
+    clearTimeout(c.timer);
+    calls.delete(id);
+    log(`⚠️  Call from ${c.caller}: ${why} — hanging up`);
+    callControl.hangup(id).catch((err) => log(`⚠️  ${err.message}`));
+  };
   const purge = () => {
-    for (const [id, c] of calls) if (!c.session && now() - c.at > PENDING_TTL_MS) calls.delete(id);
+    for (const [id, c] of calls) if (!c.session && now() - c.at > PENDING_TTL_MS) dropPending(id, "no media stream");
   };
 
   const onEvent = async (data) => {
@@ -601,7 +660,8 @@ export function makeVoicePipeline({
           log(`🚫 Call from ${caller}: ${maxCalls} calls are already open — rejected`);
           return callControl.reject(id, "USER_BUSY").catch((err) => log(`⚠️  ${err.message}`));
         }
-        calls.set(id, { caller, at: now(), session: null });
+        const call = { caller, at: now(), session: null, timer: null };
+        calls.set(id, call);
         log(`📞 Call from ${caller} — answering (pipeline v2)`);
         try {
           await callControl.answer(id, answerBody(streamUrl, id));
@@ -609,16 +669,23 @@ export function makeVoicePipeline({
           log(`⚠️  ${err.message}`);
           calls.delete(id);
           callControl.hangup(id).catch(() => {});
+          return;
+        }
+        if (calls.get(id) === call && !call.session) {
+          call.timer = setTimeout(() => dropPending(id, `no media stream after ${streamWaitMs} ms`), streamWaitMs);
+          call.timer.unref?.();
         }
         return;
       }
       case "streaming.failed":
         log(`⚠️  Media stream failed: ${p.failure_reason || "unknown reason"} — hanging up`);
+        clearTimeout(calls.get(id)?.timer);
         calls.get(id)?.session?.end("stream failed", { hang: false });
         calls.delete(id);
         return callControl.hangup(id).catch((err) => log(`⚠️  ${err.message}`));
       case "call.hangup": {
         const c = calls.get(id);
+        clearTimeout(c?.timer);
         calls.delete(id);
         if (c) log(`📞 Call from ${c.caller} ended (${p.hangup_cause || "hangup"}, by ${p.hangup_source || "unknown"})`);
         c?.session?.end("call hung up", { hang: false });
@@ -639,7 +706,16 @@ export function makeVoicePipeline({
       if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(obj));
     };
 
+    // An exception out of this listener would end the whole bot process, so
+    // no frame may throw out of it.
     ws.on("message", (data, isBinary) => {
+      try {
+        onMessage(data, isBinary);
+      } catch (err) {
+        log(`⚠️  Media frame failed: ${err.message}`);
+      }
+    });
+    const onMessage = (data, isBinary) => {
       if (isBinary) return;
       let msg;
       try {
@@ -647,6 +723,7 @@ export function makeVoicePipeline({
       } catch {
         return;
       }
+      if (!msg || typeof msg !== "object") return;
       if (session) return session.onFrame(msg);
       if (msg.event === "connected") return;
       if (msg.event !== "start") return;
@@ -663,6 +740,7 @@ export function makeVoicePipeline({
         ws.close(1003);
         return callControl.hangup(id).catch((err) => log(`⚠️  ${err.message}`));
       }
+      clearTimeout(call.timer);
       session = makeCallSession({
         callControlId: id,
         caller: call.caller,
@@ -681,12 +759,14 @@ export function makeVoicePipeline({
         now,
         ttsRate,
         audioCache,
+        fillerMs,
+        fillerRepeatMs,
         ...sessionOpts,
       });
       call.session = session;
       log(`📞 Media stream open for ${call.caller}`);
       session.start();
-    });
+    };
     ws.on("error", (err) => log(`⚠️  Media socket: ${err.message}`));
     ws.on("close", () => {
       clearTimeout(startTimer);
@@ -743,7 +823,10 @@ export function makeVoicePipeline({
     streamUrl,
     calls,
     close() {
-      for (const c of calls.values()) c.session?.end("shutdown", { hang: false });
+      for (const c of calls.values()) {
+        clearTimeout(c.timer);
+        c.session?.end("shutdown", { hang: false });
+      }
       calls.clear();
       for (const ws of wss.clients) ws.terminate();
       wss.close();
