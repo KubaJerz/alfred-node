@@ -161,7 +161,7 @@ test("the voice route refuses a caller not in the allow list, with no turn", asy
   });
 });
 
-test("a stream that Telnyx closes early marks the reply as not heard", async () => {
+test("a stream that Telnyx closes late marks the reply as not heard", async () => {
   let release;
   const gate = new Promise((r) => (release = r));
   const seen = [];
@@ -188,7 +188,35 @@ test("a stream that Telnyx closes early marks the reply as not heard", async () 
     });
     assert.equal(sseText(await second.text()), "reply");
     assert.deepEqual(seen, [{ text: "first", missed: false }, { text: "second", missed: true }]);
-  });
+  }, { dropWindowMs: 0 });
+});
+
+test("an early guess that Telnyx drops cancels the turn and resends its words", async () => {
+  const seen = [];
+  await withServer(async ({ text, takeMissed, signal }) => {
+    seen.push({ text, missed: takeMissed() });
+    if (seen.length === 1) {
+      await new Promise((r) => signal.addEventListener("abort", r));
+      return "";
+    }
+    return "full answer";
+  }, async ({ post, logs }) => {
+    const ac = new AbortController();
+    const res = await post(req("yo I got"), undefined, { signal: ac.signal });
+    await res.body.getReader().read();
+    ac.abort();
+    await new Promise((r) => setTimeout(r, 20));
+    assert.ok(logs.some((l) => /dropped an early guess/.test(l)));
+    assert.ok(!logs.some((l) => /did not hear/.test(l)));
+
+    // Telnyx sends both parts as separate messages. Alfred gets both.
+    const second = await post({
+      ...req("x"),
+      messages: [{ role: "user", content: "yo I got" }, { role: "user", content: "a new number" }],
+    });
+    assert.equal(sseText(await second.text()), "full answer");
+    assert.deepEqual(seen[1], { text: "yo I got\na new number", missed: false });
+  }, { dropWindowMs: 5000 });
 });
 
 test("the voice route serves the background MP3 with no token", async () => {

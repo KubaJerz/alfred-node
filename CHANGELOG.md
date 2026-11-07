@@ -5,6 +5,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
 
 ## [Unreleased]
 ### Fixed
+- **A call turn that Telnyx drops is cancelled.** Telnyx guesses the end of a
+  turn early. When the caller keeps talking, it drops that request within
+  about 0.7 s and sends the longer text. Before, the dropped turn still ran a
+  full Alfred turn, and the real turn waited behind it in the queue. Now a
+  drop inside 1.5 s cancels the turn: it leaves the queue, or its `claude`
+  process stops. A later close is a real interruption, and the turn finishes.
+  The first filler line also comes after 1 s, not 2 s (#98).
+### Fixed
 - **A slow call turn speaks its first filler line after 2 seconds, not 7.** At
   7 seconds the line came only 1 to 2 seconds before most replies, so the
   caller heard a long silence and then the filler run into the reply. A short
