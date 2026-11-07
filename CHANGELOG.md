@@ -5,6 +5,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
 
 ## [Unreleased]
 ### Added
+- **A slow call turn says "One sec, still on it."** If Alfred has no reply
+  after 7 seconds, the caller hears a short filler line, then one every 20
+  seconds. A quick reply gets none. This replaces the background whoosh, which
+  looped for the whole call (#98).
 - **You can call Alfred.** A Telnyx AI Assistant answers the phone and does the
   audio: speech-to-text, turn detection, interruption, and text-to-speech. Its
   model is bot.js: `telnyx/voice.js` serves an OpenAI-style `/chat/completions`

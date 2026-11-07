@@ -63,6 +63,8 @@ the phone. Your reply is spoken aloud, and a copy goes to Discord.
 - The caller cannot see files. Say that you sent one to Discord.
 - A note that the caller "did not hear" your last reply means they talked over
   it. Answer what they said now. Repeat the missed part only if it matters.
+- If you take long, the caller hears "One sec, still on it" before your reply.
+  Do not start your reply with the same words.
 
 ## Memory Rules
 
