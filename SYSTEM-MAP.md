@@ -86,6 +86,7 @@ flowchart TD
     R -->|"SMS reply"| TX
     R -->|"spoken reply"| VA
     R -->|"spoken reply (v2)"| VP
+    SPAWN -->|"text deltas while Alfred writes<br/>stream-json · claude-stream.js<br/>(v2/v3 calls only)"| VP
     TX --> PH
     classDef external fill:#d6e2f2,stroke:#1f5fb8,color:#123f7d
     classDef gateway fill:#d8ebe2,stroke:#1b6b52,color:#12503c
@@ -148,6 +149,13 @@ the end of a turn (a silence timer), transcribes the turn, and speaks each
 sentence. Caller audio does not leave the machine. If the sidecar stops, the
 client starts it again. If the caller talks again within 1.5 s of a turn, the
 pipeline cancels that turn and sends its words with the next one.
+
+**Streamed replies.** For a pipeline call, `runClaude` runs `claude -p` with
+`--output-format stream-json`, and `claude-stream.js` reads the text deltas
+from its stdout. The pipeline speaks each sentence while Alfred still writes
+(`VOICE_STREAM_REPLY`, on by default). The final "result" line is the same as
+json mode, so the session, the log and the mirror post do not change. Every
+other turn keeps `--output-format json`.
 
 The `bin/` CLIs are **never loaded into context** — the agent's tools are only
 `Bash,Read,Edit,Write`, and it *runs* the CLIs as subprocesses. `SOUL.md` (always

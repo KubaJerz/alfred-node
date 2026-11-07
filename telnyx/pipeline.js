@@ -139,6 +139,130 @@ export function capSpoken(text, maxChars = MAX_SPOKEN_CHARS) {
   return `${out} ${OVERFLOW_LINE}`;
 }
 
+// Turn the text deltas of a streamed reply into units to speak, usually one
+// sentence each. push(delta) returns the units that are complete. flush()
+// returns the rest at the end of the reply.
+//
+// A unit ends at a newline, or at . ! ? or … with a space after it. The
+// space must be there, so "3.5" does not split. A unit shorter than minChars
+// does not end at . ! ? (so "Dr." or "Yes." joins the next sentence), and
+// neither does a known abbreviation or an initial ("e.g.", "Mr.", "J.").
+// A newline always ends a unit: the text before a tool call ("Let me
+// check.") must not wait for the tool. A unit longer than maxChars with no end
+// splits at its last comma or space.
+//
+// Special tokens never go to speech, also when a token comes in two deltas:
+//   - "<" starts a hold while the text after it can be a tag (letters, "_",
+//     "/"). A complete tag, for example <no_reply>, is dropped. Any other
+//     character releases the held text as normal text ("3 < 5").
+//   - "{" starts a hold while the text after it can be {img:..}, {pdf:..},
+//     {file:..} or {bg:..}. At "}" such a token is dropped. Other text in
+//     braces is released as normal text.
+//   - At flush(), held text is dropped. It can only be a part of a token.
+const TAG_HOLD_MAX = 32;
+const BRACE_HOLD_MAX = 1024;
+const BRACE_KEYS = ["img", "pdf", "file", "bg"];
+const ABBREV_RE = /(?:^|[\s(])(?:mr|mrs|ms|dr|prof|sr|jr|st|vs|etc|e\.g|i\.e|approx|no|fig|inc|ltd|mt|ave|a\.m|p\.m|[a-z])\.$/i;
+
+export function makeReplyChunker({ minChars = 12, maxChars = 240 } = {}) {
+  let out = ""; // released text that is not in a unit yet
+  let hold = ""; // a "<" or "{" and the text after it, held back
+
+  // Returns "keep", "drop" (a complete token) or "release" (normal text).
+  const judge = (h) => {
+    if (h[0] === "<") {
+      if (h.length > 1 && h.endsWith(">")) return /^<\/?[a-z_]+>$/i.test(h) ? "drop" : "release";
+      return /^<\/?[a-z_]*$/i.test(h) && h.length <= TAG_HOLD_MAX ? "keep" : "release";
+    }
+    const body = h.slice(1).replace(/^\s+/, "");
+    const colon = body.indexOf(":");
+    if (colon === -1) {
+      if (h.endsWith("}")) return "release";
+      const word = body.toLowerCase();
+      return BRACE_KEYS.some((k) => k.startsWith(word)) ? "keep" : "release";
+    }
+    if (!BRACE_KEYS.includes(body.slice(0, colon).trim().toLowerCase())) return "release";
+    if (h.endsWith("}")) return "drop";
+    return h.length <= BRACE_HOLD_MAX ? "keep" : "release";
+  };
+
+  const feed = (text) => {
+    for (const c of text) {
+      if (!hold) {
+        if (c === "<" || c === "{") hold = c;
+        else out += c;
+        continue;
+      }
+      hold += c;
+      const v = judge(hold);
+      if (v === "keep") continue;
+      const h = hold;
+      hold = "";
+      if (v === "drop") continue;
+      // Release all but the last character, then look at that one again: it
+      // can start a new hold ("<<no_reply>").
+      out += h.slice(0, -1);
+      feed(h.slice(-1));
+    }
+  };
+
+  const take = (final) => {
+    const units = [];
+    let start = 0;
+    const cut = (end) => {
+      const u = out.slice(start, end).trim();
+      if (u) units.push(u);
+      start = end;
+    };
+    for (let i = 0; i < out.length; i++) {
+      const c = out[i];
+      if (c === "\n") {
+        cut(i + 1);
+        continue;
+      }
+      if (!".!?…".includes(c)) continue;
+      let j = i + 1;
+      while (j < out.length && "\"')]’”".includes(out[j])) j++;
+      if (j >= out.length || !/\s/.test(out[j])) continue;
+      const u = out.slice(start, j).trim();
+      if (u.length < minChars) continue;
+      if (c === "." && ABBREV_RE.test(u)) continue;
+      cut(j);
+    }
+    out = out.slice(start);
+    while (out.length > maxChars) {
+      let at = out.lastIndexOf(", ", maxChars);
+      if (at < maxChars / 3) at = out.lastIndexOf(" ", maxChars);
+      if (at < maxChars / 3) at = maxChars;
+      const u = out.slice(0, at + (out[at] === "," ? 1 : 0)).trim();
+      if (u) units.push(u);
+      out = out.slice(at + 1);
+    }
+    if (final) {
+      const u = out.trim();
+      if (u) units.push(u);
+      out = "";
+    }
+    return units;
+  };
+
+  return {
+    push(delta) {
+      feed(String(delta || ""));
+      return take(false);
+    },
+    flush() {
+      hold = "";
+      return take(true);
+    },
+    // Forget all text that is not out yet.
+    reset() {
+      out = "";
+      hold = "";
+    },
+  };
+}
+
 // Put media frames back in chunk order. Telnyx does not promise the order.
 // A frame that comes after we passed its place is dropped. When more than
 // `window` frames wait for a gap, we skip the gap.
@@ -307,6 +431,7 @@ export function makeCallSession({
   sttRetryMs = STT_RETRY_MS,
   markGraceMs = MARK_GRACE_MS,
   dropWindowMs = DROP_WINDOW_MS,
+  streamReply = false,
 }) {
   const player = makePlayer({ send: sendFrame, now, ...playerOpts });
   const active = new Map(); // utterance id -> utterance
@@ -356,7 +481,7 @@ export function makeCallSession({
   };
 
   // Stream one sentence into the player. Returns false when it stopped early.
-  const playSentence = async (utt, pending) => {
+  const playSentence = async (utt, pending, onFirst = utt.onFirst) => {
     const conv = makePcmToMulaw({ inRate: ttsRate });
     const it = await pending;
     for await (const chunk of it) {
@@ -364,14 +489,70 @@ export function makeCallSession({
       const mu = conv.push(chunk);
       if (mu.length) {
         utt.audio?.push(mu);
-        player.push(mu, utt.onFirst);
+        player.push(mu, onFirst);
       }
     }
     return !(utt.cut || ended);
   };
 
+  // A streamed reply: one utterance whose units come while Alfred writes. The
+  // runner speaks the units in order. It asks for the next unit while the
+  // current one plays, and it asks at once for a unit that comes while it
+  // waits. If no unit comes for fillerRepeatMs after the audio ends, it
+  // speaks a filler line in the same utterance (Alfred runs a tool).
+  const fetchUnit = (utt, i) => {
+    if (utt.fetched.has(i) || audioCache.has(utt.units[i])) return;
+    const p = synth(utt.units[i], utt.controller.signal);
+    p.catch(() => {}); // a fetch that we never read must not be an unhandled rejection
+    utt.fetched.set(i, p);
+  };
+  const runStream = async (utt) => {
+    let fillerN = 1; // the first filler line already played before the reply
+    for (let i = 0; ; ) {
+      if (utt.cut || ended) return finish(utt, "cut");
+      if (i >= utt.units.length) {
+        if (utt.closed) break;
+        let timer = null;
+        const waitUnit = new Promise((r) => (utt.wake = r));
+        // When the audio ends, tell the echo guard. Then a long wait gets a
+        // filler line.
+        const quiet = () => {
+          if (player.busy) {
+            timer = setTimeout(quiet, Math.max(20, player.playEndAt - now()));
+            return;
+          }
+          setPlaying(false);
+          if (fillerMs > 0) {
+            timer = setTimeout(() => utt.addUnit(FILLERS[fillerN++ % FILLERS.length], true), fillerRepeatMs);
+          }
+        };
+        quiet();
+        await Promise.race([waitUnit, utt.done]);
+        clearTimeout(timer);
+        utt.wake = null;
+        continue;
+      }
+      utt.cursor = i;
+      const text = utt.units[i];
+      const cached = audioCache.get(text);
+      if (cached) {
+        player.push(cached, utt.onUnit);
+      } else {
+        fetchUnit(utt, i);
+        const cur = utt.fetched.get(i);
+        utt.fetched.delete(i);
+        if (i + 1 < utt.units.length) fetchUnit(utt, i + 1);
+        if (!(await playSentence(utt, cur, utt.onUnit))) return finish(utt, "cut");
+      }
+      player.mark(`${utt.id}:${i}`);
+      i++;
+    }
+    markEnd(utt);
+  };
+
   const runUtterance = async (utt) => {
     if (utt.cut || ended) return finish(utt, "cut");
+    if (utt.stream) return runStream(utt);
     const cached = audioCache.get(utt.text);
     if (cached) {
       player.push(cached, utt.onFirst);
@@ -421,7 +602,8 @@ export function makeCallSession({
       if (kind === "reply" && utt.endOfSpeechAt) {
         log(
           `📞 Latency ${utt.firstAt - utt.endOfSpeechAt} ms: end of speech → first audio sent` +
-            ` (transcript ${utt.sttMs} ms, Alfred ${utt.turnMs} ms, speech ${utt.firstAt - utt.replyAt} ms)`
+            ` (transcript ${utt.sttMs} ms, Alfred ${utt.turnMs} ms, speech ${utt.firstAt - utt.replyAt} ms)` +
+            (utt.stream ? " — streamed, Alfred = time to the first sentence" : "")
         );
       }
     };
@@ -479,12 +661,125 @@ export function makeCallSession({
       if (t.cancelled || t0 - t.at >= dropWindowMs) continue;
       t.cancelled = true;
       t.controller.abort();
+      // A cancelled turn is not a missed reply: stop its speech before the
+      // barge-in looks at the active utterances.
+      t.stream?.discard();
       dropped.add(seq);
       carry.push(t.text);
       n++;
       log(`📞 The caller kept talking ${t0 - t.at} ms after a turn — turn cancelled, its text goes with the next one`);
     }
     if (n && ![...turns.values()].some((t) => !t.cancelled)) stopFillers();
+  };
+
+  // The speech side of one streamed reply. onText gets each text delta from
+  // onTurn. The chunker makes units, and the first unit opens the reply
+  // utterance (and stops the filler lines). Each unit gets the same cleanup as
+  // a whole reply (speakable), and the same cap on spoken characters.
+  // discard() stops the speech of this reply and ignores later text.
+  const openReplyStream = ({ seq, controller, endOfSpeechAt, transcriptAt, sttMs }) => {
+    const chunker = makeReplyChunker();
+    const room = maxSpokenChars - OVERFLOW_LINE.length - 1;
+    const rs = { utt: null, chars: 0, units: 0, capped: false, dead: false, firstTextAt: 0 };
+    const live = () => !rs.dead && !ended && !controller.signal.aborted && !dropped.has(seq) && !rs.utt?.result;
+
+    const addUnit = (raw, filler = false) => {
+      if (!live() || rs.capped) return;
+      for (let unit of filler ? [raw] : splitSentences(speakable(raw))) {
+        if (!/[\p{L}\p{N}]/u.test(unit)) continue; // only marks or symbols: nothing to say
+        if (!filler && rs.chars + unit.length + 1 > room) {
+          rs.capped = true;
+          unit = OVERFLOW_LINE;
+        }
+        if (!rs.utt) {
+          stopFillers();
+          const replyAt = now();
+          rs.utt = speak("", "reply", {
+            stream: true,
+            units: [],
+            fetched: new Map(),
+            cursor: -1,
+            closed: false,
+            wake: null,
+            endOfSpeechAt,
+            replyAt,
+            sttMs,
+            turnMs: replyAt - transcriptAt,
+          });
+          const utt = rs.utt;
+          utt.addUnit = addUnit;
+          // Each unit tells the echo guard again: the runner turns it off
+          // while it waits for text.
+          utt.onUnit = () => {
+            utt.onFirst();
+            setPlaying(true);
+          };
+        }
+        const utt = rs.utt;
+        utt.units.push(unit);
+        if (!filler) {
+          rs.chars += unit.length + 1;
+          rs.units++;
+        }
+        // The runner waits for this unit, or plays the one before it.
+        if (utt.units.length - 1 <= utt.cursor + 1) fetchUnit(utt, utt.units.length - 1);
+        utt.wake?.();
+        if (rs.capped) return;
+      }
+    };
+    rs.onText = (delta) => {
+      if (!live() || !delta) return;
+      if (!rs.firstTextAt) {
+        rs.firstTextAt = now();
+        log(
+          `📞 First streamed text ${rs.firstTextAt - transcriptAt} ms after the transcript` +
+            (endOfSpeechAt ? ` (${rs.firstTextAt - endOfSpeechAt} ms after the end of speech)` : "")
+        );
+      }
+      for (const u of chunker.push(delta)) addUnit(u);
+    };
+    // The turn ended. text is what onTurn gave back: text that did not stream
+    // (an error or a default line). Then the held rest of the stream is
+    // dropped, and text is spoken whole. Otherwise the rest is spoken. After
+    // a failed turn (dropRest), the rest is dropped and nothing is added.
+    rs.close = (text, dropRest = false) => {
+      if (dropRest) {
+        chunker.reset();
+      } else if (text.trim()) {
+        chunker.reset();
+        addUnit(text);
+      } else {
+        for (const u of chunker.flush()) addUnit(u);
+      }
+      if (rs.utt) {
+        rs.utt.closed = true;
+        rs.utt.text = rs.utt.units.join(" ");
+        rs.utt.wake?.();
+      }
+    };
+    rs.discard = () => {
+      if (rs.dead) return;
+      rs.dead = true;
+      chunker.reset();
+      const utt = rs.utt;
+      if (utt && !utt.result) {
+        utt.cut = true;
+        utt.controller.abort();
+        finish(utt, "cut");
+      }
+    };
+    return rs;
+  };
+
+  const finishStream = async (rs, text, failed) => {
+    rs.close(text, failed);
+    if (!rs.utt) {
+      if (!failed) log("📞 Call reply: nothing to speak");
+      return;
+    }
+    const result = await rs.utt.done;
+    if (result === "cut" || result === "error") missed = true;
+    log(`📞 Call reply ${result} (${rs.chars} chars in ${rs.units} streamed parts)`);
   };
 
   const submitTurn = async (text, endOfSpeechAt, info = {}) => {
@@ -495,11 +790,13 @@ export function makeCallSession({
     // cancelled turn is already dropped, and its text is in this turn.
     for (const s of waiting) {
       if (turns.get(s)?.cancelled) continue;
+      turns.get(s)?.stream?.discard();
       dropped.add(s);
       unreported.add(s);
     }
     const controller = new AbortController();
-    turns.set(seq, { controller, at: transcriptAt, text, cancelled: false });
+    const turn = { controller, at: transcriptAt, text, cancelled: false, stream: null };
+    turns.set(seq, turn);
     waiting.add(seq);
     log(`📞 Call turn from ${caller}: ${text.slice(0, 100)}`);
     startFillers();
@@ -515,28 +812,35 @@ export function makeCallSession({
       }
       return m;
     };
+    const sttMs = info.sttMs ?? transcriptAt - endOfSpeechAt;
+    const rs = streamReply ? openReplyStream({ seq, controller, endOfSpeechAt, transcriptAt, sttMs }) : null;
+    turn.stream = rs;
     let reply = "";
+    let failed = false;
     try {
-      reply = await onTurn({ text, caller, takeMissed, signal: controller.signal });
+      reply = await onTurn({ text, caller, takeMissed, signal: controller.signal, ...(rs ? { onText: rs.onText } : {}) });
     } catch (err) {
+      failed = true;
       if (!controller.signal.aborted) log(`⚠️  Call turn failed: ${err.message}`);
     }
     waiting.delete(seq);
     turns.delete(seq);
     if (controller.signal.aborted) {
+      rs?.discard();
       dropped.delete(seq);
       return;
     }
     if (dropped.delete(seq)) {
+      rs?.discard();
       log(`📞 A newer caller turn came first. This reply is not spoken (${String(reply || "").length} chars).`);
       return;
     }
     stopFillers();
     if (ended) return;
+    if (rs) return finishStream(rs, failed ? "" : String(reply || ""), failed);
     const out = capSpoken(speakable(reply), maxSpokenChars);
     if (!out) return;
     const replyAt = now();
-    const sttMs = info.sttMs ?? transcriptAt - endOfSpeechAt;
     const utt = speak(out, "reply", { endOfSpeechAt, replyAt, sttMs, turnMs: replyAt - transcriptAt });
     const result = await utt.done;
     if (result === "cut" || result === "error") missed = true;
@@ -656,6 +960,7 @@ export function makeVoicePipeline({
   fillerRepeatMs,
   engine = "telnyx",
   localSpeech, // voice/local-speech.js client, for engine "local"
+  streamReply = false, // speak the reply while Alfred writes it (onTurn gets onText)
   session: sessionOpts = {},
 }) {
   if (!publicUrl || !token) throw new Error("The voice pipeline needs a public URL and a token");
@@ -831,6 +1136,7 @@ export function makeVoicePipeline({
         audioCache,
         fillerMs,
         fillerRepeatMs,
+        streamReply,
         ...sessionOpts,
       });
       call.session = session;

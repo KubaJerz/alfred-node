@@ -12,13 +12,14 @@ import {
   capSpoken,
   makeReorder,
   makePlayer,
+  makeReplyChunker,
   makeVoicePipeline,
   EVENTS_PATH,
   MEDIA_PATH,
   OVERFLOW_LINE,
 } from "../telnyx/pipeline.js";
 import { startTelnyxWebhook, normalizeNumber } from "../telnyx/sms.js";
-import { FILLERS, FILLER_MS } from "../telnyx/voice.js";
+import { FILLERS, FILLER_MS, speakable } from "../telnyx/voice.js";
 
 // A real Ed25519 pair, so the checks run the same code path as production.
 const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
@@ -895,6 +896,257 @@ test("pipeline: speech after the drop window does not cancel the running turn", 
     assert.equal(s.turns[1].text, "second question");
     release();
     await waitFor(() => s.logs.some((l) => /A newer caller turn came first/.test(l)));
+  } finally {
+    await s.close();
+  }
+});
+
+// ── streamed replies (VOICE_STREAM_REPLY) ───────────────────────────────────
+
+const chunk = (deltas, opts) => {
+  const c = makeReplyChunker(opts);
+  const units = [];
+  for (const d of deltas) units.push(...c.push(d));
+  return { units, rest: c.flush() };
+};
+
+test("makeReplyChunker splits at sentence ends and newlines, not in numbers or abbreviations", () => {
+  const { units, rest } = chunk(["Hello there, Kuba. It is 3.", "5 degrees out", "side. See Dr. Smith at 9 a.m. tomorrow,", " e.g. at the clinic. Ok!"]);
+  assert.deepEqual(units, ["Hello there, Kuba.", "It is 3.5 degrees outside.", "See Dr. Smith at 9 a.m. tomorrow, e.g. at the clinic."]);
+  assert.deepEqual(rest, ["Ok!"]); // no space after it yet, so it waits for the end
+  // A short sentence joins the next one. A newline always ends a unit.
+  assert.deepEqual(chunk(["Yes. That works for me. On it.\nThe weather is fine."]).units, ["Yes. That works for me.", "On it."]);
+  // A quote or a bracket after the end mark stays with the sentence.
+  assert.deepEqual(chunk(['He said "go home now." Then he left the room.']).units, ['He said "go home now."']);
+  // A unit with no end splits at a comma when it gets too long.
+  const long = chunk([`${"word ".repeat(10)}, ${"more ".repeat(30)}`], { maxChars: 80 });
+  assert.ok(long.units.length >= 1 && long.units.every((u) => u.length <= 80));
+});
+
+test("makeReplyChunker hides special tokens, also when they come in parts", () => {
+  const { units, rest } = chunk(["Here is the chart {im", "g: /tmp/a b.png} for today. And <no_", "reply> the {PDF:x.pdf}rest. {bg:str", "ength}"]);
+  assert.deepEqual([...units, ...rest].map(speakable), ["Here is the chart for today.", "And the rest."]);
+  // The sentinel alone gives nothing, in any split.
+  for (const parts of [["<no_reply>"], ["<", "no", "_reply", ">"], ["**<no_reply>**"]]) {
+    const r = chunk(parts);
+    assert.deepEqual([...r.units, ...r.rest].filter((u) => /[a-z0-9]/i.test(u)), [], parts.join("|"));
+  }
+  // An unclosed token at the end is dropped, not spoken.
+  assert.deepEqual(chunk(["Done now. {file: /tmp/rep"]).rest, ["Done now."]);
+  // A "<" or "{" that cannot start a token is normal text.
+  const lit = chunk(["Is 3 < 5? Yes it is. Use {weird} braces, and <3 too."]);
+  assert.deepEqual([...lit.units, ...lit.rest], ["Is 3 < 5? Yes it is.", "Use {weird} braces, and <3 too."]);
+});
+
+// A turn that writes its reply as deltas over time. step(n) runs between the
+// deltas, so a test can wait for audio or speak over the reply.
+function streamedTurn(deltas, { between = async () => {}, result = "" } = {}) {
+  return async (t) => {
+    for (let i = 0; i < deltas.length; i++) {
+      t.onText?.(deltas[i]);
+      await between(i, t);
+    }
+    return result;
+  };
+}
+
+async function streamSetup(onTurn, { session = {}, pipelineOpts = {} } = {}) {
+  const local = fakeLocalSpeech();
+  const s = await setup({ onTurn, session, pipelineOpts: { engine: "local", localSpeech: local, streamReply: true, ...pipelineOpts } });
+  await s.incoming("v3:st");
+  const peer = s.connectMedia();
+  await peer.open();
+  peer.start("v3:st");
+  await waitFor(() => peer.marks().includes("g1:end"));
+  return { s, local, peer };
+}
+
+test("pipeline (stream): the first sentence plays before the turn ends, and nothing is spoken two times", async () => {
+  let ctx;
+  let turnDone = false;
+  let mediaBeforeEnd = 0;
+  const onTurn = async (t, n) => {
+    const r = await streamedTurn(["Sure thing, here it is. The first", " part is done.", " And {img:/tmp/c.png}the second part."], {
+      between: async (i) => {
+        if (i === 0) {
+          // The first sentence reaches the caller while Alfred still writes.
+          const before = ctx.peer.media().length;
+          await waitFor(() => ctx.peer.media().length > before);
+          mediaBeforeEnd = ctx.peer.media().length;
+        }
+      },
+    })(t, n);
+    turnDone = true;
+    return r;
+  };
+  ctx = await streamSetup(onTurn);
+  const { s, local } = ctx;
+  try {
+    local.say("EndOfTurn", "show me", { endOfSpeechAt: Date.now() - 800, sttMs: 800 });
+    await waitFor(() => s.logs.some((l) => /Call reply heard/.test(l)));
+    assert.ok(turnDone);
+    assert.ok(mediaBeforeEnd > 0);
+    assert.deepEqual(local.st.texts.slice(1), ["Sure thing, here it is.", "The first part is done.", "And the second part."]);
+    assert.ok(s.logs.some((l) => /First streamed text \d+ ms after the transcript/.test(l)));
+    assert.ok(s.logs.some((l) => /Latency \d+ ms: end of speech → first audio sent \(transcript 800 ms, Alfred \d+ ms, speech \d+ ms\) — streamed/.test(l)));
+    assert.ok(s.logs.some((l) => /Call reply heard \(\d+ chars in 3 streamed parts\)/.test(l)));
+    // One utterance: one end mark for the reply.
+    assert.deepEqual(ctx.peer.marks().filter((m) => /^r\d+:end$/.test(m)).length, 1);
+  } finally {
+    await s.close();
+  }
+});
+
+test("pipeline (stream): the onTurn of a turn gets onText only when streaming is on", async () => {
+  const seen = [];
+  const local = fakeLocalSpeech();
+  const s = await setup({
+    onTurn: async (t) => {
+      seen.push(typeof t.onText);
+      return "Plain reply. Two sentences.";
+    },
+    pipelineOpts: { engine: "local", localSpeech: local }, // streamReply off (VOICE_STREAM_REPLY=0)
+  });
+  try {
+    await s.incoming("v3:off");
+    const peer = s.connectMedia();
+    await peer.open();
+    peer.start("v3:off");
+    await waitFor(() => peer.marks().includes("g1:end"));
+    local.say("EndOfTurn", "hi");
+    await waitFor(() => s.logs.some((l) => /Call reply heard \(\d+ chars\)$/.test(l)));
+    assert.deepEqual(seen, ["undefined"]);
+    assert.deepEqual(local.st.texts.slice(1), ["Plain reply.", "Two sentences."]);
+    assert.ok(!s.logs.some((l) => /streamed/.test(l)));
+  } finally {
+    await s.close();
+  }
+});
+
+test("pipeline (stream): a reply with no streamed text is spoken whole", async () => {
+  const { s, local } = await streamSetup(async () => "All clear today. Nothing on.");
+  try {
+    local.say("EndOfTurn", "anything on?");
+    await waitFor(() => s.logs.some((l) => /Call reply heard/.test(l)));
+    assert.deepEqual(local.st.texts.slice(1), ["All clear today.", "Nothing on."]);
+  } finally {
+    await s.close();
+  }
+});
+
+test("pipeline (stream): <no_reply> in parts speaks nothing", async () => {
+  const { s, local } = await streamSetup(streamedTurn(["<no", "_rep", "ly>"]));
+  try {
+    local.say("EndOfTurn", "not for you");
+    await waitFor(() => s.logs.some((l) => /Call reply: nothing to speak/.test(l)));
+    assert.deepEqual(local.st.texts.slice(1), []);
+  } finally {
+    await s.close();
+  }
+});
+
+test("pipeline (stream): a barge-in mid-stream clears the audio and stops the rest", async () => {
+  let ctx;
+  let lateText = null;
+  const onTurn = streamedTurn(["This is the first sentence of it. ", "This one comes after the barge-in. ", "So does this one."], {
+    between: async (i) => {
+      if (i !== 0) return;
+      await waitFor(() => ctx.peer.media().length > 0 && ctx.local.st.texts.length === 2);
+      ctx.local.say("StartOfTurn");
+      await waitFor(() => ctx.peer.frames.some((f) => f.event === "clear"));
+      lateText = ctx.local.st.texts.length;
+    },
+  });
+  ctx = await streamSetup((t, n) => (n === 1 ? onTurn(t) : "Okay."), { session: { dropWindowMs: 0 } });
+  const { s, local } = ctx;
+  try {
+    local.say("EndOfTurn", "tell me");
+    await waitFor(() => s.logs.some((l) => /Call reply cut/.test(l)));
+    assert.ok(s.logs.some((l) => /Barge-in: .*reply not heard/.test(l)));
+    await sleep(50);
+    assert.equal(local.st.texts.length, lateText); // no synthesis after the barge-in
+    assert.ok(!local.st.texts.some((t) => /after the barge-in|So does/.test(t)));
+    local.say("EndOfTurn", "what time is it");
+    await waitFor(() => s.turns.length === 2);
+    assert.equal(s.turns[1].missed, true);
+  } finally {
+    await s.close();
+  }
+});
+
+test("pipeline (stream): a turn cancelled in the drop window stops its speech, and is not a missed reply", async () => {
+  let ctx;
+  const signals = [];
+  const onTurn = async (t, n) => {
+    signals.push(t.signal);
+    if (n !== 1) return "Booked.";
+    t.onText("Okay, I will look for a table. ");
+    await waitFor(() => ctx.peer.media().length > 0 && ctx.local.st.texts.length === 2);
+    ctx.local.say("StartOfTurn"); // inside the 1.5 s drop window
+    t.onText("This text comes after the abort. ");
+    return "";
+  };
+  ctx = await streamSetup(onTurn);
+  const { s, local } = ctx;
+  try {
+    local.say("EndOfTurn", "book a table for");
+    await waitFor(() => signals.length === 1 && signals[0].aborted);
+    await waitFor(() => ctx.peer.frames.some((f) => f.event === "clear"));
+    assert.ok(!s.logs.some((l) => /reply not heard/.test(l)));
+    local.say("EndOfTurn", "two at eight");
+    await waitFor(() => s.logs.some((l) => /Call reply heard/.test(l)));
+    assert.equal(s.turns[1].text, "book a table for two at eight");
+    assert.equal(s.turns[1].missed, false);
+    assert.ok(!local.st.texts.some((t) => /after the abort/.test(t)));
+    assert.deepEqual(local.st.texts.slice(1), ["Okay, I will look for a table.", "Booked."]);
+  } finally {
+    await s.close();
+  }
+});
+
+test("pipeline (stream): a failed turn after some text speaks the error, not the held rest", async () => {
+  const { s, local } = await streamSetup(
+    streamedTurn(["Let me check that for you.\n", "The answer is"], { result: "That took longer than 120s, so I stopped it." })
+  );
+  try {
+    local.say("EndOfTurn", "slow one");
+    await waitFor(() => s.logs.some((l) => /Call reply heard/.test(l)));
+    assert.deepEqual(local.st.texts.slice(1), ["Let me check that for you.", "That took longer than 120s, so I stopped it."]);
+  } finally {
+    await s.close();
+  }
+});
+
+test("pipeline (stream): a long wait for a tool after some text speaks a filler in the same reply", async () => {
+  let ctx;
+  const onTurn = streamedTurn(["Let me check that.\n", "It is sunny."], {
+    between: async (i) => {
+      if (i === 0) await waitFor(() => ctx.local.st.texts.includes(FILLERS[1]), 3000);
+    },
+  });
+  ctx = await streamSetup(onTurn, { pipelineOpts: { fillerMs: 10_000, fillerRepeatMs: 60 } });
+  const { s, local } = ctx;
+  try {
+    local.say("EndOfTurn", "weather?");
+    await waitFor(() => s.logs.some((l) => /Call reply heard/.test(l)));
+    assert.deepEqual(local.st.texts.slice(1), ["Let me check that.", FILLERS[1], "It is sunny."]);
+    // The echo guard heard "not playing" in the wait, and "playing" again.
+    assert.ok(local.st.playing.join(",").includes("true,false,true"));
+  } finally {
+    await s.close();
+  }
+});
+
+test("pipeline (stream): a long streamed reply stops at the spoken cap", async () => {
+  const sentences = Array.from({ length: 12 }, (_, i) => `This is streamed sentence number ${i} of the reply. `);
+  const { s, local } = await streamSetup(streamedTurn(sentences), { session: { maxSpokenChars: 200 } });
+  try {
+    local.say("EndOfTurn", "long one");
+    await waitFor(() => s.logs.some((l) => /Call reply heard/.test(l)));
+    const spoken = local.st.texts.slice(1);
+    assert.equal(spoken.at(-1), OVERFLOW_LINE);
+    assert.ok(spoken.join(" ").length <= 200 + OVERFLOW_LINE.length);
+    assert.ok(spoken.length < 12);
   } finally {
     await s.close();
   }

@@ -24,6 +24,7 @@ import { startTelnyxWebhook, makeMessagingRoute, sendSms, smsText, parseNumberLi
 import { makeVoiceLlmRoutes } from "./telnyx/voice.js";
 import { makeVoicePipeline, EVENTS_PATH as VOICE_EVENTS_PATH } from "./telnyx/pipeline.js";
 import { startLocalSpeech, sidecarConfig } from "./voice/local-speech.js";
+import { makeStreamParser } from "./claude-stream.js";
 
 // ── Config ──────────────────────────────────────────────────────────────────
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
@@ -82,6 +83,9 @@ const voicePipelineConfigured = !!(VOICE_PIPELINE_TOKEN && VOICE_PUBLIC_URL && T
 // activity detector, Parakeet and Kokoro in a sidecar on this machine
 // (voice/local_speech.py). "telnyx" (v2) uses the Telnyx STT and TTS.
 const VOICE_PIPELINE_ENGINE = (process.env.VOICE_PIPELINE_ENGINE || "local").trim().toLowerCase();
+// The pipeline speaks Alfred's reply sentence by sentence while he writes it.
+// "0" makes it wait for the whole reply, as before.
+const VOICE_STREAM_REPLY = process.env.VOICE_STREAM_REPLY !== "0";
 const envInt = (name) => (process.env[name] ? parseInt(process.env[name]) : undefined);
 const VOICE_LOCAL_CONFIG = sidecarConfig({
   eotMs: envInt("VOICE_LOCAL_EOT_MS"),
@@ -361,12 +365,23 @@ function isAuthFailure(stdout, stderr) {
 
 // signal (optional) stops the child early: a phone turn that Telnyx dropped.
 // The promise then resolves with is_aborted and no result.
-function runClaude(message, sessionId, { signal } = {}) {
+//
+// onText (optional) gets the reply text while Alfred writes it. Then the child
+// runs with --output-format stream-json, and claude-stream.js reads its lines.
+// The "result" line is the same object as json mode prints, so the timeout,
+// login check and result parse below do not change. Without onText, the
+// command and the parse are the same as before.
+function runClaude(message, sessionId, { signal, onText } = {}) {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) return resolve({ result: "", session_id: null, is_aborted: true });
+    const parser = typeof onText === "function"
+      ? makeStreamParser({ onText, onError: (err) => console.error(`⚠️  Streamed reply text failed: ${err.message}`) })
+      : null;
     const args = [
       "-p", message,
-      "--output-format", "json",
+      ...(parser
+        ? ["--output-format", "stream-json", "--include-partial-messages", "--verbose"]
+        : ["--output-format", "json"]),
       "--allowedTools", "Bash,Read,Edit,Write",
       "--dangerously-skip-permissions",
     ];
@@ -412,6 +427,7 @@ function runClaude(message, sessionId, { signal } = {}) {
     let aborted = false;
     signal?.addEventListener("abort", () => {
       aborted = true;
+      parser?.stop();
       proc.kill("SIGTERM");
       setTimeout(() => proc.kill("SIGKILL"), 2000).unref();
     }, { once: true });
@@ -419,11 +435,19 @@ function runClaude(message, sessionId, { signal } = {}) {
     let stdout = "";
     let stderr = "";
 
-    proc.stdout.on("data", (d) => (stdout += d.toString()));
+    proc.stdout.on("data", (d) => {
+      if (parser) parser.push(d);
+      else stdout += d.toString();
+    });
     proc.stderr.on("data", (d) => (stderr += d.toString()));
 
     proc.on("close", (code, signal) => {
       clearTimeout(killer);
+      // Stream mode: from here on, stdout is what json mode would print.
+      if (parser) {
+        parser.end();
+        stdout = parser.body();
+      }
       if (aborted) {
         resolve({ result: "", session_id: null, is_aborted: true });
         return;
@@ -801,7 +825,7 @@ async function runRonnieMetrics(msg) {
 // single global state.json, so overlapping turns would resume the same session
 // twice and race to write the new session id back. `target` is where the turn
 // answers — Discord, SMS, or both (see "Reply targets" below).
-async function handleTurn(target, userMessage, attachments = [], { signal } = {}) {
+async function handleTurn(target, userMessage, attachments = [], { signal, onText } = {}) {
   // "/clear" / "/c" as a prefix: bare = clear and wait; "/c <text>" = clear,
   // then run <text> as the fresh session's first turn (one message does both).
   const clear = parseClearCommand(userMessage);
@@ -893,7 +917,8 @@ async function handleTurn(target, userMessage, attachments = [], { signal } = {}
     }
 
     // Run Claude
-    const response = await runClaude(finalMessage, sessionId, { signal });
+    // onText: a phone call that speaks the reply while Alfred writes it.
+    const response = await runClaude(finalMessage, sessionId, { signal, onText });
 
     // A dropped phone turn: Telnyx sent a longer version of the same words.
     // Keep no state and send nothing. The next turn carries the words.
@@ -951,7 +976,9 @@ async function handleTurn(target, userMessage, attachments = [], { signal } = {}
     const { text: cleaned, files } = extractAttachments(visibleText);
     const reply = cleaned.trim() ||
       (files.length ? "" : deferStrength ? "On it — pulling your workout, back in ~2 min ⏳" : "(empty response)");
-    await target.send(reply, files);
+    // streamed: the caller already heard this text as it came. A default line
+    // (no text from Alfred) did not stream, so the call must still speak it.
+    await target.send(reply, files, { streamed: !!onText && !!cleaned.trim() });
 
     console.log(`✅ Replied (${reply.length} chars${files.length ? `, ${files.length} file(s)` : ""}${deferStrength ? ", deferred digest" : ""})`);
     await logTurn({ dir: "out", kind: "reply", text: reply, files: files.length, sessionId: response.session_id || null });
@@ -1259,14 +1286,15 @@ async function onSmsText({ from, text, media }) {
 // A phone call. The reply is spoken, so send() keeps the text for the voice
 // route to stream back, and posts a copy in the mirror channel (if set). A late
 // send, for example a deferred strength follow-up, reaches the mirror only.
+// opts.streamed: the caller heard this text while Alfred wrote it.
 function callTarget({ discord = null, who, onReply }) {
   return {
     who,
     via: "call",
     typing: () => discord?.typing() ?? Promise.resolve(),
     react: (emoji) => discord?.react(emoji) ?? Promise.resolve(),
-    send: async (text, files = []) => {
-      onReply(text);
+    send: async (text, files = [], opts = {}) => {
+      onReply(text, opts);
       if (discord) await discord.send(text, files).catch((err) => console.error(`⚠️  Call mirror post failed: ${err.message}`));
     },
   };
@@ -1275,7 +1303,12 @@ function callTarget({ discord = null, who, onReply }) {
 // One caller turn from telnyx/voice.js (v1) or telnyx/pipeline.js (v2). It
 // runs the same path as a Discord message, in the same session, and resolves
 // to the text to speak.
-async function onCallTurn({ text, caller, takeMissed, signal }) {
+//
+// onText (pipeline only, VOICE_STREAM_REPLY): the pipeline speaks the reply
+// text while Alfred writes it. Then this resolves only to text that did not
+// stream and must be spoken whole: an error, a timeout, or a default line.
+// The mirror post still gets the whole reply.
+async function onCallTurn({ text, caller, takeMissed, signal, onText }) {
   let discord = null;
   if (VOICE_MIRROR_CHANNEL) {
     try {
@@ -1287,10 +1320,19 @@ async function onCallTurn({ text, caller, takeMissed, signal }) {
     }
   }
   let reply = "";
+  let streamedAny = false;
+  const streamText = typeof onText === "function"
+    ? (d) => { streamedAny = true; onText(d); }
+    : undefined;
   const target = callTarget({
     discord,
     who: { tag: `call:${caller}`, id: caller, channel: VOICE_MIRROR_CHANNEL || "call" },
-    onReply: (t) => { reply = reply ? `${reply}\n${t}` : t; },
+    onReply: (t, { streamed = false } = {}) => {
+      // The pipeline spoke this text from the stream. Do not give it again.
+      // If no text came by the stream, give it, so the call is not silent.
+      if (streamed && streamedAny) return;
+      reply = reply ? `${reply}\n${t}` : t;
+    },
   });
   await enqueueTurn(() => {
     // Telnyx dropped this early guess while it waited in the queue.
@@ -1301,7 +1343,7 @@ async function onCallTurn({ text, caller, takeMissed, signal }) {
     // Read the flag when the turn starts. A reply that the caller talked over
     // can finish while this turn waits in the queue.
     const note = takeMissed() ? "(The caller talked over your last reply and did not hear it.)\n" : "";
-    return handleTurn(target, note + text, [], { signal });
+    return handleTurn(target, note + text, [], { signal, onText: streamText });
   });
   return reply;
 }
@@ -1432,6 +1474,7 @@ if (voicePipelineConfigured) {
       fillerRepeatMs: VOICE_FILLER_REPEAT_MS,
       engine: VOICE_PIPELINE_ENGINE,
       localSpeech,
+      streamReply: VOICE_STREAM_REPLY,
     });
   } catch (err) {
     localSpeech?.stop();
@@ -1471,7 +1514,8 @@ if (smsConfigured || voiceConfigured || voicePipeline) {
         hook.server.on("upgrade", voicePipeline.handleUpgrade);
         console.log(
           `📞 Call pipeline ${voicePipeline.engine === "local" ? "v3 (local speech)" : "v2 (Telnyx speech)"} is on — ` +
-            `events on ${hook.url}${VOICE_EVENTS_PATH}, media socket for ${VOICE_PUBLIC_URL}`
+            `events on ${hook.url}${VOICE_EVENTS_PATH}, media socket for ${VOICE_PUBLIC_URL}` +
+            (VOICE_STREAM_REPLY ? ", streamed replies" : "")
         );
       }
     })

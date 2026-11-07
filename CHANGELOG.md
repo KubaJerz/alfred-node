@@ -5,6 +5,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
 
 ## [Unreleased]
 ### Added
+- **The call pipeline speaks Alfred's reply while he writes it.** For a v2 or
+  v3 call turn, `claude -p` runs with `--output-format stream-json`, and
+  `claude-stream.js` reads the text as it comes. The pipeline speaks each
+  sentence at once, as parts of one reply (barge-in, marks and "heard" work
+  as before). Through Alfred's real setup, the first text comes 1.6-2.8 s
+  after the start and the whole reply 3.0-4.1 s after it, so a reply starts
+  about 1-2 s sooner. The text before a tool call ("Let me check.") is also
+  spoken. Tokens (`<no_reply>`, `{img:…}`, `{bg:strength}`) never reach
+  speech, also when they come in parts. A barge-in stops the rest of the
+  reply. A turn that fails after some text speaks the error. The log adds
+  "First streamed text". `VOICE_STREAM_REPLY=0` waits for the whole reply,
+  as before. Discord, SMS and v1 calls do not change.
 - **The call pipeline can run its speech on this machine (v3).** With
   `VOICE_PIPELINE_ENGINE=local` (the default of the pipeline), a Python
   sidecar (`voice/local_speech.py`) does the speech steps with no paid
