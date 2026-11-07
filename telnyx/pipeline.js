@@ -1,5 +1,13 @@
-// Telnyx voice v2: our own call pipeline. It is an opt-in second path next to
-// the v1 AI Assistant (telnyx/voice.js). v1 stays the default.
+// Telnyx voice v2/v3: our own call pipeline. It is an opt-in second path next
+// to the v1 AI Assistant (telnyx/voice.js). v1 stays the default.
+//
+// Two speech engines can do the speech-to-text and text-to-speech steps
+// below. The engine option selects one:
+//   - "telnyx" (v2): Telnyx STT (Deepgram Flux) and Telnyx TTS (Ultra voice).
+//   - "local" (v3): a sidecar on this machine (voice/local-speech.js): a voice
+//     activity detector and Parakeet for speech-to-text, Kokoro for
+//     text-to-speech. Audio does not leave the machine.
+// Both engines give the same interfaces, so the session code is the same.
 //
 // The split: Telnyx Call Control answers the call and streams the raw audio
 // both ways over one WebSocket. We do the rest:
@@ -34,6 +42,7 @@ export const EVENTS_PATH = "/telnyx/voice/events";
 export const MEDIA_PATH = "/telnyx/voice/media";
 export const GREETING = "Hey, it's Alfred.";
 export const MAX_SPOKEN_CHARS = 1200; // text-to-speech costs money per character
+export const ENGINES = ["telnyx", "local"];
 export const OVERFLOW_LINE = "The rest is in Discord.";
 const CALL_API = "https://api.telnyx.com/v2";
 const MAX_FRAME_BYTES = 64 * 1024; // one media frame is about 200 bytes
@@ -314,11 +323,16 @@ export function makeCallSession({
   let ended = false;
   const reorder = makeReorder((b64) => stt?.send(Buffer.from(b64, "base64")), { log });
 
+  // Tell the speech engine when Alfred's audio plays. The local engine uses it
+  // for its echo guard. The Telnyx engine has no setPlaying.
+  const setPlaying = (on) => stt?.setPlaying?.(on);
+
   const finish = (utt, result) => {
     if (utt.result) return;
     utt.result = result;
     clearTimeout(utt.echoTimer);
     active.delete(utt.id);
+    if (!active.size) setPlaying(false);
     utt.resolve(result);
   };
 
@@ -400,10 +414,11 @@ export function makeCallSession({
     utt.onFirst = () => {
       if (utt.firstAt) return;
       utt.firstAt = now();
+      setPlaying(true);
       if (kind === "reply" && utt.endOfSpeechAt) {
         log(
           `📞 Latency ${utt.firstAt - utt.endOfSpeechAt} ms: end of speech → first audio sent` +
-            ` (turn ${utt.turnMs} ms, speech ${utt.firstAt - utt.replyAt} ms)`
+            ` (transcript ${utt.sttMs} ms, Alfred ${utt.turnMs} ms, speech ${utt.firstAt - utt.replyAt} ms)`
         );
       }
     };
@@ -446,8 +461,9 @@ export function makeCallSession({
     fillerTimer = setTimeout(say, fillerMs);
   };
 
-  const submitTurn = async (text, endOfSpeechAt) => {
+  const submitTurn = async (text, endOfSpeechAt, info = {}) => {
     const seq = ++turnSeq;
+    const transcriptAt = now();
     // A new caller turn replaces any turn that still waits for its reply. Its
     // reply is not spoken, and the next turn tells Alfred, like v1.
     for (const s of waiting) {
@@ -485,7 +501,8 @@ export function makeCallSession({
     const out = capSpoken(speakable(reply), maxSpokenChars);
     if (!out) return;
     const replyAt = now();
-    const utt = speak(out, "reply", { endOfSpeechAt, replyAt, turnMs: replyAt - endOfSpeechAt });
+    const sttMs = info.sttMs ?? transcriptAt - endOfSpeechAt;
+    const utt = speak(out, "reply", { endOfSpeechAt, replyAt, sttMs, turnMs: replyAt - transcriptAt });
     const result = await utt.done;
     if (result === "cut" || result === "error") missed = true;
     log(`📞 Call reply ${result} (${out.length} chars)`);
@@ -497,7 +514,7 @@ export function makeCallSession({
     if (m.event === "StartOfTurn") {
       if (active.size || player.busy) bargeIn();
     } else if (m.event === "EndOfTurn") {
-      if (m.transcript) submitTurn(m.transcript, now());
+      if (m.transcript) submitTurn(m.transcript, m.endOfSpeechAt ?? now(), { sttMs: m.sttMs });
     }
   };
 
@@ -598,9 +615,16 @@ export function makeVoicePipeline({
   streamWaitMs = STREAM_WAIT_MS,
   fillerMs, // undefined keeps the default of makeCallSession
   fillerRepeatMs,
+  engine = "telnyx",
+  localSpeech, // voice/local-speech.js client, for engine "local"
   session: sessionOpts = {},
 }) {
   if (!publicUrl || !token) throw new Error("The voice pipeline needs a public URL and a token");
+  if (!ENGINES.includes(engine)) throw new Error(`Unknown speech engine "${engine}" (use ${ENGINES.join(" or ")})`);
+  if (engine === "local") {
+    if (!localSpeech) throw new Error('The "local" speech engine needs the local speech sidecar');
+    ttsRate = localSpeech.sampleRate;
+  }
   if (!Number.isInteger(ttsRate / PHONE_RATE) || ttsRate < PHONE_RATE) {
     throw new Error(`The text-to-speech rate must be a whole multiple of ${PHONE_RATE} Hz, not ${ttsRate}`);
   }
@@ -611,16 +635,23 @@ export function makeVoicePipeline({
   const audioCache = new Map();
   const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_FRAME_BYTES });
 
-  const openStt = (handlers) =>
-    openSttDefault({
-      url: sttUrl(sttEndpoint ? { base: sttEndpoint } : {}),
-      apiKey,
-      log,
-      ...(WebSocketImpl ? { WebSocketImpl } : {}),
-      ...handlers,
-    });
-  const synth = (text, signal) =>
-    synthesize({ text, apiKey, voice, sampleRate: ttsRate, signal, fetchImpl, ...(ttsEndpoint ? { url: ttsEndpoint } : {}) });
+  const label = engine === "local" ? "v3, local speech" : "v2";
+  const openStt =
+    engine === "local"
+      ? (handlers) => localSpeech.openStt(handlers)
+      : (handlers) =>
+          openSttDefault({
+            url: sttUrl(sttEndpoint ? { base: sttEndpoint } : {}),
+            apiKey,
+            log,
+            ...(WebSocketImpl ? { WebSocketImpl } : {}),
+            ...handlers,
+          });
+  const synth =
+    engine === "local"
+      ? (text, signal) => localSpeech.synthesize(text, signal)
+      : (text, signal) =>
+          synthesize({ text, apiKey, voice, sampleRate: ttsRate, signal, fetchImpl, ...(ttsEndpoint ? { url: ttsEndpoint } : {}) });
 
   // Forget an answered call whose media stream never started, and hang it up,
   // so the caller does not sit on a silent call.
@@ -662,7 +693,7 @@ export function makeVoicePipeline({
         }
         const call = { caller, at: now(), session: null, timer: null };
         calls.set(id, call);
-        log(`📞 Call from ${caller} — answering (pipeline v2)`);
+        log(`📞 Call from ${caller} — answering (pipeline ${label})`);
         try {
           await callControl.answer(id, answerBody(streamUrl, id));
         } catch (err) {
@@ -822,6 +853,7 @@ export function makeVoicePipeline({
     handleUpgrade,
     streamUrl,
     calls,
+    engine,
     close() {
       for (const c of calls.values()) {
         clearTimeout(c.timer);

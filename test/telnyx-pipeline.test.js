@@ -724,3 +724,82 @@ test("the setup script dry run prints the app request and the manual number step
   const http = await run(["http://box.example.ts.net", "--dry-run"]);
   assert.equal(http.code, 1);
 });
+
+// ── the local speech engine (v3) ────────────────────────────────────────────
+
+// An in-process stand-in for voice/local-speech.js: the same two interfaces,
+// and a record of what the session did with them.
+function fakeLocalSpeech() {
+  const st = { streams: [], texts: [], playing: [] };
+  return {
+    st,
+    sampleRate: 24000,
+    say(event, transcript = "", extra = {}) {
+      st.streams.at(-1).onEvent({ event, transcript, ...extra });
+    },
+    openStt({ onEvent, onClose }) {
+      const s = { onEvent, onClose, bytes: 0, closed: false };
+      st.streams.push(s);
+      return {
+        send: (b) => (s.bytes += b.length),
+        close: () => (s.closed = true),
+        setPlaying: (on) => st.playing.push(on),
+        get open() {
+          return !s.closed;
+        },
+      };
+    },
+    async synthesize(text) {
+      st.texts.push(text);
+      const pcm = fakePcm(text);
+      return (async function* () {
+        yield pcm.subarray(0, 1001);
+        yield pcm.subarray(1001);
+      })();
+    },
+  };
+}
+
+test("makeVoicePipeline checks the engine name and needs the sidecar for local", () => {
+  const base = { publicUrl: PUBLIC, token: TOKEN, apiKey: "K", onTurn: async () => "" };
+  assert.throws(() => makeVoicePipeline({ ...base, engine: "cloud" }), /Unknown speech engine "cloud"/);
+  assert.throws(() => makeVoicePipeline({ ...base, engine: "local" }), /needs the local speech sidecar/);
+  const p = makeVoicePipeline({ ...base, engine: "local", localSpeech: fakeLocalSpeech(), ttsRate: 7 });
+  assert.equal(p.engine, "local"); // the sidecar rate replaces a bad ttsRate
+  p.close();
+  const t = makeVoicePipeline(base);
+  assert.equal(t.engine, "telnyx");
+  t.close();
+});
+
+test("pipeline (local): speech goes through the sidecar, not Telnyx, and the echo guard is told", async () => {
+  const local = fakeLocalSpeech();
+  const s = await setup({ onTurn: async () => "All clear today.", pipelineOpts: { engine: "local", localSpeech: local } });
+  try {
+    await s.incoming("v3:loc");
+    await waitFor(() => s.commands.length === 1);
+    assert.ok(s.logs.some((l) => /answering \(pipeline v3, local speech\)/.test(l)));
+    const peer = s.connectMedia();
+    await peer.open();
+    peer.start("v3:loc");
+    await waitFor(() => peer.marks().includes("g1:end"));
+    assert.deepEqual(local.st.texts, ["Hey, it's Alfred."]);
+    // The greeting played, then ended: playing on, then off.
+    await waitFor(() => local.st.playing.length === 2);
+    assert.deepEqual(local.st.playing, [true, false]);
+    peer.audio(4);
+    await waitFor(() => local.st.streams[0].bytes === 640);
+    local.say("StartOfTurn");
+    local.say("EndOfTurn", "what's on today", { endOfSpeechAt: Date.now() - 900, sttMs: 900 });
+    await waitFor(() => s.logs.some((l) => /Call reply heard/.test(l)));
+    assert.deepEqual(local.st.texts.slice(1), ["All clear today."]);
+    assert.ok(s.logs.some((l) => /Latency \d+ ms: end of speech → first audio sent \(transcript 900 ms, Alfred \d+ ms, speech \d+ ms\)/.test(l)));
+    // No Telnyx speech service was used.
+    assert.equal(s.stt.peers.length, 0);
+    assert.deepEqual(s.tts.texts, []);
+    await s.postEvent("call.hangup", { call_control_id: "v3:loc" });
+    await waitFor(() => local.st.streams[0].closed);
+  } finally {
+    await s.close();
+  }
+});

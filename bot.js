@@ -23,6 +23,7 @@ import { browserEnv } from "./browser.js";
 import { startTelnyxWebhook, makeMessagingRoute, sendSms, smsText, parseNumberList, normalizeNumber } from "./telnyx/sms.js";
 import { makeVoiceLlmRoutes } from "./telnyx/voice.js";
 import { makeVoicePipeline, EVENTS_PATH as VOICE_EVENTS_PATH } from "./telnyx/pipeline.js";
+import { startLocalSpeech, sidecarConfig } from "./voice/local-speech.js";
 
 // ── Config ──────────────────────────────────────────────────────────────────
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
@@ -77,6 +78,21 @@ const VOICE_PIPELINE_VOICE = process.env.VOICE_PIPELINE_VOICE || undefined;
 const VOICE_PIPELINE_TTS_RATE = parseInt(process.env.VOICE_PIPELINE_TTS_RATE || "0") || undefined;
 const VOICE_PIPELINE_SIGNED_MEDIA = process.env.VOICE_PIPELINE_SIGNED_MEDIA !== "0";
 const voicePipelineConfigured = !!(VOICE_PIPELINE_TOKEN && VOICE_PUBLIC_URL && TELNYX_API_KEY && TELNYX_PUBLIC_KEY && VOICE_ALLOWED_NUMBERS.length);
+// The speech engine of the pipeline. "local" (v3, the default) runs the voice
+// activity detector, Parakeet and Kokoro in a sidecar on this machine
+// (voice/local_speech.py). "telnyx" (v2) uses the Telnyx STT and TTS.
+const VOICE_PIPELINE_ENGINE = (process.env.VOICE_PIPELINE_ENGINE || "local").trim().toLowerCase();
+const envInt = (name) => (process.env[name] ? parseInt(process.env[name]) : undefined);
+const VOICE_LOCAL_CONFIG = sidecarConfig({
+  eotMs: envInt("VOICE_LOCAL_EOT_MS"),
+  minSpeechMs: envInt("VOICE_LOCAL_MIN_SPEECH_MS"),
+  echoGuardMs: envInt("VOICE_LOCAL_ECHO_GUARD_MS"),
+  vad: process.env.VOICE_LOCAL_VAD || undefined,
+  voice: process.env.VOICE_LOCAL_VOICE || undefined,
+  lang: process.env.VOICE_LOCAL_LANG || undefined,
+  speed: process.env.VOICE_LOCAL_SPEED ? parseFloat(process.env.VOICE_LOCAL_SPEED) : undefined,
+  threads: envInt("VOICE_LOCAL_THREADS"),
+});
 // Alfred reads this tag at the top of a phone-call turn (see agent/SOUL.md).
 const CALL_TAG = "[via phone call]";
 const VIA_TAGS = { sms: SMS_TAG, call: CALL_TAG };
@@ -1395,7 +1411,11 @@ startMailListener({ gmail: sharedGmail, enqueue: ronnie?.enqueue, onDrained: ron
 // SMS and v1 calls still start.
 let voicePipeline = null;
 if (voicePipelineConfigured) {
+  let localSpeech;
   try {
+    // The sidecar loads its models once (a few seconds) and stays up. If it
+    // stops, the client starts it again. It never stops the bot.
+    if (VOICE_PIPELINE_ENGINE === "local") localSpeech = startLocalSpeech({ config: VOICE_LOCAL_CONFIG });
     voicePipeline = makeVoicePipeline({
       publicUrl: VOICE_PUBLIC_URL,
       token: VOICE_PIPELINE_TOKEN,
@@ -1410,8 +1430,11 @@ if (voicePipelineConfigured) {
       requireSignature: VOICE_PIPELINE_SIGNED_MEDIA,
       fillerMs: VOICE_FILLER_MS,
       fillerRepeatMs: VOICE_FILLER_REPEAT_MS,
+      engine: VOICE_PIPELINE_ENGINE,
+      localSpeech,
     });
   } catch (err) {
+    localSpeech?.stop();
     console.error(`⚠️  Call pipeline v2 is off: ${err.message}`);
   }
 } else if (VOICE_PIPELINE_TOKEN) {
@@ -1446,7 +1469,10 @@ if (smsConfigured || voiceConfigured || voicePipeline) {
       if (voiceConfigured) console.log(`📞 Calls are on — model endpoint on ${hook.url}/telnyx/voice/v1${VOICE_MIRROR_CHANNEL ? ", mirrored to Discord" : ""}`);
       if (voicePipeline) {
         hook.server.on("upgrade", voicePipeline.handleUpgrade);
-        console.log(`📞 Call pipeline v2 is on — events on ${hook.url}${VOICE_EVENTS_PATH}, media socket for ${VOICE_PUBLIC_URL}`);
+        console.log(
+          `📞 Call pipeline ${voicePipeline.engine === "local" ? "v3 (local speech)" : "v2 (Telnyx speech)"} is on — ` +
+            `events on ${hook.url}${VOICE_EVENTS_PATH}, media socket for ${VOICE_PUBLIC_URL}`
+        );
       }
     })
     .catch((err) => console.error(`⚠️  Telnyx webhook failed to start: ${err.message}`));

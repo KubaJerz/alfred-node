@@ -4,6 +4,19 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [SemVer](https://semver.org/).
 
 ## [Unreleased]
+### Added
+- **The call pipeline can run its speech on this machine (v3).** With
+  `VOICE_PIPELINE_ENGINE=local` (the default of the pipeline), a Python
+  sidecar (`voice/local_speech.py`) does the speech steps with no paid
+  service: Silero voice detection (energy detection when Silero is not in the
+  cache) and a silence timer for the end of a turn, Parakeet for
+  speech-to-text, and Kokoro (British voice `bm_george`) for text-to-speech.
+  bot.js starts the sidecar once and keeps the models in memory. It starts
+  the sidecar again if it stops. Only the phone line and the media stream stay
+  paid, about $0.009 a minute, and audio does not leave the machine.
+  `VOICE_PIPELINE_ENGINE=telnyx` keeps v2. Each reply logs the latency from
+  the end of speech to the transcript, to Alfred's reply, and to the first
+  audio sent. The `VOICE_LOCAL_*` settings are in `env.example`.
 ### Fixed
 - **A call turn that Telnyx drops is cancelled.** Telnyx guesses the end of a
   turn early. When the caller keeps talking, it drops that request within
