@@ -803,3 +803,99 @@ test("pipeline (local): speech goes through the sidecar, not Telnyx, and the ech
     await s.close();
   }
 });
+
+test("pipeline: the caller talks again within the drop window — the turn is cancelled and its text goes with the next", async () => {
+  const local = fakeLocalSpeech();
+  const signals = [];
+  const s = await setup({
+    pipelineOpts: { engine: "local", localSpeech: local },
+    onTurn: async (t, n) => {
+      signals.push(t.signal);
+      if (n === 1) {
+        await new Promise((r) => t.signal.addEventListener("abort", r));
+        return "";
+      }
+      return "Booked.";
+    },
+  });
+  try {
+    await s.incoming("v3:d");
+    const peer = s.connectMedia();
+    await peer.open();
+    peer.start("v3:d");
+    await waitFor(() => peer.marks().includes("g1:end"));
+    local.say("EndOfTurn", "book a table for");
+    await waitFor(() => signals.length === 1);
+    local.say("StartOfTurn"); // inside 1.5 s
+    assert.equal(signals[0].aborted, true);
+    assert.ok(s.logs.some((l) => /kept talking \d+ ms after a turn — turn cancelled/.test(l)));
+    local.say("EndOfTurn", "two at eight");
+    await waitFor(() => s.logs.some((l) => /Call reply heard/.test(l)));
+    assert.equal(s.turns[1].text, "book a table for two at eight");
+    assert.equal(s.turns[1].missed, false); // a cancelled turn is not a missed reply
+    assert.ok(!s.logs.some((l) => /A newer caller turn came first/.test(l)));
+    assert.equal(signals[1].aborted, false);
+  } finally {
+    await s.close();
+  }
+});
+
+test("pipeline: a cancelled turn is sent again when the next speech has no words", async () => {
+  const local = fakeLocalSpeech();
+  const s = await setup({
+    pipelineOpts: { engine: "local", localSpeech: local },
+    onTurn: async (t, n) => {
+      if (n === 1) await new Promise((r) => t.signal.addEventListener("abort", r));
+      return "Okay.";
+    },
+  });
+  try {
+    await s.incoming("v3:e");
+    const peer = s.connectMedia();
+    await peer.open();
+    peer.start("v3:e");
+    await waitFor(() => peer.marks().includes("g1:end"));
+    local.say("EndOfTurn", "call mum");
+    await waitFor(() => s.turns.length === 1);
+    local.say("StartOfTurn");
+    local.say("EndOfTurn", ""); // a cough: no words
+    await waitFor(() => s.turns.length === 2);
+    assert.equal(s.turns[1].text, "call mum");
+  } finally {
+    await s.close();
+  }
+});
+
+test("pipeline: speech after the drop window does not cancel the running turn", async () => {
+  const local = fakeLocalSpeech();
+  let release;
+  const signals = [];
+  const s = await setup({
+    pipelineOpts: { engine: "local", localSpeech: local },
+    session: { dropWindowMs: 30 },
+    onTurn: async (t, n) => {
+      signals.push(t.signal);
+      if (n === 1) await new Promise((r) => (release = r));
+      return n === 1 ? "First." : "Second.";
+    },
+  });
+  try {
+    await s.incoming("v3:w");
+    const peer = s.connectMedia();
+    await peer.open();
+    peer.start("v3:w");
+    await waitFor(() => peer.marks().includes("g1:end"));
+    local.say("EndOfTurn", "first question");
+    await waitFor(() => signals.length === 1);
+    await sleep(60);
+    local.say("StartOfTurn");
+    assert.equal(signals[0].aborted, false);
+    local.say("EndOfTurn", "second question");
+    await waitFor(() => s.turns.length === 2);
+    assert.equal(s.turns[1].text, "second question");
+    release();
+    await waitFor(() => s.logs.some((l) => /A newer caller turn came first/.test(l)));
+  } finally {
+    await s.close();
+  }
+});

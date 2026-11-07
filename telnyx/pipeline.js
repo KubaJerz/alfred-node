@@ -34,7 +34,7 @@
 import crypto from "crypto";
 import { WebSocketServer } from "ws";
 import { verifySignature } from "./sms.js";
-import { FILLERS, FILLER_MS, FILLER_REPEAT_MS, speakable } from "./voice.js";
+import { FILLERS, FILLER_MS, FILLER_REPEAT_MS, DROP_WINDOW_MS, speakable } from "./voice.js";
 import { makePcmToMulaw, splitSentences, MULAW_SILENCE, PHONE_RATE } from "./audio.js";
 import { openStt as openSttDefault, sttUrl, synthesize, TTS_SAMPLE_RATE, DEFAULT_VOICE } from "./speech.js";
 
@@ -306,6 +306,7 @@ export function makeCallSession({
   player: playerOpts = {},
   sttRetryMs = STT_RETRY_MS,
   markGraceMs = MARK_GRACE_MS,
+  dropWindowMs = DROP_WINDOW_MS,
 }) {
   const player = makePlayer({ send: sendFrame, now, ...playerOpts });
   const active = new Map(); // utterance id -> utterance
@@ -316,6 +317,8 @@ export function makeCallSession({
   const waiting = new Set(); // turn numbers that wait for a reply
   const dropped = new Set(); // turn numbers whose reply we will not speak
   const unreported = new Set(); // dropped turns that no later turn reported yet
+  const turns = new Map(); // turn number -> { controller, at, text, cancelled }
+  let carry = []; // text of cancelled turns, sent again with the next turn
   let fillerTimer = null;
   let stt = null;
   let sttFails = 0;
@@ -461,15 +464,42 @@ export function makeCallSession({
     fillerTimer = setTimeout(say, fillerMs);
   };
 
+  // The caller started to talk again soon after a turn went to Alfred. Then
+  // that turn was only the first part of what the caller said (the speech
+  // engine ended the turn too early). Cancel it: its signal aborts, so it
+  // leaves the queue or its claude process stops. Its text goes in front of
+  // the next turn. This is the v1 fix for early guesses (DROP_WINDOW_MS in
+  // telnyx/voice.js). We measure to the start of the new speech, not to its
+  // end of turn: the end of turn comes at least the end-of-turn silence later.
+  // An older turn is a real new question, so it runs as before.
+  const cancelFreshTurns = () => {
+    const t0 = now();
+    let n = 0;
+    for (const [seq, t] of [...turns].sort((a, b) => a[0] - b[0])) {
+      if (t.cancelled || t0 - t.at >= dropWindowMs) continue;
+      t.cancelled = true;
+      t.controller.abort();
+      dropped.add(seq);
+      carry.push(t.text);
+      n++;
+      log(`📞 The caller kept talking ${t0 - t.at} ms after a turn — turn cancelled, its text goes with the next one`);
+    }
+    if (n && ![...turns.values()].some((t) => !t.cancelled)) stopFillers();
+  };
+
   const submitTurn = async (text, endOfSpeechAt, info = {}) => {
     const seq = ++turnSeq;
     const transcriptAt = now();
     // A new caller turn replaces any turn that still waits for its reply. Its
-    // reply is not spoken, and the next turn tells Alfred, like v1.
+    // reply is not spoken, and the next turn tells Alfred, like v1. A
+    // cancelled turn is already dropped, and its text is in this turn.
     for (const s of waiting) {
+      if (turns.get(s)?.cancelled) continue;
       dropped.add(s);
       unreported.add(s);
     }
+    const controller = new AbortController();
+    turns.set(seq, { controller, at: transcriptAt, text, cancelled: false });
     waiting.add(seq);
     log(`📞 Call turn from ${caller}: ${text.slice(0, 100)}`);
     startFillers();
@@ -487,11 +517,16 @@ export function makeCallSession({
     };
     let reply = "";
     try {
-      reply = await onTurn({ text, caller, takeMissed });
+      reply = await onTurn({ text, caller, takeMissed, signal: controller.signal });
     } catch (err) {
-      log(`⚠️  Call turn failed: ${err.message}`);
+      if (!controller.signal.aborted) log(`⚠️  Call turn failed: ${err.message}`);
     }
     waiting.delete(seq);
+    turns.delete(seq);
+    if (controller.signal.aborted) {
+      dropped.delete(seq);
+      return;
+    }
     if (dropped.delete(seq)) {
       log(`📞 A newer caller turn came first. This reply is not spoken (${String(reply || "").length} chars).`);
       return;
@@ -512,9 +547,13 @@ export function makeCallSession({
     if (ended) return;
     sttFails = 0; // the link works again, so earlier drops do not count
     if (m.event === "StartOfTurn") {
+      cancelFreshTurns();
       if (active.size || player.busy) bargeIn();
     } else if (m.event === "EndOfTurn") {
-      if (m.transcript) submitTurn(m.transcript, m.endOfSpeechAt ?? now(), { sttMs: m.sttMs });
+      // An empty transcript (noise) still sends the text of a cancelled turn.
+      const text = [...carry, m.transcript].filter(Boolean).join(" ").trim();
+      carry = [];
+      if (text) submitTurn(text, m.endOfSpeechAt ?? now(), { sttMs: m.sttMs });
     }
   };
 

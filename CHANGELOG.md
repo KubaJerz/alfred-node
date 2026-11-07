@@ -18,6 +18,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
   the end of speech to the transcript, to Alfred's reply, and to the first
   audio sent. The `VOICE_LOCAL_*` settings are in `env.example`.
 ### Fixed
+- **A pipeline call turn is cancelled when the caller keeps talking.** The
+  pipeline ends a turn after a short silence. If the caller starts to talk
+  again within 1.5 s of that turn going to Alfred, the turn was only the first
+  part of the sentence. Now that turn is cancelled (its `claude` process stops,
+  or it leaves the queue), and its words go in front of the next turn. This is
+  the v1 fix for early guesses, in the v2 and v3 pipeline. A later start of
+  speech is a new question, and the running turn finishes as before.
+### Fixed
 - **A call turn that Telnyx drops is cancelled.** Telnyx guesses the end of a
   turn early. When the caller keeps talking, it drops that request within
   about 0.7 s and sends the longer text. Before, the dropped turn still ran a
