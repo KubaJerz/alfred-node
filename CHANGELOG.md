@@ -5,6 +5,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
 
 ## [Unreleased]
 ### Added
+- **Phone calls through OpenAI Realtime, with Alfred as a tool (option 2B,
+  #107).** `VOICE_PIPELINE_ENGINE=openai` uses the same Call Control app and
+  media socket as v2/v3, and bridges the call audio to OpenAI Realtime as
+  PCMU in both directions, with no transcoding. The speech model
+  (`gpt-realtime-2.1-mini` by default) decides the end of a turn, answers
+  small talk itself, and calls `ask_alfred` for anything that needs Alfred.
+  That runs the same `onCallTurn` as v1: the same session and the same
+  Discord mirror. If Alfred takes 8 s or more, a short spoken "still working"
+  line plays. A barge-in clears Telnyx and truncates the assistant item at
+  the point the caller heard. The talker prompt is `agent/phone-voice.md`.
+  The log shows the latency of each reply and the token cost of each call.
+  New settings: `OPENAI_API_KEY`, `VOICE_OPENAI_MODEL`, `VOICE_OPENAI_VOICE`,
+  `VOICE_OPENAI_EAGERNESS`, `VOICE_OPENAI_TRANSCRIBE`.
 - **The call pipeline speaks Alfred's reply while he writes it.** For a v2 or
   v3 call turn, `claude -p` runs with `--output-format stream-json`, and
   `claude-stream.js` reads the text as it comes. The pipeline speaks each

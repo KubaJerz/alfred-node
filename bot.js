@@ -2,7 +2,7 @@ import "dotenv/config";
 import { Client, GatewayIntentBits, Partials, AttachmentBuilder, MessageFlags } from "discord.js";
 import { spawn } from "child_process";
 import { readFile, writeFile, mkdir, appendFile } from "fs/promises";
-import { existsSync, openSync, statSync } from "fs";
+import { existsSync, openSync, readFileSync, statSync } from "fs";
 import { fileURLToPath } from "url";
 import path from "path";
 import { startBroker } from "./google/broker.js";
@@ -83,6 +83,16 @@ const voicePipelineConfigured = !!(VOICE_PIPELINE_TOKEN && VOICE_PUBLIC_URL && T
 // activity detector, Parakeet and Kokoro in a sidecar on this machine
 // (voice/local_speech.py). "telnyx" (v2) uses the Telnyx STT and TTS.
 const VOICE_PIPELINE_ENGINE = (process.env.VOICE_PIPELINE_ENGINE || "local").trim().toLowerCase();
+// Engine "openai" (option 2B): OpenAI Realtime talks to the caller and calls
+// Alfred as a tool (telnyx/realtime.js). Its prompt is agent/phone-voice.md.
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
+const VOICE_OPENAI = {
+  model: process.env.VOICE_OPENAI_MODEL || undefined,
+  voice: process.env.VOICE_OPENAI_VOICE || undefined,
+  eagerness: process.env.VOICE_OPENAI_EAGERNESS || undefined,
+  // "0" turns off the caller transcript in the log (it costs a little).
+  ...(process.env.VOICE_OPENAI_TRANSCRIBE === "0" ? { transcribeModel: "" } : {}),
+};
 // The pipeline speaks Alfred's reply sentence by sentence while he writes it.
 // "0" makes it wait for the whole reply, as before.
 const VOICE_STREAM_REPLY = process.env.VOICE_STREAM_REPLY !== "0";
@@ -1452,6 +1462,15 @@ startMailListener({ gmail: sharedGmail, enqueue: ronnie?.enqueue, onDrained: ron
 // WebSocket upgrade to the same server. A bad pipeline config is logged, and
 // SMS and v1 calls still start.
 let voicePipeline = null;
+// The talker prompt for engine "openai". A missing file keeps the default in
+// telnyx/realtime.js.
+function readPhoneVoicePrompt() {
+  try {
+    return readFileSync(path.join(AGENT_DIR, "phone-voice.md"), "utf8").trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
 if (voicePipelineConfigured) {
   let localSpeech;
   try {
@@ -1475,6 +1494,11 @@ if (voicePipelineConfigured) {
       engine: VOICE_PIPELINE_ENGINE,
       localSpeech,
       streamReply: VOICE_STREAM_REPLY,
+      realtime: VOICE_PIPELINE_ENGINE === "openai" ? {
+        apiKey: OPENAI_API_KEY,
+        instructions: readPhoneVoicePrompt(),
+        ...VOICE_OPENAI,
+      } : {},
     });
   } catch (err) {
     localSpeech?.stop();
@@ -1513,9 +1537,9 @@ if (smsConfigured || voiceConfigured || voicePipeline) {
       if (voicePipeline) {
         hook.server.on("upgrade", voicePipeline.handleUpgrade);
         console.log(
-          `📞 Call pipeline ${voicePipeline.engine === "local" ? "v3 (local speech)" : "v2 (Telnyx speech)"} is on — ` +
+          `📞 Call pipeline ${{ local: "v3 (local speech)", openai: "2B (OpenAI Realtime, Alfred as a tool)" }[voicePipeline.engine] || "v2 (Telnyx speech)"} is on — ` +
             `events on ${hook.url}${VOICE_EVENTS_PATH}, media socket for ${VOICE_PUBLIC_URL}` +
-            (VOICE_STREAM_REPLY ? ", streamed replies" : "")
+            (voicePipeline.engine === "openai" ? "" : VOICE_STREAM_REPLY ? ", streamed replies" : "")
         );
       }
     })

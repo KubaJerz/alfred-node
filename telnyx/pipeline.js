@@ -37,12 +37,13 @@ import { verifySignature } from "./sms.js";
 import { FILLERS, FILLER_MS, FILLER_REPEAT_MS, DROP_WINDOW_MS, speakable } from "./voice.js";
 import { makePcmToMulaw, splitSentences, MULAW_SILENCE, PHONE_RATE } from "./audio.js";
 import { openStt as openSttDefault, sttUrl, synthesize, TTS_SAMPLE_RATE, DEFAULT_VOICE } from "./speech.js";
+import { makeRealtimeSession } from "./realtime.js";
 
 export const EVENTS_PATH = "/telnyx/voice/events";
 export const MEDIA_PATH = "/telnyx/voice/media";
 export const GREETING = "Hey, it's Alfred.";
 export const MAX_SPOKEN_CHARS = 1200; // text-to-speech costs money per character
-export const ENGINES = ["telnyx", "local"];
+export const ENGINES = ["telnyx", "local", "openai"];
 export const OVERFLOW_LINE = "The rest is in Discord.";
 const CALL_API = "https://api.telnyx.com/v2";
 const MAX_FRAME_BYTES = 64 * 1024; // one media frame is about 200 bytes
@@ -961,6 +962,7 @@ export function makeVoicePipeline({
   engine = "telnyx",
   localSpeech, // voice/local-speech.js client, for engine "local"
   streamReply = false, // speak the reply while Alfred writes it (onTurn gets onText)
+  realtime = {}, // engine "openai": options for telnyx/realtime.js (apiKey, model, voice, ...)
   session: sessionOpts = {},
 }) {
   if (!publicUrl || !token) throw new Error("The voice pipeline needs a public URL and a token");
@@ -969,6 +971,7 @@ export function makeVoicePipeline({
     if (!localSpeech) throw new Error('The "local" speech engine needs the local speech sidecar');
     ttsRate = localSpeech.sampleRate;
   }
+  if (engine === "openai" && !realtime.apiKey) throw new Error('The "openai" engine needs OPENAI_API_KEY');
   if (!Number.isInteger(ttsRate / PHONE_RATE) || ttsRate < PHONE_RATE) {
     throw new Error(`The text-to-speech rate must be a whole multiple of ${PHONE_RATE} Hz, not ${ttsRate}`);
   }
@@ -979,7 +982,7 @@ export function makeVoicePipeline({
   const audioCache = new Map();
   const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_FRAME_BYTES });
 
-  const label = engine === "local" ? "v3, local speech" : "v2";
+  const label = { local: "v3, local speech", openai: "2B, OpenAI Realtime" }[engine] || "v2";
   const openStt =
     engine === "local"
       ? (handlers) => localSpeech.openStt(handlers)
@@ -1116,13 +1119,11 @@ export function makeVoicePipeline({
         return callControl.hangup(id).catch((err) => log(`⚠️  ${err.message}`));
       }
       clearTimeout(call.timer);
-      session = makeCallSession({
+      const common = {
         callControlId: id,
         caller: call.caller,
         sendFrame,
         onTurn,
-        openStt,
-        synth,
         hangup: () => callControl.hangup(id),
         onEnd: () => {
           // Forget the call here too, so a lost hangup webhook cannot hold a
@@ -1132,6 +1133,17 @@ export function makeVoicePipeline({
         },
         log,
         now,
+      };
+      if (engine === "openai") {
+        session = makeRealtimeSession({ ...common, ...realtime, ...sessionOpts });
+        call.session = session;
+        log(`📞 Media stream open for ${call.caller}`);
+        return session.start();
+      }
+      session = makeCallSession({
+        ...common,
+        openStt,
+        synth,
         ttsRate,
         audioCache,
         fillerMs,
