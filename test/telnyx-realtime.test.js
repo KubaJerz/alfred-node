@@ -183,6 +183,36 @@ test("model audio goes to Telnyx as media frames", async () => {
   session.end("test", { hang: false });
 });
 
+test("the end of a reply flushes the last part chunk and sends a mark", async () => {
+  const { session, ws, frames } = setup({ opts: { greeting: "" } });
+  await waitFor(() => ws.readyState === 1);
+  ws.server({ type: "response.created" });
+  // 130 ms: one full 100 ms chunk, and 30 ms the player holds back.
+  ws.server({ type: "response.output_audio.delta", item_id: "it1", delta: ulaw(130) });
+  const media = () => frames.filter((f) => f.event === "media").reduce((n, f) => n + Buffer.from(f.media.payload, "base64").length, 0);
+  assert.equal(media(), 800);
+  ws.server({ type: "response.output_audio.done", item_id: "it1" });
+  assert.ok(media() >= 1040, String(media()));
+  assert.deepEqual(frames.at(-1), { event: "mark", mark: { name: "it1:end" } });
+  session.end("test", { hang: false });
+});
+
+test("a reply Telnyx never plays gets a warning; a late one gets a log line", async () => {
+  let t = 1000;
+  const { session, ws, logs } = setup({ opts: { greeting: "", now: () => t, markLateMs: 30 } });
+  await waitFor(() => ws.readyState === 1);
+  ws.server({ type: "response.output_audio.delta", item_id: "a", delta: ulaw(100) });
+  ws.server({ type: "response.output_audio.done", item_id: "a" });
+  await waitFor(() => logs.some((l) => /Telnyx has not played reply a 30 ms after its end/.test(l)), 1000);
+  t = 5000;
+  ws.server({ type: "response.output_audio.delta", item_id: "b", delta: ulaw(100) });
+  ws.server({ type: "response.output_audio.done", item_id: "b" });
+  t = 7100; // due at 5100
+  session.onFrame({ event: "mark", mark: { name: "b:end" } });
+  assert.ok(logs.some((l) => l === "⚠️  Telnyx played a reply 2000 ms later than expected"), logs.join("\n"));
+  session.end("test", { hang: false });
+});
+
 test("barge-in clears Telnyx and truncates the item at the heard point", async () => {
   const { session, ws, frames } = setup({ opts: { greeting: "" } });
   await waitFor(() => ws.readyState === 1);
