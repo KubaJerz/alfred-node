@@ -10,7 +10,8 @@ import {
   heardMs,
   addUsage,
   usageCost,
-  ALFRED_TOOL,
+  USE_TOOLS,
+  DEFAULT_INSTRUCTIONS,
   GREETING,
 } from "../telnyx/realtime.js";
 
@@ -83,7 +84,7 @@ function setup(over = {}) {
 
 const ulaw = (ms) => Buffer.alloc((ms * 8000) / 1000, 0x55).toString("base64");
 
-test("sessionUpdate asks for PCMU both ways, semantic VAD, and the ask_alfred tool", () => {
+test("sessionUpdate asks for PCMU both ways, semantic VAD, and the use_tools tool", () => {
   const ev = sessionUpdate({ voice: "cedar", eagerness: "low" });
   assert.equal(ev.type, "session.update");
   assert.equal(ev.session.type, "realtime");
@@ -92,7 +93,7 @@ test("sessionUpdate asks for PCMU both ways, semantic VAD, and the ask_alfred to
   assert.equal(ev.session.audio.output.voice, "cedar");
   assert.equal(ev.session.audio.input.turn_detection.type, "semantic_vad");
   assert.equal(ev.session.audio.input.turn_detection.eagerness, "low");
-  assert.deepEqual(ev.session.tools, [ALFRED_TOOL]);
+  assert.deepEqual(ev.session.tools, [USE_TOOLS]);
   assert.equal(sessionUpdate({ transcribeModel: "" }).session.audio.input.transcription, null);
   assert.equal(ev.session.reasoning, undefined, "unset leaves OpenAI's default");
   assert.deepEqual(sessionUpdate({ reasoning: "minimal" }).session.reasoning, { effort: "minimal" });
@@ -183,6 +184,47 @@ test("model audio goes to Telnyx as media frames", async () => {
   session.end("test", { hang: false });
 });
 
+test("the prompt keeps the voice in character as Alfred", async () => {
+  const { readFileSync } = await import("fs");
+  const file = readFileSync(new URL("../agent/phone-voice.md", import.meta.url), "utf8").trim();
+  assert.equal(DEFAULT_INSTRUCTIONS, file);
+  assert.match(file, /Never mention a tool/);
+  assert.match(file, /before every use_tools call, say one short line/);
+  assert.match(file, /always give it to the caller/);
+  assert.doesNotMatch(file, /real Alfred|Alfred's voice/);
+  assert.match(file, /read every item/);
+  assert.doesNotMatch(USE_TOOLS.description, /Alfred/);
+});
+
+test("a tool turn logs the full wait until the answer is heard", async () => {
+  let t = 1000;
+  const { session, ws, logs } = setup({ opts: { greeting: "", now: () => t } });
+  await waitFor(() => ws.readyState === 1);
+  const loud = Buffer.alloc(160, 0x00).toString("base64");
+  session.onFrame({ event: "media", media: { track: "inbound", chunk: "1", payload: loud } });
+  t = 1400;
+  ws.server({ type: "input_audio_buffer.speech_stopped" });
+  ws.server({ type: "response.function_call_arguments.done", name: "use_tools", call_id: "c9", arguments: '{"request":"list"}' });
+  await waitFor(() => ws.sent.some((e) => e.type === "conversation.item.create"));
+  const repliedAt = t;
+  t = repliedAt + 600;
+  ws.server({ type: "response.output_audio.delta", item_id: "ans", delta: ulaw(200) });
+  assert.ok(logs.includes(`📞 Answer audio 600 ms after use_tools answered, ${t - 1000} ms after the caller finished asking`), logs.join("\n"));
+  session.end("test", { hang: false });
+});
+
+test("a mark after a barge-in clear is not counted as hugely late", async () => {
+  let t = 1000;
+  const { session, ws, logs } = setup({ opts: { greeting: "", now: () => t } });
+  await waitFor(() => ws.readyState === 1);
+  ws.server({ type: "response.output_audio.delta", item_id: "x", delta: ulaw(300) });
+  ws.server({ type: "input_audio_buffer.speech_started" }); // clear: playEndAt is 0
+  ws.server({ type: "response.output_audio.done", item_id: "x" });
+  session.onFrame({ event: "mark", mark: { name: "x:end" } });
+  assert.ok(!logs.some((l) => /later than expected/.test(l)), logs.join("\n"));
+  session.end("test", { hang: false });
+});
+
 test("the end of a reply flushes the last part chunk and sends a mark", async () => {
   const { session, ws, frames } = setup({ opts: { greeting: "" } });
   await waitFor(() => ws.readyState === 1);
@@ -229,13 +271,13 @@ test("barge-in clears Telnyx and truncates the item at the heard point", async (
   session.end("test", { hang: false });
 });
 
-test("ask_alfred runs onTurn and returns the reply as the function output", async () => {
+test("use_tools runs onTurn and returns the reply as the function output", async () => {
   const { session, ws, turns } = setup({ opts: { greeting: "" } });
   await waitFor(() => ws.readyState === 1);
   ws.server({ type: "response.created" });
   ws.server({
     type: "response.function_call_arguments.done",
-    name: "ask_alfred",
+    name: "use_tools",
     call_id: "call_1",
     arguments: JSON.stringify({ request: "What's on my calendar today?" }),
   });
@@ -255,10 +297,10 @@ test("ask_alfred runs onTurn and returns the reply as the function output", asyn
 test("an empty Alfred reply still answers the function call", async () => {
   const { session, ws } = setup({ reply: "", opts: { greeting: "" } });
   await waitFor(() => ws.readyState === 1);
-  ws.server({ type: "response.function_call_arguments.done", name: "ask_alfred", call_id: "c2", arguments: '{"request":"hi"}' });
+  ws.server({ type: "response.function_call_arguments.done", name: "use_tools", call_id: "c2", arguments: '{"request":"hi"}' });
   await waitFor(() => ws.sent.some((e) => e.type === "conversation.item.create"));
   const out = ws.sent.find((e) => e.type === "conversation.item.create");
-  assert.match(out.item.output, /nothing to add/);
+  assert.match(out.item.output, /nothing more to report/);
   assert.ok(ws.sent.some((e) => e.type === "response.create"));
   session.end("test", { hang: false });
 });
@@ -281,7 +323,7 @@ test("a slow Alfred gets a spoken still-working line", async () => {
   session.start();
   const ws = FakeWs.last;
   await waitFor(() => ws.readyState === 1);
-  ws.server({ type: "response.function_call_arguments.done", name: "ask_alfred", call_id: "c3", arguments: '{"request":"slow"}' });
+  ws.server({ type: "response.function_call_arguments.done", name: "use_tools", call_id: "c3", arguments: '{"request":"slow"}' });
   await waitFor(() => ws.sent.some((e) => e.type === "response.create" && e.response?.conversation === "none"));
   const upd = ws.sent.find((e) => e.response?.conversation === "none");
   assert.equal(upd.response.tool_choice, "none");

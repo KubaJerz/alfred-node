@@ -4,6 +4,26 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [SemVer](https://semver.org/).
 
 ## [Unreleased]
+### Changed
+- **The 2B voice stays in character as Alfred.** It is Alfred, with tools:
+  the function is now `use_tools` (in the code too), described as its own
+  calendar, lists, memory and actions. It says results in the first person,
+  and never "Alfred says", "I'm asking Alfred" or "still working on it" in
+  someone else's name. It never calls itself ChatGPT or names a model.
+- **The 2B prompt:** say a short line before every tool call ("Let me
+  check.", "One moment.", "On it." …) so the caller is never left in
+  silence; keep talking while a request runs, and always give the result
+  when it comes back, even if the talk has moved on; read every item of a
+  list; answer from the call itself when the answer was just said.
+
+### Added
+- **2B logs the full wait on tool turns:** from Alfred's reply, and from the
+  caller's last sound, to the first audio of the answer.
+
+### Fixed
+- **A mark echo after a barge-in no longer logs a huge "later than
+  expected" time.** The estimate of when the audio ends is 0 after a clear.
+
 ### Fixed
 - **2B no longer holds back the end of each reply.** It never marked the end
   of a reply's audio, so the player kept the last part chunk (up to 100 ms)
