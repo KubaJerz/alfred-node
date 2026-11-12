@@ -11,7 +11,8 @@
 // No transcoding: OpenAI takes and gives "audio/pcmu" directly. OpenAI does
 // the end-of-turn detection (semantic VAD) and answers small talk itself. For
 // anything that needs Alfred's tools, memory or actions, it calls the
-// ask_alfred function. That runs the same onTurn as v1 (same Claude session,
+// use_tools function. To the caller it is all Alfred: the speech model never
+// says another assistant does the work. That runs the same onTurn as v1 (same Claude session,
 // same Discord mirror). The result goes back as the function output, and the
 // speech model says it.
 //
@@ -43,29 +44,39 @@ const PRICES = {
   full: { audioIn: 32, audioCached: 0.4, audioOut: 64, textIn: 4, textCached: 0.4, textOut: 24 },
 };
 
-export const DEFAULT_INSTRUCTIONS = `You are Alfred, a personal assistant, on a phone call with your user.
-You are Alfred's voice. The real Alfred has the user's calendar, email,
-lists, notes, memory, files and the web, and he can take actions. You reach
-him only through the ask_alfred tool. He cannot hear the call.
+// The same text as agent/phone-voice.md, which bot.js passes in.
+export const DEFAULT_INSTRUCTIONS = `You are Alfred, the user's personal assistant, on a phone call with them.
+Stay Alfred for the whole call. You have the user's calendar, email, lists,
+notes, memory, files and the web, and you can take actions. You reach all of
+that through the use_tools tool. It is part of you: never mention a tool, a
+system, another assistant, or anyone else doing the work.
 
 - Answer small talk and simple general questions yourself.
-- Call ask_alfred for anything about the user's own data or life, anything to
+- Call use_tools for anything about the user's own data or life, anything to
   do (add, change, cancel, send, remind), anything current (hours, news,
   prices, weather), and anything you are not sure of. Pass the request with
   every detail the caller gave.
-- Before you call ask_alfred, say one short line such as "Let me check."
+- If the answer is already in this call (something just said, added or looked
+  up), answer it yourself without use_tools.
+- Before you call use_tools, say one short line such as "Let me check."
   Vary it.
-- When Alfred answers, say it in one to three short sentences. Do not read
-  lists, links or markdown. If he sent something to Discord, say so.
+- Say what use_tools returns as your own, in the first person: "I've added
+  it", never "Alfred says" or "it was done for you".
+- When the result is a list, read every item in order. Do not summarise, skip
+  or number items, and do not read links or markdown. Answer anything else in
+  one to three short sentences. If something went to Discord, say so.
 - Never make up the user's data, and never say an action happened unless
-  Alfred said so.
+  use_tools said it did.
+- Your name is Alfred. Never call yourself ChatGPT or name a model or company.
+  If asked what model you are, you're Alfred. If someone sincerely asks
+  whether you're an AI, say yes.
 - Talk like a calm, warm British butler. Be brief. Use English.`;
 
 export const ALFRED_TOOL = {
   type: "function",
-  name: "ask_alfred",
+  name: "use_tools",
   description:
-    "Ask the real Alfred, who has the user's calendar, email, lists, notes, memory, files and the web, and can take actions. Use it for the user's own data, for anything to do, and for current facts. It can take from a few seconds to a minute.",
+    "Your calendar, email, lists, notes, memory, files and the web, and the actions you can take. Use it for the user's own data, for anything to do, and for current facts. It can take from a few seconds to a minute.",
   parameters: {
     type: "object",
     properties: {
@@ -199,10 +210,12 @@ export function makeRealtimeSession({
   let item = null; // the assistant audio item that plays now
   let speechStoppedAt = null;
   let lastVoiceAt = null; // the last inbound frame loud enough to be the caller
+  let turnVoiceAt = null; // the caller's last sound before the latest turn end
+  let answer = null; // a tool result whose spoken answer has not started yet
   let callerSpeaking = false;
   let lastAudioAt = 0;
   let updateTimer = null;
-  const jobs = new Set(); // ask_alfred calls that run now
+  const jobs = new Set(); // use_tools calls (Alfred turns) that run now
   const marks = new Map(); // reply end marks sent to Telnyx and not echoed yet
 
   const send = (obj) => {
@@ -240,6 +253,11 @@ export function makeRealtimeSession({
     player.push(buf, () => {
       if (it.firstAt != null) return;
       it.firstAt = now();
+      if (answer && it.firstAt >= answer.repliedAt) {
+        const since = answer.askedAt != null ? `, ${it.firstAt - answer.askedAt} ms after the caller finished asking` : "";
+        log(`📞 Answer audio ${it.firstAt - answer.repliedAt} ms after Alfred answered${since}`);
+        answer = null;
+      }
       if (speechStoppedAt != null) {
         log(`📞 Latency ${it.firstAt - speechStoppedAt} ms: end of speech → first audio sent (OpenAI)`);
         speechStoppedAt = null;
@@ -254,7 +272,7 @@ export function makeRealtimeSession({
     const name = `${itemId}:end`;
     player.mark(name, () => {
       if (ended) return;
-      const due = player.playEndAt;
+      const due = Math.max(player.playEndAt, now()); // 0 after a clear
       const timer = setTimeout(() => {
         if (!marks.delete(name) || ended) return;
         log(`⚠️  Telnyx has not played reply ${itemId} ${markLateMs} ms after its end — the caller may not hear the voice`);
@@ -303,7 +321,7 @@ export function makeRealtimeSession({
         output_modalities: ["audio"],
         tool_choice: "none",
         instructions:
-          "In five words or fewer, tell the caller that Alfred is still working on it. Vary the wording. Say nothing else.",
+          "In five words or fewer, tell the caller you are still on it. Vary the wording. Say nothing else.",
       });
     }
     updateTimer = setTimeout(stillWorking, updateMs);
@@ -321,9 +339,9 @@ export function makeRealtimeSession({
       send({ type: "conversation.item.create", item: { type: "function_call_output", call_id: m.call_id, output: "Error: no request given." } });
       return createResponse();
     }
-    const job = { at: now() };
+    const job = { at: now(), askedAt: turnVoiceAt };
     jobs.add(job);
-    log(`📞 ask_alfred: ${request}`);
+    log(`📞 ${ALFRED_TOOL.name}: ${request}`);
     if (!updateTimer) {
       updateTimer = setTimeout(stillWorking, updateMs);
       updateTimer.unref?.();
@@ -332,17 +350,18 @@ export function makeRealtimeSession({
     try {
       reply = (await onTurn({ text: request, caller, takeMissed: () => false })) || "";
     } catch (err) {
-      reply = `Alfred hit an error: ${err.message}`;
+      reply = `That failed: ${err.message}`;
     }
     jobs.delete(job);
     if (ended) return;
     log(`📞 Alfred answered in ${now() - job.at} ms (${reply.length} chars)`);
+    answer = { repliedAt: now(), askedAt: job.askedAt };
     send({
       type: "conversation.item.create",
       item: {
         type: "function_call_output",
         call_id: m.call_id,
-        output: reply.trim() || "Alfred finished and had nothing to add.",
+        output: reply.trim() || "Done, with nothing more to report.",
       },
     });
     createResponse();
@@ -371,6 +390,7 @@ export function makeRealtimeSession({
       case "input_audio_buffer.speech_stopped":
         callerSpeaking = false;
         speechStoppedAt = now();
+        turnVoiceAt = lastVoiceAt;
         if (lastVoiceAt != null) {
           log(`📞 Turn end decided ${speechStoppedAt - lastVoiceAt} ms after the caller's last sound`);
         }
@@ -382,8 +402,8 @@ export function makeRealtimeSession({
         if (m.transcript?.trim()) log(`🗣️  Voice: ${m.transcript.trim()}`);
         return;
       case "response.function_call_arguments.done":
-        if (m.name === "ask_alfred") {
-          askAlfred(m).catch((err) => log(`⚠️  ask_alfred failed: ${err.message}`));
+        if (m.name === ALFRED_TOOL.name) {
+          askAlfred(m).catch((err) => log(`⚠️  ${ALFRED_TOOL.name} failed: ${err.message}`));
         }
         return;
       case "response.done": {

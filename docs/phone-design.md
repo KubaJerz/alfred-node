@@ -544,7 +544,7 @@ it asks Alfred, so the caller does not hear dead air.
 caller ─► Telnyx Call Control ─► media socket (PCMU 8 kHz) ─► telnyx/realtime.js
   ─► input_audio_buffer.append ─► OpenAI Realtime (semantic VAD, voice "cedar")
   ◄─ response.output_audio.delta (PCMU) ◄─
-OpenAI calls ask_alfred(request) ─► onCallTurn (same session as v1) ─► reply
+OpenAI calls use_tools(request) ─► onCallTurn (same session as v1) ─► reply
   ─► function_call_output + response.create ─► OpenAI says the reply
 ```
 
@@ -558,6 +558,13 @@ OpenAI calls ask_alfred(request) ─► onCallTurn (same session as v1) ─► r
   (the time since the item's first chunk went out, at most its length).
 - If the OpenAI socket closes, the call hangs up. If the caller hangs up while
   Alfred works, Alfred finishes, and his reply still goes to Discord.
+- The caller only ever talks to Alfred. The tool is called `use_tools`, and
+  the prompt has the voice say results in the first person, so it never says
+  "I'm asking Alfred" or "Alfred says".
+- Settled by test calls on 2026-11-11: `VOICE_OPENAI_SILENCE_MS=100` with
+  reasoning `low`. From the caller's last sound to the first audio, that took
+  about 0.83 s, against about 1.65 s with eagerness `high`. Minimal reasoning
+  was no faster and chose worse, and a 300 ms timer added about 0.35 s.
 
 ### Cost
 
