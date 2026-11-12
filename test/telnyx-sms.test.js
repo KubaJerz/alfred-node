@@ -96,6 +96,22 @@ test("messaging route passes only allowed sender to our number", async () => {
   assert.equal(logs.length, 2);
 });
 
+test("messaging route leaves STOP, START, and HELP to Telnyx", async () => {
+  const got = [];
+  const route = makeMessagingRoute({
+    ourNumber: "+18005550100",
+    allowFrom: ["+15551234567"],
+    onText: async (m) => got.push(m.text),
+    log: () => {},
+  });
+  for (const t of ["STOP", " stop ", "Help", "START"]) await route(inbound("+15551234567", "+18005550100", t));
+  const tagged = inbound("+15551234567", "+18005550100", "Stop please");
+  tagged.payload.autoresponse_type = "STOP";
+  await route(tagged);
+  await route(inbound("+15551234567", "+18005550100", "stop the 3pm meeting"));
+  assert.deepEqual(got, ["stop the 3pm meeting"]);
+});
+
 test("messaging route logs a failed delivery", async () => {
   const logs = [];
   const route = makeMessagingRoute({ ourNumber: "+1800", allowFrom: [], onText: async () => {}, log: (s) => logs.push(s) });

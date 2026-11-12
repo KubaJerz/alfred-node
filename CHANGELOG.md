@@ -43,6 +43,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
   the end of speech to the transcript, to Alfred's reply, and to the first
   audio sent. The `VOICE_LOCAL_*` settings are in `env.example`.
 ### Fixed
+- **A text that is only STOP, START, or HELP starts no turn.** The Telnyx
+  messaging profile answers those keywords with the replies registered in the
+  10DLC campaign, so Alfred stays out of it. A text Telnyx tagged as one it
+  answered is skipped too. A longer text such as "stop the 3pm meeting" still
+  reaches Alfred.
 - **A pipeline call turn is cancelled when the caller keeps talking.** The
   pipeline ends a turn after a short silence. If the caller starts to talk
   again within 1.5 s of that turn going to Alfred, the turn was only the first
