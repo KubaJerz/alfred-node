@@ -4,6 +4,12 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [SemVer](https://semver.org/).
 
 ## [Unreleased]
+### Fixed
+- **`node_modules` is no longer tracked.** The 2B merge committed a worktree's
+  `node_modules` symlink by mistake. Pulling it replaced the main checkout's
+  packages with a dangling link, and the bot could not start. `.gitignore` now
+  says `node_modules` without the slash, so it covers a symlink too.
+
 ### Added
 - **Phone calls through OpenAI Realtime, with Alfred as a tool (option 2B,
   #107).** `VOICE_PIPELINE_ENGINE=openai` uses the same Call Control app and

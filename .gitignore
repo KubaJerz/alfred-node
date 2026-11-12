@@ -4,7 +4,7 @@
 .secrets
 
 # Dependencies
-node_modules/
+node_modules
 
 # Alfred's runtime state: memories, transcripts, session state, logs.
 # All personal, all machine-local, none of it ever belongs in git.
