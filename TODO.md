@@ -156,6 +156,19 @@ risky jobs to small least-privilege agents instead of widening his reach.
 
 ## Next
 
+### Phone — 2B on OpenAI
+
+- [ ] **Try GPT-Live (`gpt-live-1`) as a 2B engine.** OpenAI's newer voice model
+      is built for this shape: full duplex, and "client delegation" sends the
+      backend work to us (Alfred), with results spoken as commentary. It takes
+      PCMU over WebSocket, so Telnyx stays the same. On hold: it is a flat
+      $0.05/min, about twice our Realtime cost ($0.019–0.029/min), it has no
+      documented turn-detection settings (our 100 ms silence timer halved the
+      response time), and Realtime works well now. A/B it with the standard
+      test call in `docs/phone-design.md`. It is also the only way to use a
+      voice designed from a description (prompt-to-voice); Realtime takes only
+      named voices or recording-based ones.
+
 ### Remote access to the box
 
 - [x] **Reach the machine from anywhere — Tailscale + SSH.** Done by
