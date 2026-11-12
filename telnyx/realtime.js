@@ -21,7 +21,7 @@
 
 import WebSocket from "ws";
 import { makePlayer, makeReorder } from "./pipeline.js";
-import { PHONE_RATE } from "./audio.js";
+import { PHONE_RATE, mulawToLinear } from "./audio.js";
 
 export const REALTIME_URL = "wss://api.openai.com/v1/realtime";
 export const DEFAULT_MODEL = "gpt-realtime-2.1-mini";
@@ -75,11 +75,36 @@ export const ALFRED_TOOL = {
 };
 
 // The session.update event that we send when the OpenAI socket opens.
+// A 20 ms frame louder than this RMS counts as the caller's voice. It is only
+// used to time how long turn detection waits after the caller's last sound.
+export const VOICE_RMS = 500;
+
+export function frameRms(payload) {
+  const buf = Buffer.from(payload, "base64");
+  if (!buf.length) return 0;
+  let sum = 0;
+  for (let i = 0; i < buf.length; i++) {
+    const v = mulawToLinear(buf[i]);
+    sum += v * v;
+  }
+  return Math.sqrt(sum / buf.length);
+}
+
+// semantic_vad by default. silenceMs switches to server_vad: a plain timer
+// that ends the turn after that much silence.
+export function turnDetection({ eagerness = DEFAULT_EAGERNESS, silenceMs } = {}) {
+  const base = { create_response: true, interrupt_response: true };
+  if (silenceMs) return { type: "server_vad", silence_duration_ms: Number(silenceMs), ...base };
+  return { type: "semantic_vad", eagerness, ...base };
+}
+
 export function sessionUpdate({
   instructions = DEFAULT_INSTRUCTIONS,
   voice = DEFAULT_VOICE,
   eagerness = DEFAULT_EAGERNESS,
   transcribeModel = DEFAULT_TRANSCRIBE_MODEL,
+  reasoning,
+  silenceMs,
 } = {}) {
   return {
     type: "session.update",
@@ -90,13 +115,15 @@ export function sessionUpdate({
       audio: {
         input: {
           format: { type: "audio/pcmu" },
-          turn_detection: { type: "semantic_vad", eagerness, create_response: true, interrupt_response: true },
+          turn_detection: turnDetection({ eagerness, silenceMs }),
           transcription: transcribeModel ? { model: transcribeModel } : null,
         },
         output: { format: { type: "audio/pcmu" }, voice },
       },
       tools: [ALFRED_TOOL],
       tool_choice: "auto",
+      // minimal, low, medium, high or xhigh. Unset leaves OpenAI's default (low).
+      ...(reasoning ? { reasoning: { effort: reasoning } } : {}),
     },
   };
 }
@@ -149,6 +176,8 @@ export function makeRealtimeSession({
   eagerness,
   instructions,
   transcribeModel,
+  reasoning,
+  silenceMs,
   greeting = GREETING,
   updateMs = UPDATE_MS,
   WebSocketImpl = WebSocket,
@@ -164,6 +193,7 @@ export function makeRealtimeSession({
   let pendingCreate = null; // a response.create to send when the active one ends
   let item = null; // the assistant audio item that plays now
   let speechStoppedAt = null;
+  let lastVoiceAt = null; // the last inbound frame loud enough to be the caller
   let callerSpeaking = false;
   let lastAudioAt = 0;
   let updateTimer = null;
@@ -174,6 +204,7 @@ export function makeRealtimeSession({
   };
 
   const appendAudio = (payload) => {
+    if (frameRms(payload) > VOICE_RMS) lastVoiceAt = now();
     if (ws && ws.readyState === OPEN) return send({ type: "input_audio_buffer.append", audio: payload });
     openQueue.push(payload);
     if (openQueue.length > OPEN_QUEUE_CAP) openQueue.shift();
@@ -300,6 +331,9 @@ export function makeRealtimeSession({
       case "input_audio_buffer.speech_stopped":
         callerSpeaking = false;
         speechStoppedAt = now();
+        if (lastVoiceAt != null) {
+          log(`📞 Turn end decided ${speechStoppedAt - lastVoiceAt} ms after the caller's last sound`);
+        }
         return;
       case "conversation.item.input_audio_transcription.completed":
         if (m.transcript?.trim()) log(`📞 Caller: ${m.transcript.trim()}`);
@@ -328,13 +362,18 @@ export function makeRealtimeSession({
   };
 
   const connect = () => {
+    log(
+      `📞 OpenAI settings: ${model}, voice ${voice || DEFAULT_VOICE}, ` +
+        `${silenceMs ? `turn end after ${silenceMs} ms of silence` : `eagerness ${eagerness || DEFAULT_EAGERNESS}`}, ` +
+        `reasoning ${reasoning || "default (low)"}`,
+    );
     const sep = url.includes("?") ? "&" : "?";
     ws = new WebSocketImpl(`${url}${sep}model=${encodeURIComponent(model)}`, {
       headers: { Authorization: `Bearer ${apiKey}` },
     });
     ws.on("open", () => {
       if (ended) return ws.close();
-      send(sessionUpdate({ instructions, voice, eagerness, transcribeModel }));
+      send(sessionUpdate({ instructions, voice, eagerness, transcribeModel, reasoning, silenceMs }));
       for (const p of openQueue) send({ type: "input_audio_buffer.append", audio: p });
       openQueue = [];
       if (greeting) {

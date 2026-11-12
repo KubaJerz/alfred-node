@@ -4,6 +4,9 @@ import { EventEmitter } from "events";
 import {
   makeRealtimeSession,
   sessionUpdate,
+  turnDetection,
+  frameRms,
+  VOICE_RMS,
   heardMs,
   addUsage,
   usageCost,
@@ -91,6 +94,45 @@ test("sessionUpdate asks for PCMU both ways, semantic VAD, and the ask_alfred to
   assert.equal(ev.session.audio.input.turn_detection.eagerness, "low");
   assert.deepEqual(ev.session.tools, [ALFRED_TOOL]);
   assert.equal(sessionUpdate({ transcribeModel: "" }).session.audio.input.transcription, null);
+  assert.equal(ev.session.reasoning, undefined, "unset leaves OpenAI's default");
+  assert.deepEqual(sessionUpdate({ reasoning: "minimal" }).session.reasoning, { effort: "minimal" });
+});
+
+test("silenceMs switches turn detection to a server_vad silence timer", () => {
+  assert.deepEqual(turnDetection({ eagerness: "high" }), {
+    type: "semantic_vad",
+    eagerness: "high",
+    create_response: true,
+    interrupt_response: true,
+  });
+  const t = sessionUpdate({ silenceMs: "350" }).session.audio.input.turn_detection;
+  assert.equal(t.type, "server_vad");
+  assert.equal(t.silence_duration_ms, 350);
+  assert.equal(t.eagerness, undefined);
+});
+
+test("the log shows how long turn detection waited after the caller's last sound", async () => {
+  let t = 1000;
+  const { session, ws, logs } = setup({ opts: { greeting: "", now: () => t } });
+  await waitFor(() => ws.readyState === 1);
+  const loud = Buffer.alloc(160, 0x00).toString("base64"); // mu-law 0x00 is near full scale
+  const quiet = Buffer.alloc(160, 0xff).toString("base64"); // mu-law 0xff is zero
+  assert.ok(frameRms(loud) > VOICE_RMS && frameRms(quiet) < VOICE_RMS);
+  session.onFrame({ event: "media", media: { track: "inbound", chunk: "1", payload: loud } });
+  t = 1300;
+  session.onFrame({ event: "media", media: { track: "inbound", chunk: "2", payload: quiet } });
+  t = 1700;
+  ws.server({ type: "input_audio_buffer.speech_stopped" });
+  assert.ok(logs.includes("📞 Turn end decided 700 ms after the caller's last sound"), logs.join("\n"));
+  session.end("test", { hang: false });
+});
+
+test("the call logs its OpenAI settings", async () => {
+  const { session, ws, logs } = setup({ opts: { greeting: "", eagerness: "high", reasoning: "minimal" } });
+  await waitFor(() => ws.sent.length >= 1);
+  assert.ok(logs.some((l) => l === "📞 OpenAI settings: gpt-realtime-2.1-mini, voice cedar, eagerness high, reasoning minimal"), logs.join("\n"));
+  assert.deepEqual(ws.sent[0].session.reasoning, { effort: "minimal" });
+  session.end("test", { hang: false });
 });
 
 test("heardMs is the time since the first chunk, capped at the item length", () => {
@@ -235,6 +277,13 @@ test("a Telnyx stop ends the session without a hangup and logs the cost", async 
   assert.equal(hung(), 0);
   assert.ok(session.ended);
   assert.ok(logs.some((l) => /1000 audio out tokens, about \$0\.0200/.test(l)), logs.join("\n"));
+});
+
+test("the settings log names the silence timer when it is on", async () => {
+  const { session, ws, logs } = setup({ opts: { greeting: "", silenceMs: 400 } });
+  await waitFor(() => ws.sent.length >= 1);
+  assert.ok(logs.some((l) => /turn end after 400 ms of silence, reasoning default \(low\)/.test(l)), logs.join("\n"));
+  session.end("test", { hang: false });
 });
 
 test("no API key is a clear error", () => {
