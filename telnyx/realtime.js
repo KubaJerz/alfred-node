@@ -32,6 +32,10 @@ export const GREETING = "Hey, it's Alfred.";
 const UPDATE_MS = 8000; // a spoken "still working" line while Alfred works this long
 const OPEN = 1; // WebSocket readyState
 const OPEN_QUEUE_CAP = 100; // caller frames (20 ms) held while the OpenAI socket opens
+// Telnyx echoes a mark when the audio before it has played. One this late
+// past the estimated end means the caller heard the reply late, or not at all.
+const MARK_LATE_MS = 3000;
+const MARK_LOG_MS = 1000; // an echo later than this gets a log line
 
 // USD per 1M tokens, from openai.com pricing (read 2026-11-11).
 const PRICES = {
@@ -180,6 +184,7 @@ export function makeRealtimeSession({
   silenceMs,
   greeting = GREETING,
   updateMs = UPDATE_MS,
+  markLateMs = MARK_LATE_MS,
   WebSocketImpl = WebSocket,
 }) {
   if (!apiKey) throw new Error("The OpenAI engine needs OPENAI_API_KEY");
@@ -198,6 +203,7 @@ export function makeRealtimeSession({
   let lastAudioAt = 0;
   let updateTimer = null;
   const jobs = new Set(); // ask_alfred calls that run now
+  const marks = new Map(); // reply end marks sent to Telnyx and not echoed yet
 
   const send = (obj) => {
     if (ws && ws.readyState === OPEN) ws.send(JSON.stringify(obj));
@@ -241,12 +247,44 @@ export function makeRealtimeSession({
     });
   };
 
+  // The end of a reply's audio. The mark makes the player send the last part
+  // chunk, and Telnyx's echo of it tells us when the caller heard the end.
+  const endReply = (itemId) => {
+    if (!itemId) return;
+    const name = `${itemId}:end`;
+    player.mark(name, () => {
+      if (ended) return;
+      const due = player.playEndAt;
+      const timer = setTimeout(() => {
+        if (!marks.delete(name) || ended) return;
+        log(`⚠️  Telnyx has not played reply ${itemId} ${markLateMs} ms after its end — the caller may not hear the voice`);
+      }, Math.max(0, due - now()) + markLateMs);
+      timer.unref?.();
+      marks.set(name, { due, timer });
+    });
+  };
+
+  const onMarkEcho = (name) => {
+    const mk = marks.get(name);
+    if (!mk) return;
+    clearTimeout(mk.timer);
+    marks.delete(name);
+    const late = now() - mk.due;
+    if (late > MARK_LOG_MS) log(`⚠️  Telnyx played a reply ${late} ms later than expected`);
+  };
+
+  const dropMarks = () => {
+    for (const mk of marks.values()) clearTimeout(mk.timer);
+    marks.clear();
+  };
+
   const bargeIn = () => {
     callerSpeaking = true;
     if (!item || !player.busy) return;
     const total = (item.bytes * 1000) / PHONE_RATE;
     const heard = heardMs(item.firstAt, now(), total);
     player.clear();
+    dropMarks();
     if (heard < total) {
       send({ type: "conversation.item.truncate", item_id: item.id, content_index: 0, audio_end_ms: heard });
       log(`📞 Barge-in: the caller talked over Alfred (heard ${heard} of ${Math.round(total)} ms)`);
@@ -326,6 +364,8 @@ export function makeRealtimeSession({
         return;
       case "response.output_audio.delta":
         return onAudio(m);
+      case "response.output_audio.done":
+        return endReply(m.item_id);
       case "input_audio_buffer.speech_started":
         return bargeIn();
       case "input_audio_buffer.speech_stopped":
@@ -403,6 +443,7 @@ export function makeRealtimeSession({
     if (ended) return;
     ended = true;
     clearTimeout(updateTimer);
+    dropMarks();
     player.close();
     try {
       ws?.close();
@@ -433,6 +474,9 @@ export function makeRealtimeSession({
         case "media":
           if (msg.media?.track && msg.media.track !== "inbound") return;
           if (typeof msg.media?.payload === "string") reorder.push(msg.media.chunk, msg.media.payload);
+          return;
+        case "mark":
+          onMarkEcho(msg.mark?.name);
           return;
         case "error":
           log(`⚠️  Media stream error ${msg.payload?.code}: ${msg.payload?.title} ${msg.payload?.detail || ""}`);

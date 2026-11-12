@@ -5,6 +5,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
 
 ## [Unreleased]
 ### Fixed
+- **2B no longer holds back the end of each reply.** It never marked the end
+  of a reply's audio, so the player kept the last part chunk (up to 100 ms)
+  until the next reply, and counted itself as still talking. That also kept
+  the "still working" line from ever playing. Each reply now ends with a
+  mark. Telnyx echoes it once the caller has heard the reply, and the log
+  warns when that echo is late or never comes.
+
+### Fixed
 - **`node_modules` is no longer tracked.** The 2B merge committed a worktree's
   `node_modules` symlink by mistake. Pulling it replaced the main checkout's
   packages with a dangling link, and the bot could not start. `.gitignore` now
