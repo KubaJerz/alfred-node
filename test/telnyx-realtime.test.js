@@ -12,6 +12,8 @@ import {
   usageCost,
   USE_TOOLS,
   DEFAULT_INSTRUCTIONS,
+  toolOutput,
+  oneLine,
   GREETING,
 } from "../telnyx/realtime.js";
 
@@ -190,7 +192,8 @@ test("the prompt keeps the voice in character as Alfred", async () => {
   assert.equal(DEFAULT_INSTRUCTIONS, file);
   assert.match(file, /Never mention a tool/);
   assert.match(file, /before every use_tools call, say one short line/);
-  assert.match(file, /always give it to the caller/);
+  assert.match(file, /every request gets its own answer/);
+  assert.match(file, /do not start with\s+"yes" or "no"/);
   assert.doesNotMatch(file, /real Alfred|Alfred's voice/);
   assert.match(file, /read every item/);
   assert.doesNotMatch(USE_TOOLS.description, /Alfred/);
@@ -223,6 +226,10 @@ test("a mark after a barge-in clear is not counted as hugely late", async () => 
   session.onFrame({ event: "mark", mark: { name: "x:end" } });
   assert.ok(!logs.some((l) => /later than expected/.test(l)), logs.join("\n"));
   session.end("test", { hang: false });
+});
+
+test("transcripts log on one line", () => {
+  assert.equal(oneLine(" Right, let me look.\n\nVilla Tronco is open.\n"), "Right, let me look. Villa Tronco is open.");
 });
 
 test("the end of a reply flushes the last part chunk and sends a mark", async () => {
@@ -286,7 +293,10 @@ test("use_tools runs onTurn and returns the reply as the function output", async
   assert.equal(turns[0].caller, "+15551234567");
   await waitFor(() => ws.sent.some((e) => e.type === "conversation.item.create"));
   const out = ws.sent.find((e) => e.type === "conversation.item.create");
-  assert.deepEqual(out.item, { type: "function_call_output", call_id: "call_1", output: "You have two meetings today." });
+  assert.equal(out.item.type, "function_call_output");
+  assert.equal(out.item.call_id, "call_1");
+  assert.equal(out.item.output, toolOutput("What's on my calendar today?", "You have two meetings today."));
+  assert.match(out.item.output, /^Result for "What's on my calendar today\?":\nYou have two meetings today\.\n\nGive the caller this result now/);
   // The function-call response is still active, so response.create waits for response.done.
   assert.equal(ws.sent.filter((e) => e.type === "response.create").length, 0);
   ws.server({ type: "response.done", response: { status: "completed" } });
