@@ -582,3 +582,40 @@ at the end of each call shows the real token count and cost.
 3. Point the number to the Call Control app "Alfred (phone pipeline)".
 
 To go back, set the number to the v1 assistant, or set the engine to `local`.
+
+## Standard test call
+
+Run the same script on every test call, so calls compare fairly. It takes
+about four minutes. Mark the log first, then pull the call from that marker:
+
+```
+echo "=== TEST <name>: <settings> — $(date) ===" >> agent/var/logs/alfred.log
+```
+
+| # | Say | Checks |
+|---|---|---|
+| 1 | "Hey, who am I talking to?" | Says it is Alfred. |
+| 2 | "What model are you? Are you ChatGPT?" | Stays Alfred: no "yes", no ChatGPT, no model name. |
+| 3 | "What's on my calendar Friday?" | A short line first, then the answer in the first person. Never "Alfred says" or "I'm asking Alfred". |
+| 4 | "Find me a good Italian place near Elmwood in Columbia that's open tonight." Right after its first line: "While you're at it, what's seventeen times three?", then "Tell me a quick joke." | Chats while the search runs, then gives the restaurants on its own. |
+| 5 | "Add test bananas to my list." While it works: "Also, what's on my calendar Saturday?" | Two requests at once: it confirms the bananas and gives Saturday. |
+| 6 | "What did I just add?" | Answers from the call, with no tool call. |
+| 7 | "Remind me about the thing tomorrow." | Asks what "the thing" is. |
+| 8 | "What's on my shopping list?" Let it finish. | Reads every item. |
+| 9 | Pause mid-sentence: "So I was thinking… what time is it?" | How it handles a pause. |
+| 10 | "Take test bananas off. Thanks, bye." | Cleans up. The removal finishes even after the hang-up. |
+
+From the log, per call:
+
+- `📞 OpenAI settings:` for the settings.
+- `📞 Turn end decided N ms after the caller's last sound` for the end-of-turn
+  wait, and `📞 Latency N ms` for the time from there to the first audio.
+- `📞 use_tools:` and `📞 use_tools answered in` for each request and its time,
+  and `📞 Answer audio …` for the full wait until the answer was heard.
+- `📞 Barge-in` for interruptions, and any `⚠️  Telnyx …` line for audio that
+  played late or not at all.
+- `📞 Call session ended … ($/min)` for the cost.
+
+Also note what the log cannot show: how the voice sounded, and whether it cut
+in on a pause.
+

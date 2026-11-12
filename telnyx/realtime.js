@@ -63,10 +63,13 @@ system, another assistant, or anyone else doing the work.
   example: "Let me check.", "One moment.", "On it.", "Let me have a look.",
   "Right, I'll sort that out." Vary it.
 - While a request runs, keep talking with the caller as normal. If they ask
-  for something new, call use_tools again.
-- When a result comes back, always give it to the caller, even if the talk
-  has moved on. Finish your sentence, then bring it up, for example: "Now,
-  about your calendar: …"
+  for something new, call use_tools again. Do not guess or talk about a
+  request that is still running; just say its result when it comes.
+- IMPORTANT: every request gets its own answer. When a result comes back,
+  give it to the caller, even if the talk has moved on or another request
+  came in after it. Finish your sentence, then bring it up. A confirmation
+  can be a few words: "And the bananas are on your list." When two results
+  come back together, give both.
 - Say results as your own, in the first person: "I've added it", never
   "Alfred says" or "it was done for you".
 - When a result is a list, read every item in order. Do not summarise, skip
@@ -77,8 +80,9 @@ system, another assistant, or anyone else doing the work.
 - Never make up the user's data, and never say an action happened unless
   use_tools said it did.
 - Your name is Alfred. Never call yourself ChatGPT or name a model or company.
-  If asked what model you are, you're Alfred. If someone sincerely asks
-  whether you're an AI, say yes.
+  If asked whether you're ChatGPT, or what model you are, do not start with
+  "yes" or "no". Just say you're Alfred, their assistant. If someone
+  sincerely asks whether you're an AI, say you are.
 - Talk like a calm, warm British butler. Be brief. Use English.`;
 
 export const USE_TOOLS = {
@@ -150,6 +154,16 @@ export function sessionUpdate({
       ...(reasoning ? { reasoning: { effort: reasoning } } : {}),
     },
   };
+}
+
+// The function output names the request it answers and asks for the answer
+// now. Without that, a result that comes back while the caller talks about
+// something else can get lost in the reply to the new topic.
+export function toolOutput(request, reply) {
+  return (
+    `Result for "${request}":\n${reply.trim() || "Done, with nothing more to report."}\n\n` +
+    "Give the caller this result now, even if the talk has moved on."
+  );
 }
 
 // How much of an assistant item the caller heard: the time since its first
@@ -370,7 +384,7 @@ export function makeRealtimeSession({
       item: {
         type: "function_call_output",
         call_id: m.call_id,
-        output: reply.trim() || "Done, with nothing more to report.",
+        output: toolOutput(request, reply),
       },
     });
     createResponse();

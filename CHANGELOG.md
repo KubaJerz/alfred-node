@@ -5,6 +5,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
 
 ## [Unreleased]
 ### Changed
+- **2B confirms every request.** When two requests run at once, or a result
+  comes back while the caller has moved on, the voice still gives each
+  result, even if only in a few words. The function output now names the
+  request it answers and asks for the answer now, and the prompt says so.
+  It also no longer talks about a request that is still running, which had
+  pushed a real answer back by 7.6 s.
+- **"Are you ChatGPT?" no longer gets "Yes, I'm Alfred."** The voice says
+  it is Alfred without a yes or no, and still says it is an AI if sincerely
+  asked.
+
+### Added
+- **The standard test call** in `docs/phone-design.md`: a ten-step script
+  and the log lines to read after each call.
+
+### Changed
 - **The 2B voice stays in character as Alfred.** It is Alfred, with tools:
   the function is now `use_tools` (in the code too), described as its own
   calendar, lists, memory and actions. It says results in the first person,
