@@ -501,3 +501,48 @@ and v1 is about $0.055.
   chunker splits badly?
 - Kokoro voice: `bm_george` is the default. `bm_lewis` is the other candidate.
   Listen to both on a call.
+
+## Option 2B: OpenAI Realtime with Alfred as a tool (opt-in, #107)
+
+v3 showed that the waits on tool turns are the main problem: 9.7-14.8 s to
+the first audio, with no filler. Option 2B puts a fast speech-to-speech model
+in front of Alfred. It answers small talk itself and says a short line before
+it asks Alfred, so the caller does not hear dead air.
+
+### Flow
+
+```
+caller ─► Telnyx Call Control ─► media socket (PCMU 8 kHz) ─► telnyx/realtime.js
+  ─► input_audio_buffer.append ─► OpenAI Realtime (semantic VAD, voice "cedar")
+  ◄─ response.output_audio.delta (PCMU) ◄─
+OpenAI calls ask_alfred(request) ─► onCallTurn (same session as v1) ─► reply
+  ─► function_call_output + response.create ─► OpenAI says the reply
+```
+
+- The audio is PCMU in both directions, so there is no transcoding.
+- Only one response runs at a time. A `response.create` that comes while one
+  runs waits for its `response.done`.
+- If Alfred takes 8 s or more, an out-of-band response (`conversation:
+  "none"`, no tools) says a short "still working" line, at most every 8 s.
+- On `input_audio_buffer.speech_started`, the pipeline clears the Telnyx
+  queue and sends `conversation.item.truncate` at the point the caller heard
+  (the time since the item's first chunk went out, at most its length).
+- If the OpenAI socket closes, the call hangs up. If the caller hangs up while
+  Alfred works, Alfred finishes, and his reply still goes to Discord.
+
+### Cost
+
+From openai.com pricing (read 2026-11-11), per 1M tokens:
+`gpt-realtime-2.1-mini` audio $10 in, $0.30 cached, $20 out;
+`gpt-realtime-2.1` audio $32 in, $0.40 cached, $64 out. Expect about
+$0.02 a minute with the mini model, plus the line (about $0.005). The log line
+at the end of each call shows the real token count and cost.
+
+### Enable 2B
+
+1. Put `OPENAI_API_KEY` in `.env`, and set `VOICE_PIPELINE_ENGINE=openai`.
+2. Restart the bot. The log says "Call pipeline 2B (OpenAI Realtime, Alfred
+   as a tool) is on".
+3. Point the number to the Call Control app "Alfred (phone pipeline)".
+
+To go back, set the number to the v1 assistant, or set the engine to `local`.

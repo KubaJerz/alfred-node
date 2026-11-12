@@ -71,6 +71,7 @@ flowchart TD
     VP -->|"[via phone call] text"| Q
     VP <-->|"v2: STT + TTS"| TS["Telnyx speech<br/>telnyx/speech.js"]
     VP <-->|"v3: JSON lines on stdin/stdout"| LS["local speech sidecar<br/>Silero · Parakeet · Kokoro<br/>voice/local-speech.js → local_speech.py"]
+    VP <-->|"2B: PCMU both ways + ask_alfred"| OA["OpenAI Realtime<br/>telnyx/realtime.js"]
     CTX["loadContext<br/>SOUL.md + USER.md + MEMORY.md + today's daily"] --> Q
     Q --> SPAWN["spawn: claude -p<br/>cwd = agent/"]
     SPAWN -.->|"skill matches"| SK["skills<br/>gmail · gcal · notion · intervals · strength · browser"]
@@ -140,6 +141,15 @@ runs the same `onCallTurn` as v1. The reply goes to Telnyx text-to-speech one
 sentence at a time. `telnyx/audio.js` converts it to 8 kHz mu-law, and it goes
 back over the socket. If the caller talks over it, the pipeline clears the audio
 and the next turn tells Alfred.
+
+**Option 2B** (`VOICE_PIPELINE_ENGINE=openai`) is the same Call Control path,
+but `telnyx/realtime.js` sends the caller audio to one OpenAI Realtime session
+per call, as PCMU with no transcoding. OpenAI decides the end of a turn and
+talks. For Alfred's tools, memory or actions, it calls the `ask_alfred`
+function, which runs the same `onCallTurn` as v1. Its reply goes back as the
+function output, and the speech model says it. Its prompt is
+`agent/phone-voice.md`. On a barge-in, the pipeline clears the audio and
+truncates the item at the point the caller heard.
 
 **The v3 pipeline** is the same path with the speech on this machine
 (`VOICE_PIPELINE_ENGINE=local`, the default of the pipeline). bot.js starts one
