@@ -5,12 +5,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
 
 ## [Unreleased]
 ### Changed
-- **The 2B voice stays in character as Alfred.** The tool is now `use_tools`
-  and is described as the voice's own calendar, lists, memory and actions.
-  The prompt has it say results in the first person, so it no longer says
-  "Alfred says" or "Alfred is still working". It never calls itself ChatGPT
-  or names a model. It reads every item of a list, and it answers from the
-  call itself when the answer was just said.
+- **The 2B voice stays in character as Alfred.** It is Alfred, with tools:
+  the function is now `use_tools` (in the code too), described as its own
+  calendar, lists, memory and actions. It says results in the first person,
+  and never "Alfred says", "I'm asking Alfred" or "still working on it" in
+  someone else's name. It never calls itself ChatGPT or names a model.
+- **The 2B prompt:** say a short line before every tool call ("Let me
+  check.", "One moment.", "On it." …) so the caller is never left in
+  silence; keep talking while a request runs, and always give the result
+  when it comes back, even if the talk has moved on; read every item of a
+  list; answer from the call itself when the answer was just said.
 
 ### Added
 - **2B logs the full wait on tool turns:** from Alfred's reply, and from the

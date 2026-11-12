@@ -114,7 +114,7 @@ See #98. In order:
    long Telnyx waits for the first token.
 2. `delegation_settings` (beta): a fast front model talks, and Alfred is the
    backend.
-3. The Telnyx model with an `ask_alfred` tool.
+3. The Telnyx model with an `use_tools` tool.
 4. Speech-to-speech models (OpenAI realtime, Gemini Live, Ultravox, Hume).
 
 ### Open points

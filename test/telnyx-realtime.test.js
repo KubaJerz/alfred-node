@@ -10,7 +10,7 @@ import {
   heardMs,
   addUsage,
   usageCost,
-  ALFRED_TOOL,
+  USE_TOOLS,
   DEFAULT_INSTRUCTIONS,
   GREETING,
 } from "../telnyx/realtime.js";
@@ -93,7 +93,7 @@ test("sessionUpdate asks for PCMU both ways, semantic VAD, and the use_tools too
   assert.equal(ev.session.audio.output.voice, "cedar");
   assert.equal(ev.session.audio.input.turn_detection.type, "semantic_vad");
   assert.equal(ev.session.audio.input.turn_detection.eagerness, "low");
-  assert.deepEqual(ev.session.tools, [ALFRED_TOOL]);
+  assert.deepEqual(ev.session.tools, [USE_TOOLS]);
   assert.equal(sessionUpdate({ transcribeModel: "" }).session.audio.input.transcription, null);
   assert.equal(ev.session.reasoning, undefined, "unset leaves OpenAI's default");
   assert.deepEqual(sessionUpdate({ reasoning: "minimal" }).session.reasoning, { effort: "minimal" });
@@ -188,9 +188,12 @@ test("the prompt keeps the voice in character as Alfred", async () => {
   const { readFileSync } = await import("fs");
   const file = readFileSync(new URL("../agent/phone-voice.md", import.meta.url), "utf8").trim();
   assert.equal(DEFAULT_INSTRUCTIONS, file);
-  assert.match(file, /never mention a tool/);
+  assert.match(file, /Never mention a tool/);
+  assert.match(file, /before every use_tools call, say one short line/);
+  assert.match(file, /always give it to the caller/);
+  assert.doesNotMatch(file, /real Alfred|Alfred's voice/);
   assert.match(file, /read every item/);
-  assert.doesNotMatch(ALFRED_TOOL.description, /Alfred/);
+  assert.doesNotMatch(USE_TOOLS.description, /Alfred/);
 });
 
 test("a tool turn logs the full wait until the answer is heard", async () => {
@@ -206,7 +209,7 @@ test("a tool turn logs the full wait until the answer is heard", async () => {
   const repliedAt = t;
   t = repliedAt + 600;
   ws.server({ type: "response.output_audio.delta", item_id: "ans", delta: ulaw(200) });
-  assert.ok(logs.includes(`📞 Answer audio 600 ms after Alfred answered, ${t - 1000} ms after the caller finished asking`), logs.join("\n"));
+  assert.ok(logs.includes(`📞 Answer audio 600 ms after use_tools answered, ${t - 1000} ms after the caller finished asking`), logs.join("\n"));
   session.end("test", { hang: false });
 });
 

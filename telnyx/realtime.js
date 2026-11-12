@@ -46,25 +46,34 @@ const PRICES = {
 
 // The same text as agent/phone-voice.md, which bot.js passes in.
 export const DEFAULT_INSTRUCTIONS = `You are Alfred, the user's personal assistant, on a phone call with them.
-Stay Alfred for the whole call. You have the user's calendar, email, lists,
-notes, memory, files and the web, and you can take actions. You reach all of
-that through the use_tools tool. It is part of you: never mention a tool, a
+
+You also have tools. use_tools gives you the user's calendar, email, lists,
+notes, memory and files, the web, and actions you can take: add, change,
+cancel, send, remind. The tools are part of you. Never mention a tool, a
 system, another assistant, or anyone else doing the work.
 
 - Answer small talk and simple general questions yourself.
 - Call use_tools for anything about the user's own data or life, anything to
-  do (add, change, cancel, send, remind), anything current (hours, news,
-  prices, weather), and anything you are not sure of. Pass the request with
-  every detail the caller gave.
+  do, anything current (hours, news, prices, weather), and anything you are
+  not sure of. Pass the request with every detail the caller gave.
 - If the answer is already in this call (something just said, added or looked
   up), answer it yourself without use_tools.
-- Before you call use_tools, say one short line such as "Let me check."
-  Vary it.
-- Say what use_tools returns as your own, in the first person: "I've added
-  it", never "Alfred says" or "it was done for you".
-- When the result is a list, read every item in order. Do not summarise, skip
+- IMPORTANT: before every use_tools call, say one short line first, so the
+  caller knows you heard them. Never leave the caller in silence. For
+  example: "Let me check.", "One moment.", "On it.", "Let me have a look.",
+  "Right, I'll sort that out." Vary it.
+- While a request runs, keep talking with the caller as normal. If they ask
+  for something new, call use_tools again.
+- When a result comes back, always give it to the caller, even if the talk
+  has moved on. Finish your sentence, then bring it up, for example: "Now,
+  about your calendar: …"
+- Say results as your own, in the first person: "I've added it", never
+  "Alfred says" or "it was done for you".
+- When a result is a list, read every item in order. Do not summarise, skip
   or number items, and do not read links or markdown. Answer anything else in
   one to three short sentences. If something went to Discord, say so.
+- If use_tools comes back with a question, ask the caller, then pass their
+  answer on with use_tools.
 - Never make up the user's data, and never say an action happened unless
   use_tools said it did.
 - Your name is Alfred. Never call yourself ChatGPT or name a model or company.
@@ -72,7 +81,7 @@ system, another assistant, or anyone else doing the work.
   whether you're an AI, say yes.
 - Talk like a calm, warm British butler. Be brief. Use English.`;
 
-export const ALFRED_TOOL = {
+export const USE_TOOLS = {
   type: "function",
   name: "use_tools",
   description:
@@ -135,7 +144,7 @@ export function sessionUpdate({
         },
         output: { format: { type: "audio/pcmu" }, voice },
       },
-      tools: [ALFRED_TOOL],
+      tools: [USE_TOOLS],
       tool_choice: "auto",
       // minimal, low, medium, high or xhigh. Unset leaves OpenAI's default (low).
       ...(reasoning ? { reasoning: { effort: reasoning } } : {}),
@@ -255,7 +264,7 @@ export function makeRealtimeSession({
       it.firstAt = now();
       if (answer && it.firstAt >= answer.repliedAt) {
         const since = answer.askedAt != null ? `, ${it.firstAt - answer.askedAt} ms after the caller finished asking` : "";
-        log(`📞 Answer audio ${it.firstAt - answer.repliedAt} ms after Alfred answered${since}`);
+        log(`📞 Answer audio ${it.firstAt - answer.repliedAt} ms after use_tools answered${since}`);
         answer = null;
       }
       if (speechStoppedAt != null) {
@@ -328,7 +337,7 @@ export function makeRealtimeSession({
     updateTimer.unref?.();
   };
 
-  const askAlfred = async (m) => {
+  const useTools = async (m) => {
     let request = "";
     try {
       request = String(JSON.parse(m.arguments || "{}").request || "").trim();
@@ -341,7 +350,7 @@ export function makeRealtimeSession({
     }
     const job = { at: now(), askedAt: turnVoiceAt };
     jobs.add(job);
-    log(`📞 ${ALFRED_TOOL.name}: ${request}`);
+    log(`📞 ${USE_TOOLS.name}: ${request}`);
     if (!updateTimer) {
       updateTimer = setTimeout(stillWorking, updateMs);
       updateTimer.unref?.();
@@ -354,7 +363,7 @@ export function makeRealtimeSession({
     }
     jobs.delete(job);
     if (ended) return;
-    log(`📞 Alfred answered in ${now() - job.at} ms (${reply.length} chars)`);
+    log(`📞 use_tools answered in ${now() - job.at} ms (${reply.length} chars)`);
     answer = { repliedAt: now(), askedAt: job.askedAt };
     send({
       type: "conversation.item.create",
@@ -402,8 +411,8 @@ export function makeRealtimeSession({
         if (m.transcript?.trim()) log(`🗣️  Voice: ${m.transcript.trim()}`);
         return;
       case "response.function_call_arguments.done":
-        if (m.name === ALFRED_TOOL.name) {
-          askAlfred(m).catch((err) => log(`⚠️  ${ALFRED_TOOL.name} failed: ${err.message}`));
+        if (m.name === USE_TOOLS.name) {
+          useTools(m).catch((err) => log(`⚠️  ${USE_TOOLS.name} failed: ${err.message}`));
         }
         return;
       case "response.done": {
@@ -476,7 +485,7 @@ export function makeRealtimeSession({
       `📞 Call session ended: ${reason} — ${mins.toFixed(1)} min, OpenAI ` +
         `${usage.audioIn + usage.audioCached} audio in / ${usage.audioOut} audio out tokens, ` +
         `about $${usd.toFixed(4)}${mins > 0 ? ` ($${(usd / mins).toFixed(4)}/min)` : ""}` +
-        (jobs.size ? `, ${jobs.size} Alfred request(s) still running` : "")
+        (jobs.size ? `, ${jobs.size} use_tools request(s) still running` : "")
     );
     if (hang) hangup().catch((err) => log(`⚠️  Hangup failed: ${err.message}`));
     onEnd();
