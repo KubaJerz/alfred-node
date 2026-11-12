@@ -80,6 +80,7 @@ export function sessionUpdate({
   voice = DEFAULT_VOICE,
   eagerness = DEFAULT_EAGERNESS,
   transcribeModel = DEFAULT_TRANSCRIBE_MODEL,
+  reasoning,
 } = {}) {
   return {
     type: "session.update",
@@ -97,6 +98,8 @@ export function sessionUpdate({
       },
       tools: [ALFRED_TOOL],
       tool_choice: "auto",
+      // minimal, low, medium, high or xhigh. Unset leaves OpenAI's default (low).
+      ...(reasoning ? { reasoning: { effort: reasoning } } : {}),
     },
   };
 }
@@ -149,6 +152,7 @@ export function makeRealtimeSession({
   eagerness,
   instructions,
   transcribeModel,
+  reasoning,
   greeting = GREETING,
   updateMs = UPDATE_MS,
   WebSocketImpl = WebSocket,
@@ -328,13 +332,17 @@ export function makeRealtimeSession({
   };
 
   const connect = () => {
+    log(
+      `📞 OpenAI settings: ${model}, voice ${voice || DEFAULT_VOICE}, eagerness ${eagerness || DEFAULT_EAGERNESS}, ` +
+        `reasoning ${reasoning || "default (low)"}`,
+    );
     const sep = url.includes("?") ? "&" : "?";
     ws = new WebSocketImpl(`${url}${sep}model=${encodeURIComponent(model)}`, {
       headers: { Authorization: `Bearer ${apiKey}` },
     });
     ws.on("open", () => {
       if (ended) return ws.close();
-      send(sessionUpdate({ instructions, voice, eagerness, transcribeModel }));
+      send(sessionUpdate({ instructions, voice, eagerness, transcribeModel, reasoning }));
       for (const p of openQueue) send({ type: "input_audio_buffer.append", audio: p });
       openQueue = [];
       if (greeting) {

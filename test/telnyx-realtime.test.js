@@ -91,6 +91,16 @@ test("sessionUpdate asks for PCMU both ways, semantic VAD, and the ask_alfred to
   assert.equal(ev.session.audio.input.turn_detection.eagerness, "low");
   assert.deepEqual(ev.session.tools, [ALFRED_TOOL]);
   assert.equal(sessionUpdate({ transcribeModel: "" }).session.audio.input.transcription, null);
+  assert.equal(ev.session.reasoning, undefined, "unset leaves OpenAI's default");
+  assert.deepEqual(sessionUpdate({ reasoning: "minimal" }).session.reasoning, { effort: "minimal" });
+});
+
+test("the call logs its OpenAI settings", async () => {
+  const { session, ws, logs } = setup({ opts: { greeting: "", eagerness: "high", reasoning: "minimal" } });
+  await waitFor(() => ws.sent.length >= 1);
+  assert.ok(logs.some((l) => l === "📞 OpenAI settings: gpt-realtime-2.1-mini, voice cedar, eagerness high, reasoning minimal"), logs.join("\n"));
+  assert.deepEqual(ws.sent[0].session.reasoning, { effort: "minimal" });
+  session.end("test", { hang: false });
 });
 
 test("heardMs is the time since the first chunk, capped at the item length", () => {

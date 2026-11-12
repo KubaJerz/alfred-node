@@ -11,6 +11,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
   says `node_modules` without the slash, so it covers a symlink too.
 
 ### Added
+- **`VOICE_OPENAI_REASONING` sets how much the 2B talker thinks before it
+  speaks** (minimal, low, medium, high, xhigh; unset is OpenAI's default, low).
+  Each 2B call now logs its model, voice, eagerness and reasoning, so test
+  calls can be told apart in the log.
+
+### Added
 - **Phone calls through OpenAI Realtime, with Alfred as a tool (option 2B,
   #107).** `VOICE_PIPELINE_ENGINE=openai` uses the same Call Control app and
   media socket as v2/v3, and bridges the call audio to OpenAI Realtime as
