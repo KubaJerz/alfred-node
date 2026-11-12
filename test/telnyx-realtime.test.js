@@ -13,6 +13,7 @@ import {
   USE_TOOLS,
   DEFAULT_INSTRUCTIONS,
   toolOutput,
+  oneLine,
   GREETING,
 } from "../telnyx/realtime.js";
 
@@ -225,6 +226,10 @@ test("a mark after a barge-in clear is not counted as hugely late", async () => 
   session.onFrame({ event: "mark", mark: { name: "x:end" } });
   assert.ok(!logs.some((l) => /later than expected/.test(l)), logs.join("\n"));
   session.end("test", { hang: false });
+});
+
+test("transcripts log on one line", () => {
+  assert.equal(oneLine(" Right, let me look.\n\nVilla Tronco is open.\n"), "Right, let me look. Villa Tronco is open.");
 });
 
 test("the end of a reply flushes the last part chunk and sends a mark", async () => {

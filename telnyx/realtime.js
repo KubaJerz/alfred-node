@@ -63,8 +63,7 @@ system, another assistant, or anyone else doing the work.
   example: "Let me check.", "One moment.", "On it.", "Let me have a look.",
   "Right, I'll sort that out." Vary it.
 - While a request runs, keep talking with the caller as normal. If they ask
-  for something new, call use_tools again. Do not guess or talk about a
-  request that is still running; just say its result when it comes.
+  for something new, call use_tools again.
 - IMPORTANT: every request gets its own answer. When a result comes back,
   give it to the caller, even if the talk has moved on or another request
   came in after it. Finish your sentence, then bring it up. A confirmation
@@ -155,6 +154,9 @@ export function sessionUpdate({
     },
   };
 }
+
+// A transcript on one log line, so a grep for the line finds all of it.
+export const oneLine = (text) => text.trim().replace(/\s*\n\s*/g, " ");
 
 // The function output names the request it answers and asks for the answer
 // now. Without that, a result that comes back while the caller talks about
@@ -419,10 +421,10 @@ export function makeRealtimeSession({
         }
         return;
       case "conversation.item.input_audio_transcription.completed":
-        if (m.transcript?.trim()) log(`📞 Caller: ${m.transcript.trim()}`);
+        if (m.transcript?.trim()) log(`📞 Caller: ${oneLine(m.transcript)}`);
         return;
       case "response.output_audio_transcript.done":
-        if (m.transcript?.trim()) log(`🗣️  Voice: ${m.transcript.trim()}`);
+        if (m.transcript?.trim()) log(`🗣️  Voice: ${oneLine(m.transcript)}`);
         return;
       case "response.function_call_arguments.done":
         if (m.name === USE_TOOLS.name) {

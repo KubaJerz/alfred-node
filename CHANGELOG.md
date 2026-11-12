@@ -9,11 +9,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
   comes back while the caller has moved on, the voice still gives each
   result, even if only in a few words. The function output now names the
   request it answers and asks for the answer now, and the prompt says so.
-  It also no longer talks about a request that is still running, which had
-  pushed a real answer back by 7.6 s.
 - **"Are you ChatGPT?" no longer gets "Yes, I'm Alfred."** The voice says
   it is Alfred without a yes or no, and still says it is an AI if sincerely
   asked.
+
+### Fixed
+- **2B logs each transcript on one line.** A reply with paragraphs had its
+  later lines unmarked in the log, so a grep showed only the first line.
 
 ### Added
 - **The standard test call** in `docs/phone-design.md`: a ten-step script
