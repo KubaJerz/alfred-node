@@ -15,6 +15,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
   speaks** (minimal, low, medium, high, xhigh; unset is OpenAI's default, low).
   Each 2B call now logs its model, voice, eagerness and reasoning, so test
   calls can be told apart in the log.
+- **`VOICE_OPENAI_SILENCE_MS` ends the caller's turn after that much
+  silence** (OpenAI's `server_vad`), instead of the model judging it. Faster
+  than the fastest eagerness, but it cuts in on pauses.
+- **2B logs how long turn detection waited after the caller's last sound,**
+  from the loudness of the call audio, so the end-of-turn wait shows up in
+  the timings.
 
 ### Added
 - **Phone calls through OpenAI Realtime, with Alfred as a tool (option 2B,
