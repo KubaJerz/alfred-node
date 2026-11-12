@@ -21,8 +21,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
 - **2B logs how long turn detection waited after the caller's last sound,**
   from the loudness of the call audio, so the end-of-turn wait shows up in
   the timings.
-
-### Added
 - **Phone calls through OpenAI Realtime, with Alfred as a tool (option 2B,
   #107).** `VOICE_PIPELINE_ENGINE=openai` uses the same Call Control app and
   media socket as v2/v3, and bridges the call audio to OpenAI Realtime as
