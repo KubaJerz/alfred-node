@@ -557,7 +557,12 @@ OpenAI calls use_tools(request) ─► onCallTurn (same session as v1) ─► re
   queue and sends `conversation.item.truncate` at the point the caller heard
   (the time since the item's first chunk went out, at most its length).
 - If the OpenAI socket closes, the call hangs up. If the caller hangs up while
-  Alfred works, Alfred finishes, and his reply still goes to Discord.
+  Alfred works, Alfred finishes, and his reply still goes to Discord: the
+  mirror channel, or the owner's DM when there is none. Files from a call
+  turn go the same way.
+- When the result comes back, a still-working line that has not reached the
+  caller yet is cancelled (`response.cancel`), so it never plays after the
+  answer.
 - The caller only ever talks to Alfred. The tool is called `use_tools`, and
   the prompt has the voice say results in the first person, so it never says
   "I'm asking Alfred" or "Alfred says".
@@ -565,6 +570,10 @@ OpenAI calls use_tools(request) ─► onCallTurn (same session as v1) ─► re
   reasoning `low`. From the caller's last sound to the first audio, that took
   about 0.83 s, against about 1.65 s with eagerness `high`. Minimal reasoning
   was no faster and chose worse, and a 300 ms timer added about 0.35 s.
+- Background talk near the phone cut the voice off and made it start its
+  answer over, up to 4 times (calls on 2026-11-11). Since 2.31.0: OpenAI's
+  `near_field` noise filter, a `server_vad` threshold of 0.65 (default 0.5),
+  and a prompt rule to ignore background talk.
 
 ### Cost
 

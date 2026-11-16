@@ -1192,18 +1192,23 @@ function extractAttachments(text) {
 // Send a reply that may carry attachments. Text is chunked to Discord's char
 // limit; files ride on the final message, batched to MAX_FILES_PER_MSG.
 async function sendReply(msg, text, files) {
+  return postChunks((payload) => msg.reply(payload), text, files);
+}
+
+// post(payload) sends one Discord message: msg.reply, or channel.send.
+async function postChunks(post, text, files) {
   const chunks = text ? splitMessage(text, 1900) : [];
   if (!files.length) {
-    for (const chunk of chunks) await msg.reply(chunk);
+    for (const chunk of chunks) await post(chunk);
     return;
   }
   // Leading chunks go out as plain text; the last chunk rides with the first file batch.
-  for (const chunk of chunks.slice(0, -1)) await msg.reply(chunk);
+  for (const chunk of chunks.slice(0, -1)) await post(chunk);
   const trailing = chunks.length ? chunks[chunks.length - 1] : "";
   for (let b = 0; b < files.length; b += MAX_FILES_PER_MSG) {
     const payload = { files: files.slice(b, b + MAX_FILES_PER_MSG) };
     if (b === 0 && trailing) payload.content = trailing;
-    await msg.reply(payload);
+    await post(payload);
   }
 }
 
@@ -1295,6 +1300,31 @@ async function onSmsText({ from, text, media }) {
   await enqueueTurn(() => handleTurn(target, text));
 }
 
+// Where a call posts what it cannot speak: files, and answers that came back
+// after the caller hung up. The call mirror channel when one is set, else a DM
+// to the owner (the first of ALLOWED_USER_IDS). Without either, it is lost.
+async function postFromCall(text, files = []) {
+  try {
+    let channel = null;
+    if (VOICE_MIRROR_CHANNEL) channel = await client.channels.fetch(VOICE_MIRROR_CHANNEL);
+    else if (ALLOWED_USER_IDS.length) channel = await (await client.users.fetch(ALLOWED_USER_IDS[0])).createDM();
+    if (!channel) {
+      console.warn("⚠️  Nowhere to post from the call — set VOICE_MIRROR_CHANNEL or ALLOWED_USER_IDS");
+      return;
+    }
+    await postChunks((payload) => channel.send(payload), text, files);
+  } catch (err) {
+    console.error(`⚠️  Couldn't post from the call: ${err.message}`);
+  }
+}
+
+// A use_tools answer that came back after the call ended (2B). With a mirror
+// channel, the reply is already there.
+function onLateCallAnswer({ request, reply }) {
+  if (VOICE_MIRROR_CHANNEL || !reply.trim()) return;
+  return postFromCall(`📞 You hung up before I could answer "${request}":\n\n${reply.trim()}`);
+}
+
 // A phone call. The reply is spoken, so send() keeps the text for the voice
 // route to stream back, and posts a copy in the mirror channel (if set). A late
 // send, for example a deferred strength follow-up, reaches the mirror only.
@@ -1308,6 +1338,8 @@ function callTarget({ discord = null, who, onReply }) {
     send: async (text, files = [], opts = {}) => {
       onReply(text, opts);
       if (discord) await discord.send(text, files).catch((err) => console.error(`⚠️  Call mirror post failed: ${err.message}`));
+      // No mirror: the files still need to reach Discord. The caller hears the text.
+      else if (files.length) await postFromCall("📞 From the call:", files);
     },
   };
 }
@@ -1499,6 +1531,7 @@ if (voicePipelineConfigured) {
       realtime: VOICE_PIPELINE_ENGINE === "openai" ? {
         apiKey: OPENAI_API_KEY,
         instructions: readPhoneVoicePrompt(),
+        onLate: onLateCallAnswer,
         ...VOICE_OPENAI,
       } : {},
     });
