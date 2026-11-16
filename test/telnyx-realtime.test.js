@@ -111,9 +111,7 @@ test("silenceMs switches turn detection to a server_vad silence timer", () => {
   const t = sessionUpdate({ silenceMs: "350" }).session.audio.input.turn_detection;
   assert.equal(t.type, "server_vad");
   assert.equal(t.silence_duration_ms, 350);
-  assert.equal(t.threshold, 0.65);
   assert.equal(t.eagerness, undefined);
-  assert.deepEqual(sessionUpdate({}).session.audio.input.noise_reduction, { type: "near_field" });
 });
 
 test("the log shows how long turn detection waited after the caller's last sound", async () => {
@@ -135,7 +133,7 @@ test("the log shows how long turn detection waited after the caller's last sound
 test("the call logs its OpenAI settings", async () => {
   const { session, ws, logs } = setup({ opts: { greeting: "", eagerness: "high", reasoning: "minimal" } });
   await waitFor(() => ws.sent.length >= 1);
-  assert.ok(logs.some((l) => l === "📞 OpenAI settings: gpt-realtime-2.1-mini, voice cedar, eagerness high, reasoning minimal, noise reduction near_field"), logs.join("\n"));
+  assert.ok(logs.some((l) => l === "📞 OpenAI settings: gpt-realtime-2.1-mini, voice cedar, eagerness high, reasoning minimal"), logs.join("\n"));
   assert.deepEqual(ws.sent[0].session.reasoning, { effort: "minimal" });
   session.end("test", { hang: false });
 });
@@ -430,7 +428,7 @@ test("a result that comes back after the call ended goes to onLate", async () =>
   session.end("hung up", { hang: false });
   release("Milk, eggs.");
   await waitFor(() => late.length === 1);
-  assert.deepEqual(late[0], { request: "read the list", reply: "Milk, eggs." });
+  assert.deepEqual(late[0], { request: "read the list", reply: "Milk, eggs.", caller: "+1" });
   assert.ok(logs.some((l) => /answered after the call ended/.test(l)));
 });
 
@@ -457,7 +455,7 @@ test("a Telnyx stop ends the session without a hangup and logs the cost", async 
 test("the settings log names the silence timer when it is on", async () => {
   const { session, ws, logs } = setup({ opts: { greeting: "", silenceMs: 400 } });
   await waitFor(() => ws.sent.length >= 1);
-  assert.ok(logs.some((l) => /turn end after 400 ms of silence \(threshold 0\.65\), reasoning default \(low\)/.test(l)), logs.join("\n"));
+  assert.ok(logs.some((l) => /turn end after 400 ms of silence, reasoning default \(low\)/.test(l)), logs.join("\n"));
   session.end("test", { hang: false });
 });
 

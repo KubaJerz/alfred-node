@@ -5,10 +5,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
 
 ## [Unreleased]
 ### Changed
-- **2B ignores background talk.** OpenAI's noise filter is on (`near_field`)
-  and the `server_vad` threshold is 0.65 (was the default 0.5), so other
-  people near the phone no longer cut the voice off. The prompt says to
-  ignore background talk, and not to start over after a short cut-off.
+- **2B ignores background talk.** The prompt says to ignore background
+  talk and other voices, and not to start over after a short cut-off.
 - **2B prompt, from the calls on 2026-11-11:** anything new asked while a
   request runs is its own `use_tools` call; the voice never describes the
   process while it waits ("the checker", "the request is in motion"); and
@@ -18,8 +16,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
 ### Fixed
 - **A still-working line no longer plays after the answer came back.** If
   it has not reached the caller yet, it is cancelled.
-- **Answers that come back after a hang-up are kept.** Without a mirror
-  channel they were lost; now they go to the owner's DM.
+- **Answers that come back after a hang-up are kept.** They were lost
+  without a mirror channel. Now they go by SMS to the caller, and to the
+  mirror channel or the owner's DM.
 - **Files from a call turn reach Discord.** Without a mirror channel they
   were dropped, though the voice said they were sent. They now go to the
   owner's DM.

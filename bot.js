@@ -1318,11 +1318,18 @@ async function postFromCall(text, files = []) {
   }
 }
 
-// A use_tools answer that came back after the call ended (2B). With a mirror
-// channel, the reply is already there.
-function onLateCallAnswer({ request, reply }) {
-  if (VOICE_MIRROR_CHANNEL || !reply.trim()) return;
-  return postFromCall(`📞 You hung up before I could answer "${request}":\n\n${reply.trim()}`);
+// A use_tools answer that came back after the call ended (2B). It goes by SMS
+// to the caller, and to Discord: a mirror channel already has it, else the
+// owner's DM.
+async function onLateCallAnswer({ request, reply, caller }) {
+  if (!reply.trim()) return;
+  const text = `📞 You hung up before I could answer "${request}":\n\n${reply.trim()}`;
+  const to = caller || SMS_ALLOWED_NUMBERS[0];
+  const sms = smsConfigured && to
+    ? sendSms({ apiKey: TELNYX_API_KEY, from: TELNYX_PHONE_NUMBER, to, text: smsText(text), messagingProfileId: TELNYX_MESSAGING_PROFILE_ID })
+        .catch((err) => console.error(`📵 Late call answer: ${err.message}`))
+    : null;
+  await Promise.all([sms, VOICE_MIRROR_CHANNEL ? null : postFromCall(text)]);
 }
 
 // A phone call. The reply is spoken, so send() keeps the text for the voice

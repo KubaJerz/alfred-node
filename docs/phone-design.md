@@ -557,8 +557,8 @@ OpenAI calls use_tools(request) ─► onCallTurn (same session as v1) ─► re
   queue and sends `conversation.item.truncate` at the point the caller heard
   (the time since the item's first chunk went out, at most its length).
 - If the OpenAI socket closes, the call hangs up. If the caller hangs up while
-  Alfred works, Alfred finishes, and his reply still goes to Discord: the
-  mirror channel, or the owner's DM when there is none. Files from a call
+  Alfred works, Alfred finishes, and his reply goes by SMS to the caller and
+  to Discord: the mirror channel, or the owner's DM when there is none. Files from a call
   turn go the same way.
 - When the result comes back, a still-working line that has not reached the
   caller yet is cancelled (`response.cancel`), so it never plays after the
@@ -571,9 +571,11 @@ OpenAI calls use_tools(request) ─► onCallTurn (same session as v1) ─► re
   about 0.83 s, against about 1.65 s with eagerness `high`. Minimal reasoning
   was no faster and chose worse, and a 300 ms timer added about 0.35 s.
 - Background talk near the phone cut the voice off and made it start its
-  answer over, up to 4 times (calls on 2026-11-11). Since 2.31.0: OpenAI's
-  `near_field` noise filter, a `server_vad` threshold of 0.65 (default 0.5),
-  and a prompt rule to ignore background talk.
+  answer over, up to 4 times (calls on 2026-11-11). The 100 ms timer also
+  split one request into 3 or 4 turns. Since 2.31.0 the prompt says to
+  ignore background talk; next we test semantic VAD (eagerness high) for a
+  few days. OpenAI's `noise_reduction` and the `server_vad` threshold are
+  the next levers if noise still cuts in.
 
 ### Cost
 

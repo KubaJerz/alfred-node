@@ -30,11 +30,6 @@ export const DEFAULT_VOICE = "cedar";
 export const DEFAULT_EAGERNESS = "medium";
 export const DEFAULT_TRANSCRIBE_MODEL = "gpt-4o-mini-transcribe";
 export const GREETING = "Hey, it's Alfred.";
-// server_vad counts a sound as speech above this (0 to 1, OpenAI's default
-// 0.5). At 0.5, other people talking near the phone cut Alfred off.
-export const VAD_THRESHOLD = 0.65;
-// OpenAI's input noise filter. near_field suits a phone held to the ear.
-export const NOISE_REDUCTION = "near_field";
 const UPDATE_MS = 8000; // a spoken "still working" line while Alfred works this long
 const OPEN = 1; // WebSocket readyState
 const OPEN_QUEUE_CAP = 100; // caller frames (20 ms) held while the OpenAI socket opens
@@ -136,9 +131,7 @@ export function frameRms(payload) {
 // that ends the turn after that much silence.
 export function turnDetection({ eagerness = DEFAULT_EAGERNESS, silenceMs } = {}) {
   const base = { create_response: true, interrupt_response: true };
-  if (silenceMs) {
-    return { type: "server_vad", threshold: VAD_THRESHOLD, silence_duration_ms: Number(silenceMs), ...base };
-  }
+  if (silenceMs) return { type: "server_vad", silence_duration_ms: Number(silenceMs), ...base };
   return { type: "semantic_vad", eagerness, ...base };
 }
 
@@ -161,7 +154,6 @@ export function sessionUpdate({
           format: { type: "audio/pcmu" },
           turn_detection: turnDetection({ eagerness, silenceMs }),
           transcription: transcribeModel ? { model: transcribeModel } : null,
-          noise_reduction: { type: NOISE_REDUCTION },
         },
         output: { format: { type: "audio/pcmu" }, voice },
       },
@@ -413,7 +405,7 @@ export function makeRealtimeSession({
     jobs.delete(job);
     if (ended) {
       log(`📞 use_tools answered after the call ended, in ${now() - job.at} ms (${reply.length} chars)`);
-      return onLate({ request, reply });
+      return onLate({ request, reply, caller });
     }
     log(`📞 use_tools answered in ${now() - job.at} ms (${reply.length} chars)`);
     dropUpdate();
@@ -491,8 +483,8 @@ export function makeRealtimeSession({
   const connect = () => {
     log(
       `📞 OpenAI settings: ${model}, voice ${voice || DEFAULT_VOICE}, ` +
-        `${silenceMs ? `turn end after ${silenceMs} ms of silence (threshold ${VAD_THRESHOLD})` : `eagerness ${eagerness || DEFAULT_EAGERNESS}`}, ` +
-        `reasoning ${reasoning || "default (low)"}, noise reduction ${NOISE_REDUCTION}`,
+        `${silenceMs ? `turn end after ${silenceMs} ms of silence` : `eagerness ${eagerness || DEFAULT_EAGERNESS}`}, ` +
+        `reasoning ${reasoning || "default (low)"}`,
     );
     const sep = url.includes("?") ? "&" : "?";
     ws = new WebSocketImpl(`${url}${sep}model=${encodeURIComponent(model)}`, {
