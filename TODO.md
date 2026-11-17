@@ -156,6 +156,23 @@ risky jobs to small least-privilege agents instead of widening his reach.
 
 ## Next
 
+### Phone — 2B direct tools and turn detection
+
+- [ ] **Test semantic VAD (eagerness high) for a few days** (from 2026-11-16).
+      The 100 ms timer split one request into 3–4 turns, and the voice
+      answered half requests ("unchecked" became "checked"). Compare split
+      requests, noise cut-offs and latency (was ~0.83 s on the timer, ~1.65 s
+      on eagerness high), then decide. If noise still cuts in, try OpenAI's
+      `noise_reduction` and the `server_vad` threshold.
+- [ ] **Give the voice direct tools (hybrid).** Fast, typed tools for the
+      common asks: shopping list add/read/check (`checked: false`, not a
+      retold request), today's calendar, the time. They call the same broker
+      routes Alfred uses, in about a second instead of 6–16 s. `use_tools`
+      stays for everything else. Every direct action also leaves a note in
+      Alfred's session/memory, so Alfred knows what was done on the call.
+- [ ] **Send Alfred the caller's own words** with each `use_tools` request,
+      so a request the voice retold wrong can be checked against them.
+
 ### Remote access to the box
 
 - [x] **Reach the machine from anywhere — Tailscale + SSH.** Done by

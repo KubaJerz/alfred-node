@@ -341,6 +341,97 @@ test("a slow Alfred gets a spoken still-working line", async () => {
   session.end("test", { hang: false });
 });
 
+// A slow use_tools call whose still-working line has been asked for.
+async function slowWithUpdate() {
+  let release;
+  const logs = [];
+  const session = makeRealtimeSession({
+    callControlId: "v3:x",
+    caller: "+1",
+    sendFrame: () => {},
+    onTurn: () => new Promise((r) => (release = r)),
+    hangup: async () => {},
+    log: (l) => logs.push(l),
+    apiKey: "sk-test",
+    WebSocketImpl: FakeWs,
+    greeting: "",
+    updateMs: 60,
+  });
+  session.start();
+  const ws = FakeWs.last;
+  await waitFor(() => ws.readyState === 1);
+  ws.server({ type: "response.function_call_arguments.done", name: "use_tools", call_id: "c9", arguments: '{"request":"slow"}' });
+  ws.server({ type: "response.done", response: { id: "r_call", status: "completed" } });
+  await waitFor(() => ws.sent.some((e) => e.response?.metadata?.kind === "still_working"));
+  const cancels = () => ws.sent.filter((e) => e.type === "response.cancel");
+  const answers = () => ws.sent.filter((e) => e.type === "response.create" && !e.response);
+  return { session, ws, logs, release: (r) => release(r), cancels, answers };
+}
+
+test("a still-working line that has not played is cancelled when the answer comes", async () => {
+  const { session, ws, logs, release, cancels, answers } = await slowWithUpdate();
+  ws.server({ type: "response.created", response: { id: "r_upd", metadata: { kind: "still_working" } } });
+  release("Done.");
+  await waitFor(() => cancels().length === 1);
+  assert.deepEqual(cancels()[0], { type: "response.cancel", response_id: "r_upd" });
+  assert.ok(logs.some((l) => /Dropped a still-working line/.test(l)));
+  // The answer waits for the cancelled line to end, then goes.
+  assert.equal(answers().length, 0);
+  ws.server({ type: "response.done", response: { id: "r_upd", status: "cancelled" } });
+  assert.equal(answers().length, 1);
+  session.end("test", { hang: false });
+});
+
+test("an answer before response.created still cancels the still-working line", async () => {
+  const { session, ws, release, cancels } = await slowWithUpdate();
+  release("Done.");
+  await waitFor(() => ws.sent.some((e) => e.type === "conversation.item.create"));
+  assert.equal(cancels().length, 0);
+  ws.server({ type: "response.created", response: { id: "r_upd", metadata: { kind: "still_working" } } });
+  assert.deepEqual(cancels()[0], { type: "response.cancel", response_id: "r_upd" });
+  session.end("test", { hang: false });
+});
+
+test("a still-working line that has started playing is left to finish", async () => {
+  const { session, ws, release, cancels, answers } = await slowWithUpdate();
+  ws.server({ type: "response.created", response: { id: "r_upd", metadata: { kind: "still_working" } } });
+  ws.server({ type: "response.output_audio.delta", response_id: "r_upd", item_id: "it_upd", delta: ulaw(200) });
+  release("Done.");
+  await waitFor(() => ws.sent.some((e) => e.type === "conversation.item.create"));
+  assert.equal(cancels().length, 0);
+  ws.server({ type: "response.done", response: { id: "r_upd", status: "completed" } });
+  assert.equal(answers().length, 1);
+  session.end("test", { hang: false });
+});
+
+test("a result that comes back after the call ended goes to onLate", async () => {
+  let release;
+  const late = [];
+  const logs = [];
+  const session = makeRealtimeSession({
+    callControlId: "v3:x",
+    caller: "+1",
+    sendFrame: () => {},
+    onTurn: () => new Promise((r) => (release = r)),
+    onLate: (x) => late.push(x),
+    hangup: async () => {},
+    log: (l) => logs.push(l),
+    apiKey: "sk-test",
+    WebSocketImpl: FakeWs,
+    greeting: "",
+  });
+  session.start();
+  const ws = FakeWs.last;
+  await waitFor(() => ws.readyState === 1);
+  ws.server({ type: "response.function_call_arguments.done", name: "use_tools", call_id: "c8", arguments: '{"request":"read the list"}' });
+  await waitFor(() => release);
+  session.end("hung up", { hang: false });
+  release("Milk, eggs.");
+  await waitFor(() => late.length === 1);
+  assert.deepEqual(late[0], { request: "read the list", reply: "Milk, eggs.", caller: "+1" });
+  assert.ok(logs.some((l) => /answered after the call ended/.test(l)));
+});
+
 test("the call ends and hangs up when the OpenAI socket closes", async () => {
   const { ws, hung, ended, logs } = setup();
   await waitFor(() => ws.readyState === 1);

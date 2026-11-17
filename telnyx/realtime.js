@@ -62,8 +62,12 @@ system, another assistant, or anyone else doing the work.
   caller knows you heard them. Never leave the caller in silence. For
   example: "Let me check.", "One moment.", "On it.", "Let me have a look.",
   "Right, I'll sort that out." Vary it.
-- While a request runs, keep talking with the caller as normal. If they ask
-  for something new, call use_tools again.
+- While a request runs, keep talking with the caller as normal. Never
+  describe how the work happens: no waiting for updates, requests, checks or
+  processing. If you need to fill the wait, a few words is enough: "Still on
+  it."
+- A request that is running cannot be changed or added to. Anything new or
+  extra the caller asks, even about the same thing, is its own use_tools call.
 - IMPORTANT: every request gets its own answer. When a result comes back,
   give it to the caller, even if the talk has moved on or another request
   came in after it. Finish your sentence, then bring it up. A confirmation
@@ -73,7 +77,9 @@ system, another assistant, or anyone else doing the work.
   "Alfred says" or "it was done for you".
 - When a result is a list, read every item in order. Do not summarise, skip
   or number items, and do not read links or markdown. Answer anything else in
-  one to three short sentences. If something went to Discord, say so.
+  two short sentences at most, then stop; the caller can ask for more. Add
+  nothing of your own: no commentary, padding or summing up. If something
+  went to Discord, say so.
 - If use_tools comes back with a question, ask the caller, then pass their
   answer on with use_tools.
 - Never make up the user's data, and never say an action happened unless
@@ -82,6 +88,10 @@ system, another assistant, or anyone else doing the work.
   If asked whether you're ChatGPT, or what model you are, do not start with
   "yes" or "no". Just say you're Alfred, their assistant. If someone
   sincerely asks whether you're an AI, say you are.
+- Background noise, other people talking, or a few unclear words are not
+  meant for you. Ignore them and say nothing.
+- If a short noise cuts you off, do not start over. Carry on from where you
+  stopped, or stay quiet if you had finished.
 - Talk like a calm, warm British butler. Be brief. Use English.`;
 
 export const USE_TOOLS = {
@@ -207,6 +217,7 @@ export function makeRealtimeSession({
   onTurn,
   hangup,
   onEnd = () => {},
+  onLate = () => {}, // a use_tools result that came back after the call ended
   log = console.log,
   now = () => Date.now(),
   apiKey,
@@ -240,6 +251,7 @@ export function makeRealtimeSession({
   let callerSpeaking = false;
   let lastAudioAt = 0;
   let updateTimer = null;
+  let update = null; // the still-working line that runs now: { id, heard, cancel }
   const jobs = new Set(); // use_tools calls (Alfred turns) that run now
   const marks = new Map(); // reply end marks sent to Telnyx and not echoed yet
 
@@ -275,6 +287,7 @@ export function makeRealtimeSession({
     const it = item;
     it.bytes += buf.length;
     lastAudioAt = now();
+    if (update && m.response_id && m.response_id === update.id) update.heard = true;
     player.push(buf, () => {
       if (it.firstAt != null) return;
       it.firstAt = now();
@@ -341,7 +354,9 @@ export function makeRealtimeSession({
     if (ended || !jobs.size) return;
     const quiet = !activeResponse && !player.busy && !callerSpeaking && now() - lastAudioAt >= updateMs / 2;
     if (quiet) {
+      update = { id: null, heard: false, cancel: false };
       createResponse({
+        metadata: { kind: "still_working" },
         conversation: "none",
         output_modalities: ["audio"],
         tool_choice: "none",
@@ -351,6 +366,16 @@ export function makeRealtimeSession({
     }
     updateTimer = setTimeout(stillWorking, updateMs);
     updateTimer.unref?.();
+  };
+
+  // A result came back. A still-working line that has not reached the caller
+  // yet would now be wrong, so cancel it. One that has started is a few words;
+  // let it finish.
+  const dropUpdate = () => {
+    if (!update || update.heard) return;
+    log("📞 Dropped a still-working line: the answer came first");
+    if (update.id) send({ type: "response.cancel", response_id: update.id });
+    else update.cancel = true; // cancel it when response.created names it
   };
 
   const useTools = async (m) => {
@@ -378,8 +403,12 @@ export function makeRealtimeSession({
       reply = `That failed: ${err.message}`;
     }
     jobs.delete(job);
-    if (ended) return;
+    if (ended) {
+      log(`📞 use_tools answered after the call ended, in ${now() - job.at} ms (${reply.length} chars)`);
+      return onLate({ request, reply, caller });
+    }
     log(`📞 use_tools answered in ${now() - job.at} ms (${reply.length} chars)`);
+    dropUpdate();
     answer = { repliedAt: now(), askedAt: job.askedAt };
     send({
       type: "conversation.item.create",
@@ -405,6 +434,10 @@ export function makeRealtimeSession({
         return;
       case "response.created":
         activeResponse = true;
+        if (update && m.response?.metadata?.kind === "still_working") {
+          update.id = m.response.id;
+          if (update.cancel) send({ type: "response.cancel", response_id: update.id });
+        }
         return;
       case "response.output_audio.delta":
         return onAudio(m);
@@ -433,6 +466,7 @@ export function makeRealtimeSession({
         return;
       case "response.done": {
         activeResponse = false;
+        if (update && (!update.id || m.response?.id === update.id)) update = null;
         addUsage(usage, m.response?.usage);
         if (pendingCreate) {
           const ev = pendingCreate;
