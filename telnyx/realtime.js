@@ -30,6 +30,9 @@ export const DEFAULT_VOICE = "cedar";
 export const DEFAULT_EAGERNESS = "medium";
 export const DEFAULT_TRANSCRIBE_MODEL = "gpt-4o-mini-transcribe";
 export const GREETING = "Hey, it's Alfred.";
+// OpenAI's input noise filter: far_field (speakerphone, car), near_field
+// (phone at the ear, headset), or "off". Road noise in the car cut Alfred off.
+export const DEFAULT_NOISE = "far_field";
 const UPDATE_MS = 8000; // a spoken "still working" line while Alfred works this long
 const OPEN = 1; // WebSocket readyState
 const OPEN_QUEUE_CAP = 100; // caller frames (20 ms) held while the OpenAI socket opens
@@ -142,6 +145,7 @@ export function sessionUpdate({
   transcribeModel = DEFAULT_TRANSCRIBE_MODEL,
   reasoning,
   silenceMs,
+  noise = DEFAULT_NOISE,
 } = {}) {
   return {
     type: "session.update",
@@ -154,6 +158,7 @@ export function sessionUpdate({
           format: { type: "audio/pcmu" },
           turn_detection: turnDetection({ eagerness, silenceMs }),
           transcription: transcribeModel ? { model: transcribeModel } : null,
+          noise_reduction: noise && noise !== "off" ? { type: noise } : null,
         },
         output: { format: { type: "audio/pcmu" }, voice },
       },
@@ -229,6 +234,7 @@ export function makeRealtimeSession({
   transcribeModel,
   reasoning,
   silenceMs,
+  noise,
   greeting = GREETING,
   updateMs = UPDATE_MS,
   markLateMs = MARK_LATE_MS,
@@ -484,7 +490,7 @@ export function makeRealtimeSession({
     log(
       `📞 OpenAI settings: ${model}, voice ${voice || DEFAULT_VOICE}, ` +
         `${silenceMs ? `turn end after ${silenceMs} ms of silence` : `eagerness ${eagerness || DEFAULT_EAGERNESS}`}, ` +
-        `reasoning ${reasoning || "default (low)"}`,
+        `reasoning ${reasoning || "default (low)"}, noise filter ${noise || DEFAULT_NOISE}`,
     );
     const sep = url.includes("?") ? "&" : "?";
     ws = new WebSocketImpl(`${url}${sep}model=${encodeURIComponent(model)}`, {
@@ -492,7 +498,7 @@ export function makeRealtimeSession({
     });
     ws.on("open", () => {
       if (ended) return ws.close();
-      send(sessionUpdate({ instructions, voice, eagerness, transcribeModel, reasoning, silenceMs }));
+      send(sessionUpdate({ instructions, voice, eagerness, transcribeModel, reasoning, silenceMs, noise }));
       for (const p of openQueue) send({ type: "input_audio_buffer.append", audio: p });
       openQueue = [];
       if (greeting) {
