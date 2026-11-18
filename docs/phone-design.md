@@ -576,6 +576,11 @@ OpenAI calls use_tools(request) ─► onCallTurn (same session as v1) ─► re
   ignore background talk; next we test semantic VAD (eagerness high) for a
   few days. OpenAI's `noise_reduction` and the `server_vad` threshold are
   the next levers if noise still cuts in.
+- A car call on 2026-11-17 (semantic VAD, eagerness high) had five cut-offs
+  with no words, so road noise. Since 2.32.0 the `far_field` noise filter is
+  on (`VOICE_OPENAI_NOISE`). If noise still cuts in, the next step is to stop
+  Alfred only for sound longer than about 400 ms, or sound with words
+  (`interrupt_response: false`, our own barge-in).
 
 ### Cost
 
