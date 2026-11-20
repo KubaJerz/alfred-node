@@ -4,6 +4,23 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [SemVer](https://semver.org/).
 
 ## [Unreleased]
+### Added
+- **Alfred can hang up (2B).** A second function, `end_call`: when the caller
+  says goodbye or asks him to hang up, he says a short goodbye, and the call
+  ends once it has played. Before, he said "I'm hanging up now" and stayed on.
+
+### Changed
+- **2B tries before it says no.** Asked whether it can do something, the
+  voice now tries it with `use_tools` instead of arguing that it cannot (a
+  call on 2026-11-18 spent two minutes on "I can't access your computer").
+
+### Added
+- **2B noise filter.** OpenAI's `noise_reduction` is on, `far_field` by
+  default (speakerphone, car). `VOICE_OPENAI_NOISE` sets `near_field` or
+  `off`. In a car call on 2026-11-17, road noise cut Alfred off five times
+  with no words said, and he restarted his answer. The settings log line
+  names the filter.
+
 ### Changed
 - **2B ignores background talk.** The prompt says to ignore background
   talk and other voices, and not to start over after a short cut-off.

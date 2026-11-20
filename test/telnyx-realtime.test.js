@@ -11,6 +11,7 @@ import {
   addUsage,
   usageCost,
   USE_TOOLS,
+  END_CALL,
   DEFAULT_INSTRUCTIONS,
   toolOutput,
   oneLine,
@@ -95,7 +96,7 @@ test("sessionUpdate asks for PCMU both ways, semantic VAD, and the use_tools too
   assert.equal(ev.session.audio.output.voice, "cedar");
   assert.equal(ev.session.audio.input.turn_detection.type, "semantic_vad");
   assert.equal(ev.session.audio.input.turn_detection.eagerness, "low");
-  assert.deepEqual(ev.session.tools, [USE_TOOLS]);
+  assert.deepEqual(ev.session.tools, [USE_TOOLS, END_CALL]);
   assert.equal(sessionUpdate({ transcribeModel: "" }).session.audio.input.transcription, null);
   assert.equal(ev.session.reasoning, undefined, "unset leaves OpenAI's default");
   assert.deepEqual(sessionUpdate({ reasoning: "minimal" }).session.reasoning, { effort: "minimal" });
@@ -112,6 +113,13 @@ test("silenceMs switches turn detection to a server_vad silence timer", () => {
   assert.equal(t.type, "server_vad");
   assert.equal(t.silence_duration_ms, 350);
   assert.equal(t.eagerness, undefined);
+});
+
+test("the noise filter is far_field by default, and can be near_field or off", () => {
+  const nr = (o) => sessionUpdate(o).session.audio.input.noise_reduction;
+  assert.deepEqual(nr({}), { type: "far_field" });
+  assert.deepEqual(nr({ noise: "near_field" }), { type: "near_field" });
+  assert.equal(nr({ noise: "off" }), null);
 });
 
 test("the log shows how long turn detection waited after the caller's last sound", async () => {
@@ -133,7 +141,7 @@ test("the log shows how long turn detection waited after the caller's last sound
 test("the call logs its OpenAI settings", async () => {
   const { session, ws, logs } = setup({ opts: { greeting: "", eagerness: "high", reasoning: "minimal" } });
   await waitFor(() => ws.sent.length >= 1);
-  assert.ok(logs.some((l) => l === "📞 OpenAI settings: gpt-realtime-2.1-mini, voice cedar, eagerness high, reasoning minimal"), logs.join("\n"));
+  assert.ok(logs.some((l) => l === "📞 OpenAI settings: gpt-realtime-2.1-mini, voice cedar, eagerness high, reasoning minimal, noise filter far_field"), logs.join("\n"));
   assert.deepEqual(ws.sent[0].session.reasoning, { effort: "minimal" });
   session.end("test", { hang: false });
 });
@@ -430,6 +438,24 @@ test("a result that comes back after the call ended goes to onLate", async () =>
   await waitFor(() => late.length === 1);
   assert.deepEqual(late[0], { request: "read the list", reply: "Milk, eggs.", caller: "+1" });
   assert.ok(logs.some((l) => /answered after the call ended/.test(l)));
+});
+
+test("end_call hangs up once the goodbye has played", async () => {
+  const { session, ws, frames, hung, ended, logs } = setup({ opts: { greeting: "" } });
+  await waitFor(() => ws.readyState === 1);
+  ws.server({ type: "response.created", response: { id: "r_bye" } });
+  ws.server({ type: "response.output_audio.delta", response_id: "r_bye", item_id: "it_bye", delta: ulaw(400) });
+  ws.server({ type: "response.function_call_arguments.done", name: "end_call", call_id: "c_end", arguments: "{}" });
+  ws.server({ type: "response.done", response: { id: "r_bye", status: "completed" } });
+  assert.ok(logs.some((l) => /end_call: Alfred hangs up/.test(l)));
+  // Not while the goodbye still plays.
+  await sleep(100);
+  assert.equal(hung(), 0);
+  await waitFor(() => hung() === 1, 3000);
+  assert.equal(ended(), 1);
+  assert.ok(frames.some((f) => f.event === "media"));
+  assert.ok(logs.some((l) => /Call session ended: Alfred hung up \(end_call\)/.test(l)));
+  session.end("test", { hang: false });
 });
 
 test("the call ends and hangs up when the OpenAI socket closes", async () => {
