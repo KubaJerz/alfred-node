@@ -152,7 +152,7 @@ phone ──► Telnyx number ──► Call Control app "Alfred (phone pipeline
    bidirectional media stream. Any other caller gets a reject (`CALL_REJECTED`).
    A third call at the same time gets `USER_BUSY`.
 2. Telnyx opens the media WebSocket. The "start" frame names the call. The
-   session opens the STT WebSocket and speaks "Hey, it's Alfred."
+   session opens the STT WebSocket and speaks "Hey."
 3. Caller audio goes to STT with no conversion. Frames that come out of order
    are put back in order by their chunk number. If the chunk number starts
    again or jumps back, the order starts again from that frame.

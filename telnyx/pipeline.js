@@ -41,7 +41,7 @@ import { makeRealtimeSession } from "./realtime.js";
 
 export const EVENTS_PATH = "/telnyx/voice/events";
 export const MEDIA_PATH = "/telnyx/voice/media";
-export const GREETING = "Hey, it's Alfred.";
+export const GREETING = "Hey.";
 export const MAX_SPOKEN_CHARS = 1200; // text-to-speech costs money per character
 export const ENGINES = ["telnyx", "local", "openai"];
 export const OVERFLOW_LINE = "The rest is in Discord.";

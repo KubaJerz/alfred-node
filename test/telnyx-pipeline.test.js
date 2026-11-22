@@ -331,7 +331,7 @@ test("pipeline: an allowed call is answered, greeted, heard, and answered aloud"
     peer.start("v3:call1");
     // The greeting plays, then its end mark.
     await waitFor(() => peer.marks().includes("g1:end"));
-    assert.deepEqual(s.tts.texts, ["Hey, it's Alfred."]);
+    assert.deepEqual(s.tts.texts, ["Hey."]);
     assert.ok(peer.media().length > 0);
     // Caller audio reaches speech-to-text.
     await waitFor(() => s.stt.peers.length === 1);
@@ -372,7 +372,7 @@ test("pipeline: the greeting comes from the cache on the second call", async () 
       await s.postEvent("call.hangup", { call_control_id: id });
       await waitFor(() => peer.closed !== null);
     }
-    assert.deepEqual(s.tts.texts, ["Hey, it's Alfred."]);
+    assert.deepEqual(s.tts.texts, ["Hey."]);
   } finally {
     await s.close();
   }
@@ -784,7 +784,7 @@ test("pipeline (local): speech goes through the sidecar, not Telnyx, and the ech
     await peer.open();
     peer.start("v3:loc");
     await waitFor(() => peer.marks().includes("g1:end"));
-    assert.deepEqual(local.st.texts, ["Hey, it's Alfred."]);
+    assert.deepEqual(local.st.texts, ["Hey."]);
     // The greeting played, then ended: playing on, then off.
     await waitFor(() => local.st.playing.length === 2);
     assert.deepEqual(local.st.playing, [true, false]);
