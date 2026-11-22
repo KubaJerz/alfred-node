@@ -156,6 +156,18 @@ risky jobs to small least-privilege agents instead of widening his reach.
 
 ## Next
 
+### Phone — 2B on OpenAI
+
+- [ ] **Try GPT-Live (`gpt-live-1`) as a 2B engine.** OpenAI's newer voice model
+      is built for this shape: full duplex, and "client delegation" sends the
+      backend work to us (Alfred), with results spoken as commentary. It takes
+      PCMU over WebSocket, so Telnyx stays the same. On hold: it is a flat
+      $0.05/min, about twice our Realtime cost ($0.019–0.029/min), it has no
+      documented turn-detection settings, and Realtime works well now. A/B it
+      with the standard test call in `docs/phone-design.md`. It is also the only
+      way to use a voice designed from a description (prompt-to-voice); Realtime
+      takes only named voices or recording-based ones.
+
 ### Phone — 2B direct tools and turn detection
 
 - [ ] **Test semantic VAD (eagerness high) for a few days** (from 2026-11-16).
@@ -210,6 +222,17 @@ risky jobs to small least-privilege agents instead of widening his reach.
       every scheduled job runs under — run the job, and on non-zero exit publish
       the failure and decide retry-vs-defer — rather than each job hand-rolling
       its own.
+
+### SMS
+
+- [ ] **Group texts.** Kuba asked (2026-11-12) to put Alfred in group chats.
+      Today `telnyx/sms.js` drops any sender not in `SMS_ALLOWED_NUMBERS`, and
+      replies go only to `SMS_ALLOWED_NUMBERS[0]` (`bot.js` `smsTarget`), so in a
+      group Alfred hears only Kuba and answers him alone. Needs: read the group's
+      participant list from the inbound `to`, reply to the whole group (group
+      MMS), decide who in a group may trigger a turn, and keep personal data
+      out of replies others can see. Check Telnyx support for group MMS on our
+      number first.
 
 ## Someday / Maybe
 
