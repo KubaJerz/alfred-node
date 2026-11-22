@@ -114,6 +114,13 @@ test("silenceMs switches turn detection to a server_vad silence timer", () => {
   assert.equal(t.eagerness, undefined);
 });
 
+test("the noise filter is far_field by default, and can be near_field or off", () => {
+  const nr = (o) => sessionUpdate(o).session.audio.input.noise_reduction;
+  assert.deepEqual(nr({}), { type: "far_field" });
+  assert.deepEqual(nr({ noise: "near_field" }), { type: "near_field" });
+  assert.equal(nr({ noise: "off" }), null);
+});
+
 test("the log shows how long turn detection waited after the caller's last sound", async () => {
   let t = 1000;
   const { session, ws, logs } = setup({ opts: { greeting: "", now: () => t } });
@@ -133,7 +140,7 @@ test("the log shows how long turn detection waited after the caller's last sound
 test("the call logs its OpenAI settings", async () => {
   const { session, ws, logs } = setup({ opts: { greeting: "", eagerness: "high", reasoning: "minimal" } });
   await waitFor(() => ws.sent.length >= 1);
-  assert.ok(logs.some((l) => l === "📞 OpenAI settings: gpt-realtime-2.1-mini, voice cedar, eagerness high, reasoning minimal"), logs.join("\n"));
+  assert.ok(logs.some((l) => l === "📞 OpenAI settings: gpt-realtime-2.1-mini, voice cedar, eagerness high, reasoning minimal, noise filter far_field"), logs.join("\n"));
   assert.deepEqual(ws.sent[0].session.reasoning, { effort: "minimal" });
   session.end("test", { hang: false });
 });

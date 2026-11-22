@@ -164,6 +164,10 @@ risky jobs to small least-privilege agents instead of widening his reach.
       requests, noise cut-offs and latency (was ~0.83 s on the timer, ~1.65 s
       on eagerness high), then decide. If noise still cuts in, try OpenAI's
       `noise_reduction` and the `server_vad` threshold.
+- [ ] **Later, if noise still cuts in: ignore short sounds.** Turn off
+      OpenAI's `interrupt_response` and do our own barge-in: stop Alfred only
+      for sound longer than ~400 ms, or sound with words. Today a bump or road
+      noise cancels his reply, and he starts the answer over.
 - [ ] **Give the voice direct tools (hybrid).** Fast, typed tools for the
       common asks: shopping list add/read/check (`checked: false`, not a
       retold request), today's calendar, the time. They call the same broker

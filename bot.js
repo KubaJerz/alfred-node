@@ -92,6 +92,7 @@ const VOICE_OPENAI = {
   eagerness: process.env.VOICE_OPENAI_EAGERNESS || undefined,
   reasoning: process.env.VOICE_OPENAI_REASONING || undefined,
   silenceMs: Number(process.env.VOICE_OPENAI_SILENCE_MS) || undefined,
+  noise: process.env.VOICE_OPENAI_NOISE || undefined,
   // "0" turns off the caller transcript in the log (it costs a little).
   ...(process.env.VOICE_OPENAI_TRANSCRIBE === "0" ? { transcribeModel: "" } : {}),
 };
