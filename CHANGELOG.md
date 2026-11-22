@@ -5,6 +5,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
 
 ## [Unreleased]
 ### Added
+- **The phone voice has its own tools (2B).** `notion` (search, read, add,
+  check, uncheck, edit, remove, create), `calendar` (read, add, edit, delete)
+  and `get_time` answer in under a second, without a trip through Alfred.
+  Every write leaves Alfred a note in the daily note and at the front of his
+  next message. `VOICE_OPENAI_DIRECT_TOOLS=0` turns them off.
 - **Alfred can hang up (2B).** A second function, `end_call`: when the caller
   says goodbye or asks him to hang up, he says a short goodbye, and the call
   ends once it has played. Before, he said "I'm hanging up now" and stayed on.

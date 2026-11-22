@@ -498,3 +498,29 @@ test('the pipeline takes engine "openai" and needs its API key', async () => {
   assert.equal(p.engine, "openai");
   p.close();
 });
+
+test("a direct tool answers without Alfred, and its result goes straight back", async () => {
+  const calls = [];
+  const directTools = ({ caller }) => ({
+    defs: [{ type: "function", name: "get_time", parameters: { type: "object", properties: {} } }],
+    names: ["get_time"],
+    call: async (name, args) => {
+      calls.push({ name, args, caller });
+      return "Sunday 3:04 PM";
+    },
+  });
+  const { session, ws, turns, logs } = setup({ opts: { greeting: "", directTools } });
+  await waitFor(() => ws.readyState === 1);
+  assert.deepEqual(ws.sent[0].session.tools.map((t) => t.name), ["use_tools", "end_call", "get_time"]);
+  ws.server({ type: "response.created", response: { id: "r1" } });
+  ws.server({ type: "response.function_call_arguments.done", name: "get_time", call_id: "c_t", arguments: "{}" });
+  await waitFor(() => ws.sent.some((e) => e.type === "conversation.item.create"));
+  const out = ws.sent.find((e) => e.type === "conversation.item.create");
+  assert.deepEqual(out.item, { type: "function_call_output", call_id: "c_t", output: "Sunday 3:04 PM" });
+  assert.equal(turns.length, 0, "Alfred was not asked");
+  assert.equal(calls[0].caller, "+15551234567");
+  assert.ok(logs.some((l) => /📞 get_time \{\} → \d+ ms: Sunday 3:04 PM/.test(l)), logs.join("\n"));
+  ws.server({ type: "response.done", response: { id: "r1", status: "completed" } });
+  assert.equal(ws.sent.filter((e) => e.type === "response.create").length, 1);
+  session.end("test", { hang: false });
+});

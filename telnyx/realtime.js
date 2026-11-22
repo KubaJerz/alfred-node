@@ -50,15 +50,16 @@ const PRICES = {
 // The same text as agent/phone-voice.md, which bot.js passes in.
 export const DEFAULT_INSTRUCTIONS = `You are Alfred, the user's personal assistant, on a phone call with them.
 
-You also have tools. use_tools gives you the user's calendar, email, lists,
-notes, memory and files, the web, and actions you can take: add, change,
-cancel, send, remind. The tools are part of you. Never mention a tool, a
+You also have tools. notion (pages, lists and notes), calendar and get_time
+are quick, so use them yourself. use_tools gives you everything else: email,
+memory, files, the web, and actions you can take. The tools are part of you. Never mention a tool, a
 system, another assistant, or anyone else doing the work.
 
 - Answer small talk and simple general questions yourself.
-- Call use_tools for anything about the user's own data or life, anything to
+- Call a tool for anything about the user's own data or life, anything to
   do, anything current (hours, news, prices, weather), and anything you are
-  not sure of. Pass the request with every detail the caller gave.
+  not sure of. Use notion, calendar or get_time when they fit, and use_tools
+  for the rest, with every detail the caller gave.
 - If the answer is already in this call (something just said, added or looked
   up), answer it yourself without use_tools.
 - IMPORTANT: before every use_tools call, say one short line first, so the
@@ -86,7 +87,7 @@ system, another assistant, or anyone else doing the work.
 - If use_tools comes back with a question, ask the caller, then pass their
   answer on with use_tools.
 - Never make up the user's data, and never say an action happened unless
-  use_tools said it did.
+  a tool said it did.
 - If asked whether you can do something, try it with use_tools instead of
   guessing.
 - To hang up, say a short goodbye, then call end_call.
@@ -104,7 +105,7 @@ export const USE_TOOLS = {
   type: "function",
   name: "use_tools",
   description:
-    "Your calendar, email, lists, notes, memory, files and the web, and the actions you can take. Use it for the user's own data, for anything to do, and for current facts. It can take from a few seconds to a minute.",
+    "Email, memory, files, the web, and anything your other tools cannot do. Use it for the user's own data, for anything to do, and for current facts. It can take from a few seconds to a minute.",
   parameters: {
     type: "object",
     properties: {
@@ -160,6 +161,7 @@ export function sessionUpdate({
   reasoning,
   silenceMs,
   noise = DEFAULT_NOISE,
+  tools = [],
 } = {}) {
   return {
     type: "session.update",
@@ -176,7 +178,7 @@ export function sessionUpdate({
         },
         output: { format: { type: "audio/pcmu" }, voice },
       },
-      tools: [USE_TOOLS, END_CALL],
+      tools: [USE_TOOLS, END_CALL, ...tools],
       tool_choice: "auto",
       // minimal, low, medium, high or xhigh. Unset leaves OpenAI's default (low).
       ...(reasoning ? { reasoning: { effort: reasoning } } : {}),
@@ -249,6 +251,9 @@ export function makeRealtimeSession({
   reasoning,
   silenceMs,
   noise,
+  // Fast tools that skip Alfred: { defs, names, call(name, args) }, or a
+  // function that makes them, called once per call (their state is per call).
+  directTools: makeTools = null,
   greeting = GREETING,
   updateMs = UPDATE_MS,
   markLateMs = MARK_LATE_MS,
@@ -256,6 +261,7 @@ export function makeRealtimeSession({
 }) {
   if (!apiKey) throw new Error("The OpenAI engine needs OPENAI_API_KEY");
   const player = makePlayer({ send: sendFrame, now });
+  const directTools = typeof makeTools === "function" ? makeTools({ caller }) : makeTools;
   const usage = { audioIn: 0, audioCached: 0, textIn: 0, textCached: 0, audioOut: 0, textOut: 0 };
   const startedAt = now();
   let ws = null;
@@ -442,6 +448,22 @@ export function makeRealtimeSession({
     createResponse();
   };
 
+  // A direct tool: no Alfred, no still-working line, about a second.
+  const runDirect = async (m) => {
+    let args = {};
+    try {
+      args = JSON.parse(m.arguments || "{}");
+    } catch {
+      // the tool says what is missing
+    }
+    const t0 = now();
+    const output = String(await directTools.call(m.name, args));
+    log(`📞 ${m.name} ${oneLine(JSON.stringify(args))} → ${now() - t0} ms: ${oneLine(output).slice(0, 200)}`);
+    if (ended) return;
+    send({ type: "conversation.item.create", item: { type: "function_call_output", call_id: m.call_id, output } });
+    createResponse();
+  };
+
   const onMessage = (data) => {
     let m;
     try {
@@ -483,6 +505,8 @@ export function makeRealtimeSession({
       case "response.function_call_arguments.done":
         if (m.name === USE_TOOLS.name) {
           useTools(m).catch((err) => log(`⚠️  ${USE_TOOLS.name} failed: ${err.message}`));
+        } else if (directTools?.names.includes(m.name)) {
+          runDirect(m).catch((err) => log(`⚠️  ${m.name} failed: ${err.message}`));
         } else if (m.name === END_CALL.name && !hangingUp) {
           hangingUp = true;
           log("📞 end_call: Alfred hangs up after his goodbye");
@@ -517,7 +541,7 @@ export function makeRealtimeSession({
     });
     ws.on("open", () => {
       if (ended) return ws.close();
-      send(sessionUpdate({ instructions, voice, eagerness, transcribeModel, reasoning, silenceMs, noise }));
+      send(sessionUpdate({ instructions, voice, eagerness, transcribeModel, reasoning, silenceMs, noise, tools: directTools?.defs }));
       for (const p of openQueue) send({ type: "input_audio_buffer.append", audio: p });
       openQueue = [];
       if (greeting) {
