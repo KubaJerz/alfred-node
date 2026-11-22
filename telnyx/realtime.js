@@ -29,7 +29,7 @@ export const DEFAULT_MODEL = "gpt-realtime-2.1-mini";
 export const DEFAULT_VOICE = "cedar";
 export const DEFAULT_EAGERNESS = "medium";
 export const DEFAULT_TRANSCRIBE_MODEL = "gpt-4o-mini-transcribe";
-export const GREETING = "Hey, it's Alfred.";
+export const GREETING = "Hey.";
 // OpenAI's input noise filter: far_field (speakerphone, car), near_field
 // (phone at the ear, headset), or "off". Road noise in the car cut Alfred off.
 export const DEFAULT_NOISE = "far_field";

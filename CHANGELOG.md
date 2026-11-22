@@ -10,6 +10,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
   ends once it has played. Before, he said "I'm hanging up now" and stayed on.
 
 ### Changed
+- **The phone greeting is just "Hey."** It was "Hey, it's Alfred.",
+  which took too long before the caller could talk.
 - **2B tries before it says no.** Asked whether it can do something, the
   voice now tries it with `use_tools` instead of arguing that it cannot (a
   call on 2026-11-18 spent two minutes on "I can't access your computer").
