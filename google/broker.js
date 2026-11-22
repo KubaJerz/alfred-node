@@ -536,3 +536,5 @@ export async function startBroker({ port = 0, log = console.log, extraRoutes = {
 }
 
 export const OPERATIONS = Object.keys(ROUTES);
+// The calendar routes, for the phone voice's direct calendar tool (telnyx/voice-tools.js).
+export const GOOGLE_ROUTES = ROUTES;

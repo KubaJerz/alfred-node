@@ -584,6 +584,26 @@ OpenAI calls use_tools(request) ─► onCallTurn (same session as v1) ─► re
   Alfred only for sound longer than about 400 ms, or sound with words
   (`interrupt_response: false`, our own barge-in).
 
+### Direct tools (2.34.0)
+
+Besides `use_tools` and `end_call`, the voice has its own tools
+(`telnyx/voice-tools.js`), which call the broker routes in process, in
+0.2–0.8 s instead of 6–9 s through Alfred:
+
+- `notion`: search, read, add (optionally under a line), check, uncheck,
+  edit, remove, create a subpage. Lines are numbered by `read`; a write names
+  a number from the latest read in this call and returns the page renumbered.
+  A page is found by its exact title only: Notion's search is fuzzy and takes
+  20–40 s to index a new page, so its top hit can be a different page. Column
+  `set` stays with Alfred.
+- `calendar`: read, add, edit, delete, with the broker's guards (no guests,
+  no deleting an event with guests).
+- `get_time`: the date, weekday and time, Eastern.
+
+Every write leaves Alfred a note: a line in today's daily note, and a block at
+the front of his next message on any channel. `scripts/voice-tools-smoke.mjs`
+runs every action against a scratch page and a test event, then trashes both.
+
 ### Cost
 
 From openai.com pricing (read 2026-11-11), per 1M tokens:

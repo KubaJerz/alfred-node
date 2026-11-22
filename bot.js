@@ -5,8 +5,10 @@ import { readFile, writeFile, mkdir, appendFile } from "fs/promises";
 import { existsSync, openSync, readFileSync, statSync } from "fs";
 import { fileURLToPath } from "url";
 import path from "path";
-import { startBroker } from "./google/broker.js";
+import { startBroker, GOOGLE_ROUTES } from "./google/broker.js";
 import { NOTION_ROUTES } from "./notion/broker.js";
+import { fetchBlockChildren } from "./notion/client.js";
+import { makeVoiceTools } from "./telnyx/voice-tools.js";
 import { INTERVALS_ROUTES } from "./intervals/broker.js";
 import { openDb as openStrengthDb, insertNote } from "./strength/db.js";
 import { startMailListener, enrich } from "./google/gmail-push.js";
@@ -93,6 +95,10 @@ const VOICE_OPENAI = {
   reasoning: process.env.VOICE_OPENAI_REASONING || undefined,
   silenceMs: Number(process.env.VOICE_OPENAI_SILENCE_MS) || undefined,
   noise: process.env.VOICE_OPENAI_NOISE || undefined,
+  // The voice's own notion, calendar and get_time tools. "0" sends everything
+  // through Alfred (use_tools) again.
+  directTools: process.env.VOICE_OPENAI_DIRECT_TOOLS === "0" ? null : () =>
+    makeVoiceTools({ notionRoutes: NOTION_ROUTES, calendarRoutes: GOOGLE_ROUTES, fetchBlockChildren, note: notePhoneAction }),
   // "0" turns off the caller transcript in the log (it costs a little).
   ...(process.env.VOICE_OPENAI_TRANSCRIBE === "0" ? { transcribeModel: "" } : {}),
 };
@@ -917,6 +923,7 @@ async function handleTurn(target, userMessage, attachments = [], { signal, onTex
       : userMessage;
     // The tag rides on this message only, like the attachment block, so a
     // resumed session still sees it. A /clear above already took its prefix off.
+    messageBody = takePhoneActions() + messageBody;
     if (VIA_TAGS[target.via]) messageBody = `${VIA_TAGS[target.via]} ${messageBody}`;
 
     let finalMessage = messageBody;
@@ -1317,6 +1324,24 @@ async function postFromCall(text, files = []) {
   } catch (err) {
     console.error(`⚠️  Couldn't post from the call: ${err.message}`);
   }
+}
+
+// What the 2B voice did with its own tools, without Alfred. Each action goes in
+// today's daily note, and waits here to ride at the front of Alfred's next
+// message, so he knows the same day, on any channel.
+const phoneActions = [];
+function notePhoneAction(text) {
+  phoneActions.push(text);
+  const time = new Intl.DateTimeFormat("en-GB", { timeZone: "America/New_York", hour: "2-digit", minute: "2-digit" }).format(new Date());
+  const file = dailyNotePath(MEMORIES_DIR);
+  mkdir(path.dirname(file), { recursive: true })
+    .then(() => appendFile(file, `\n## ${time} — By phone\nThe phone voice ${text}.\n`))
+    .catch((err) => console.error(`⚠️  Could not note a phone action: ${err.message}`));
+}
+function takePhoneActions() {
+  if (!phoneActions.length) return "";
+  const lines = phoneActions.splice(0).map((t) => `- ${t}`).join("\n");
+  return `[Done on a phone call by the voice, without you, since your last message:\n${lines}]\n\n`;
 }
 
 // A use_tools answer that came back after the call ended (2B). It goes by SMS

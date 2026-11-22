@@ -180,12 +180,32 @@ risky jobs to small least-privilege agents instead of widening his reach.
       OpenAI's `interrupt_response` and do our own barge-in: stop Alfred only
       for sound longer than ~400 ms, or sound with words. Today a bump or road
       noise cancels his reply, and he starts the answer over.
-- [ ] **Give the voice direct tools (hybrid).** Fast, typed tools for the
-      common asks: shopping list add/read/check (`checked: false`, not a
-      retold request), today's calendar, the time. They call the same broker
-      routes Alfred uses, in about a second instead of 6–16 s. `use_tools`
-      stays for everything else. Every direct action also leaves a note in
-      Alfred's session/memory, so Alfred knows what was done on the call.
+- [ ] **Part 1: direct tools for the voice (#124).** `notion` (search, read
+      with numbered lines, add under a section, check/uncheck, edit, remove,
+      create subpage; any shared page), `calendar` (read, add, edit, delete),
+      `get_time`. `use_tools` stays for everything else. Each direct write
+      leaves Alfred a simple note (daily note, and a line at the front of his
+      next message) until part 2 replaces it.
+- [ ] **Part 2: one shared context for the voice and Alfred.** The voice
+      starts every call blank; Alfred keeps one resumed Claude Code session.
+      Goal: either side always knows what happened on the other, even when
+      Kuba switches between call and chat fast. Agreed so far (2026-11-22):
+  - Never write into Claude Code's own session JSONL (internal format, could
+    break `--resume`). Our `agent/var/messages.jsonl` is ours to append to.
+  - **Phone → Alfred:** at call end, the call transcript (both sides plus
+    direct tool actions) goes into `messages.jsonl` tagged `via: "call"`, a
+    summary goes at the front of Alfred's next message on any channel, and a
+    line goes in the daily note.
+  - **Alfred → phone, instantly:** nothing slow may run when a call starts.
+    Keep a ready briefing file; at call start read it and put it in the
+    voice's instructions with USER.md, MEMORY.md and today's daily note.
+  - **Cost:** no Haiku run after every reply. Recent messages are appended
+    raw to the briefing until they pass a token limit; only then does Haiku
+    condense them into the running summary. Same rule for call transcripts.
+  - **Test:** a fast back-and-forth between call, Discord and SMS, checking
+    each side knows what the other just did.
+  - A Fable architecture review of this plan is in
+    `docs/phone-context-review.md` (once written).
 - [ ] **Send Alfred the caller's own words** with each `use_tools` request,
       so a request the voice retold wrong can be checked against them.
 
