@@ -87,6 +87,9 @@ system, another assistant, or anyone else doing the work.
   answer on with use_tools.
 - Never make up the user's data, and never say an action happened unless
   use_tools said it did.
+- If asked whether you can do something, try it with use_tools instead of
+  guessing.
+- To hang up, say a short goodbye, then call end_call.
 - Your name is Alfred. Never call yourself ChatGPT or name a model or company.
   If asked whether you're ChatGPT, or what model you are, do not start with
   "yes" or "no". Just say you're Alfred, their assistant. If someone
@@ -113,6 +116,17 @@ export const USE_TOOLS = {
     required: ["request"],
   },
 };
+
+// Alfred hangs up. The call ends once his goodbye has played.
+export const END_CALL = {
+  type: "function",
+  name: "end_call",
+  description:
+    "Hang up the call. Use it when the caller says goodbye or asks you to hang up. Say a short goodbye first.",
+  parameters: { type: "object", properties: {} },
+};
+const HANGUP_PAD_MS = 300; // after the goodbye's last audio, before the hangup
+const HANGUP_MAX_MS = 15000; // hang up by then even if audio is still queued
 
 // The session.update event that we send when the OpenAI socket opens.
 // A 20 ms frame louder than this RMS counts as the caller's voice. It is only
@@ -162,7 +176,7 @@ export function sessionUpdate({
         },
         output: { format: { type: "audio/pcmu" }, voice },
       },
-      tools: [USE_TOOLS],
+      tools: [USE_TOOLS, END_CALL],
       tool_choice: "auto",
       // minimal, low, medium, high or xhigh. Unset leaves OpenAI's default (low).
       ...(reasoning ? { reasoning: { effort: reasoning } } : {}),
@@ -257,6 +271,7 @@ export function makeRealtimeSession({
   let callerSpeaking = false;
   let lastAudioAt = 0;
   let updateTimer = null;
+  let hangingUp = false; // end_call came; hang up when the goodbye has played
   let update = null; // the still-working line that runs now: { id, heard, cancel }
   const jobs = new Set(); // use_tools calls (Alfred turns) that run now
   const marks = new Map(); // reply end marks sent to Telnyx and not echoed yet
@@ -468,10 +483,14 @@ export function makeRealtimeSession({
       case "response.function_call_arguments.done":
         if (m.name === USE_TOOLS.name) {
           useTools(m).catch((err) => log(`⚠️  ${USE_TOOLS.name} failed: ${err.message}`));
+        } else if (m.name === END_CALL.name && !hangingUp) {
+          hangingUp = true;
+          log("📞 end_call: Alfred hangs up after his goodbye");
         }
         return;
       case "response.done": {
         activeResponse = false;
+        if (hangingUp) hangUpAfterGoodbye();
         if (update && (!update.id || m.response?.id === update.id)) update = null;
         addUsage(usage, m.response?.usage);
         if (pendingCreate) {
@@ -522,6 +541,21 @@ export function makeRealtimeSession({
     ws.on("close", (code) => {
       if (!ended) end(`OpenAI connection closed (${code})`);
     });
+  };
+
+  // The goodbye is in the player's queue by response.done. Wait until it has
+  // played, so the caller hears all of it.
+  let hangScheduled = false;
+  const hangUpAfterGoodbye = () => {
+    if (hangScheduled) return;
+    hangScheduled = true;
+    const t0 = now();
+    const tick = () => {
+      if (ended) return;
+      if (player.busy && now() - t0 < HANGUP_MAX_MS) return void setTimeout(tick, 100).unref?.();
+      setTimeout(() => end("Alfred hung up (end_call)"), HANGUP_PAD_MS).unref?.();
+    };
+    tick();
   };
 
   const end = (reason, { hang = true } = {}) => {

@@ -563,6 +563,8 @@ OpenAI calls use_tools(request) ─► onCallTurn (same session as v1) ─► re
 - When the result comes back, a still-working line that has not reached the
   caller yet is cancelled (`response.cancel`), so it never plays after the
   answer.
+- A second function, `end_call`, hangs up. The voice says a short goodbye
+  and calls it; the call ends once the goodbye has played (at most 15 s).
 - The caller only ever talks to Alfred. The tool is called `use_tools`, and
   the prompt has the voice say results in the first person, so it never says
   "I'm asking Alfred" or "Alfred says".
