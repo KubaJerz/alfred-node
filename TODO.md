@@ -154,6 +154,40 @@ risky jobs to small least-privilege agents instead of widening his reach.
       runs as the same user. Real secrets go in a password manager or a
       root-owned file until the separate user exists.
 
+#### Phone and SMS (from the MMS review, 2026-11-23)
+
+SMS and MMS are not end to end encrypted: the carrier and Telnyx see every
+text and file, and Telnyx keeps them. Caller ID can be spoofed, so the
+allow list stops strangers, not a determined attacker. These close the gaps.
+
+- [ ] **Per-number permissions.** Today `SMS_ALLOWED_NUMBERS` is one tier: a
+      number in it can do anything Kuba can. Make it a table, so more people
+      can text Alfred, each with only what they need. For each number: may it
+      start a turn at all, send photos and files (MMS in), get files back (MMS
+      out), send voice messages, and which tools its turns may use (read-only,
+      calendar, mail…). Kuba's numbers keep full rights; a friend might get
+      text-only scheduling and nothing else. Ties into the verbal-consent list
+      the 10DLC campaign needs before Alfred texts anyone new.
+- [ ] **A PIN for risky actions by text and by call.** Sending mail,
+      deleting, buying, paying, or changing settings from SMS or a call needs
+      a spoken or texted PIN in the same turn. Closes caller-ID spoofing for
+      anything that matters. Same idea as the open point in
+      `docs/phone-design.md` for calls.
+- [ ] **Limit which files can go out by MMS.** `extractAttachments` takes any
+      path Alfred names, so a tricked turn could text `.env` or a token file,
+      in the clear, through the carrier. Allow only files under `agent/`
+      (dailies, screenshots, generated files) and never `agent/var/google/`,
+      `.env`, or dotfiles.
+- [ ] **Shorter MMS file links.** `MEDIA_TTL_MS` is 1 hour. Telnyx fetches in
+      seconds; cut to about 10 minutes, and drop a link after its first
+      successful fetch if Telnyx does not retry.
+- [ ] **No secrets by text.** A rule in `agent/SOUL.md`'s SMS section: never
+      text passwords, codes, ID numbers, or financial documents; say "sent in
+      Discord" instead.
+- [ ] **Treat text in photos as data.** An MMS photo or file is untrusted
+      content, like an email. Make sure the attachment block says so, so
+      instructions written in a picture never steer a turn.
+
 ## Next
 
 ### Phone — 2B on OpenAI
