@@ -27,7 +27,8 @@ export const NOTION_TOOL = {
   description:
     "The user's Notion pages: lists (like the shopping list), notes and ideas. Read a page before changing it; " +
     "lines are numbered, and a change names the line number. To add under a section, give its line number as " +
-    "'under'. To make a new section, add the section line first, then add under it.",
+    "'under'. Each change returns the page renumbered, so the next change needs no new read. To put items in a new " +
+    "section, make two adds: the section line, then the items under its new line number.",
   parameters: {
     type: "object",
     properties: {
@@ -47,7 +48,8 @@ export const CALENDAR_TOOL = {
   name: "calendar",
   description:
     "The user's Google Calendar. Times are Eastern, written like 2026-11-27T15:00; a date alone (2026-11-27) is all " +
-    "day. Read a day before editing or deleting; events are numbered. Never guess a time: ask. Colors: banana " +
+    "day. Read a day before editing or deleting; events are numbered, and each change returns the day renumbered. " +
+    "Never guess a time: ask. Colors: banana " +
     "school, tomato important personal, peacock general, grape AI Institute, basil Leo's group, tangerine Valafar lab.",
   parameters: {
     type: "object",
@@ -141,6 +143,7 @@ export function makeVoiceTools({ notionRoutes, calendarRoutes, fetchBlockChildre
   const pages = new Map(); // lower-case title → { id, title }
   const reads = new Map(); // page id → numbered-line map from the latest read
   let events = null; // number → event, from the latest calendar read
+  let range = null; // the latest read's { from, to }, re-read after a change
 
   const route = async (routes, key, args) => {
     const r = await routes[key]({ params: new URLSearchParams(), body: {}, ...args });
@@ -266,15 +269,28 @@ export function makeVoiceTools({ notionRoutes, calendarRoutes, fetchBlockChildre
     return e;
   }
 
+  async function readRange() {
+    const r = await C("GET /calendar/events", { params: params({ from: range.from, to: range.to, limit: 50 }) });
+    events = new Map(r.events.map((e, i) => [i + 1, e]));
+    if (!r.events.length) return `Nothing on the calendar from ${range.label}.`;
+    return r.events.map((e, i) => eventLine(i + 1, e)).join("\n");
+  }
+
+  // After a change: what happened, and the last-read days renumbered, so the
+  // next edit or delete works without another read.
+  async function changed(done) {
+    events = null; // the numbering has moved
+    if (!range) return `Done: ${done}.`;
+    return `Done: ${done}.\n\n${await readRange()}`;
+  }
+
   async function calendar(a) {
     const action = a.action;
     if (action === "read") {
       if (!a.from) throw new Error("say which day");
       const to = a.to ? (a.to.length === 10 ? nextDay(a.to) : a.to) : a.from.length === 10 ? nextDay(a.from) : undefined;
-      const r = await C("GET /calendar/events", { params: params({ from: a.from, to, limit: 50 }) });
-      events = new Map(r.events.map((e, i) => [i + 1, e]));
-      if (!r.events.length) return `Nothing on the calendar from ${a.from}${a.to ? ` to ${a.to}` : ""}.`;
-      return r.events.map((e, i) => eventLine(i + 1, e)).join("\n");
+      range = { from: a.from, to, label: a.to ? `${a.from} to ${a.to}` : a.from };
+      return readRange();
     }
 
     if (action === "add") {
@@ -283,10 +299,9 @@ export function makeVoiceTools({ notionRoutes, calendarRoutes, fetchBlockChildre
       if (!end) throw new Error("give an end time, or ask the caller how long it is");
       const body = { summary: a.title, start: withSeconds(a.start), end: withSeconds(end), location: a.location, color: a.color };
       await C("POST /calendar/events", { body });
-      events = null; // the numbering has moved
       const done = `added "${a.title}" on ${a.start}${a.start.length > 10 ? `–${end.slice(11, 16)}` : " (all day)"}`;
       note(`${done} to the calendar`);
-      return `Done: ${done}.`;
+      return changed(done);
     }
 
     if (action === "edit") {
@@ -297,18 +312,16 @@ export function makeVoiceTools({ notionRoutes, calendarRoutes, fetchBlockChildre
       }
       if (!Object.keys(body).length) throw new Error("say what to change");
       await C("PATCH /calendar/events", { params: params({ id: e.id }), body });
-      events = null;
       const done = `changed "${e.summary}" (${Object.entries(body).map(([k, v]) => `${k} ${v}`).join(", ")})`;
       note(`${done} on the calendar`);
-      return `Done: ${done}.`;
+      return changed(done);
     }
 
     if (action === "delete") {
       const e = eventOf(a.event);
       await C("DELETE /calendar/events", { params: params({ id: e.id }) });
-      events = null;
       note(`deleted "${e.summary}" (${e.start}) from the calendar`);
-      return `Done: deleted "${e.summary}". It is in Google Calendar's Trash for 30 days.`;
+      return changed(`deleted "${e.summary}" (it is in Google Calendar's Trash for 30 days)`);
     }
     throw new Error(`unknown action "${action}"`);
   }

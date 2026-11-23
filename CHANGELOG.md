@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [SemVer](https://semver.org/).
 
 ## [Unreleased]
+
+### Fixed
+- 2B voice is terse around its quick tools: no line before notion, calendar or get_time, nothing between calls, and "Done." after a change (#126).
+- The notion tool says each change returns the page renumbered, so the voice stops re-reading before every change; it also spells out the two adds for items in a new section (#126).
+- A calendar add, edit or delete returns the last-read days renumbered, so a delete after an edit no longer needs another read (#126).
 ### Added
 - **The phone voice has its own tools (2B).** `notion` (search, read, add,
   check, uncheck, edit, remove, create), `calendar` (read, add, edit, delete)

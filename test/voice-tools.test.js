@@ -214,3 +214,12 @@ test("calendar times get seconds, which Google requires", async () => {
   assert.equal(c.log.at(-1)[1].start, "2026-11-27T15:00:00");
   assert.equal(c.log.at(-1)[1].end, "2026-11-27T16:00:00");
 });
+
+test("a calendar change returns the day renumbered, so the next change needs no read", async () => {
+  const { t, c } = tools();
+  await t.call("calendar", { action: "read", from: "2026-11-27" });
+  const out = await t.call("calendar", { action: "edit", event: 1, start: "2026-11-27T16:00", end: "2026-11-27T17:00" });
+  assert.match(out, /Done: changed "Lab meeting"[\s\S]*\n1\. .*Lab meeting\n2\. .*Holiday/);
+  assert.deepEqual(c.log.at(-1), ["list", "2026-11-27", "2026-11-28"]);
+  assert.match(await t.call("calendar", { action: "delete", event: 1 }), /Done: deleted "Lab meeting"/);
+});
