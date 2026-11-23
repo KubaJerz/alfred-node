@@ -27,8 +27,7 @@ export const NOTION_TOOL = {
   description:
     "The user's Notion pages: lists (like the shopping list), notes and ideas. Read a page before changing it; " +
     "lines are numbered, and a change names the line number. To add under a section, give its line number as " +
-    "'under'. Each change returns the page renumbered, so the next change needs no new read. To put items in a new " +
-    "section, make two adds: the section line, then the items under its new line number.",
+    "'under'. To make a new section, add the section line first, then add under it.",
   parameters: {
     type: "object",
     properties: {
@@ -65,6 +64,19 @@ export const CALENDAR_TOOL = {
       color: { type: "string", enum: COLORS },
     },
     required: ["action"],
+  },
+};
+
+export const REMEMBER_TOOL = {
+  type: "function",
+  name: "remember",
+  description:
+    "Write down something the caller asks you to remember (a fact, a preference, something for later), so it is " +
+    "kept after the call. Use their words.",
+  parameters: {
+    type: "object",
+    properties: { text: { type: "string", description: "What to remember, as one sentence." } },
+    required: ["text"],
   },
 };
 
@@ -330,10 +342,16 @@ export function makeVoiceTools({ notionRoutes, calendarRoutes, fetchBlockChildre
     notion,
     calendar,
     get_time: async () => timeNow(now()),
+    remember: async (a) => {
+      const text = String(a.text || "").trim();
+      if (!text) throw new Error("say what to remember");
+      note(`was asked to remember: "${text}"`);
+      return "Done: written down.";
+    },
   };
 
   return {
-    defs: [NOTION_TOOL, CALENDAR_TOOL, TIME_TOOL],
+    defs: [NOTION_TOOL, CALENDAR_TOOL, TIME_TOOL, REMEMBER_TOOL],
     // The id of a page this call found or made, by title (for the smoke test).
     pageId: (title) => pages.get(String(title).trim().toLowerCase())?.id || null,
     names: Object.keys(run),

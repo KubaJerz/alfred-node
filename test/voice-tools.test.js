@@ -110,7 +110,7 @@ test("the time is Eastern, with the weekday", () => {
 
 test("tools are listed, and get_time answers", async () => {
   const { t } = tools();
-  assert.deepEqual(t.names, ["notion", "calendar", "get_time"]);
+  assert.deepEqual(t.names, ["notion", "calendar", "get_time", "remember"]);
   assert.deepEqual(t.defs.map((d) => d.name), t.names);
   assert.match(await t.call("get_time", {}), /Sunday/);
 });
@@ -222,4 +222,11 @@ test("a calendar change returns the day renumbered, so the next change needs no 
   assert.match(out, /Done: changed "Lab meeting"[\s\S]*\n1\. .*Lab meeting\n2\. .*Holiday/);
   assert.deepEqual(c.log.at(-1), ["list", "2026-11-27", "2026-11-28"]);
   assert.match(await t.call("calendar", { action: "delete", event: 1 }), /Done: deleted "Lab meeting"/);
+});
+
+test("remember notes the caller's words for Alfred and the daily note", async () => {
+  const { t, notes } = tools();
+  assert.match(await t.call("remember", { text: "Leo's birthday is March 3" }), /Done/);
+  assert.deepEqual(notes, [`was asked to remember: "Leo's birthday is March 3"`]);
+  assert.match(await t.call("remember", {}), /didn't work: say what to remember/);
 });

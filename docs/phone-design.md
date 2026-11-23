@@ -597,8 +597,10 @@ Besides `use_tools` and `end_call`, the voice has its own tools
   20–40 s to index a new page, so its top hit can be a different page. Column
   `set` stays with Alfred.
 - `calendar`: read, add, edit, delete, with the broker's guards (no guests,
-  no deleting an event with guests).
+  no deleting an event with guests). A change returns the last-read days
+  renumbered (2.35.0), so the next edit or delete needs no new read.
 - `get_time`: the date, weekday and time, Eastern.
+- `remember` (2.35.0): what the caller asks to keep, as a phone-action note.
 
 Every write leaves Alfred a note: a line in today's daily note, and a block at
 the front of his next message on any channel. `scripts/voice-tools-smoke.mjs`

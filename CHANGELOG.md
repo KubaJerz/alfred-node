@@ -5,9 +5,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
 
 ## [Unreleased]
 
+### Added
+- 2B voice: a `remember` tool. What the caller asks to keep goes to today's daily note and to Alfred's next turn (#126).
+- SYSTEM-MAP.md: "A phone call (2B)" — the voice, its direct tools, `use_tools` to Alfred, and who knows what (#126).
+
 ### Fixed
-- 2B voice is terse around its quick tools: no line before notion, calendar or get_time, nothing between calls, and "Done." after a change (#126).
-- The notion tool says each change returns the page renumbered, so the voice stops re-reading before every change; it also spells out the two adds for items in a new section (#126).
+- 2B voice talks less: one general rule, say only what the moment needs and confirm an action in a few words (#126).
 - A calendar add, edit or delete returns the last-read days renumbered, so a delete after an edit no longer needs another read (#126).
 ### Added
 - **The phone voice has its own tools (2B).** `notion` (search, read, add,
