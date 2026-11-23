@@ -211,8 +211,10 @@ test("the prompt keeps the voice in character as Alfred", async () => {
   assert.match(file, /read in full, every\s+item in order/);
   // About half the first #130 pass: a long prompt makes the small model
   // wordy, and the tool descriptions already carry the per-tool rules.
-  assert.ok(file.split(/\s+/).length <= 350, `${file.split(/\s+/).length} words`);
+  assert.ok(file.split(/\s+/).length <= 400, `${file.split(/\s+/).length} words`);
   assert.doesNotMatch(USE_TOOLS.description, /Alfred/);
+  assert.match(file, /notion holds the user's own pages/);
+  assert.doesNotMatch(file, /Shopping list|Greens/i);
 });
 
 test("a tool turn logs the full wait until the answer is heard", async () => {

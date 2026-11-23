@@ -238,6 +238,8 @@ export function makeVoiceTools({ notionRoutes, calendarRoutes, fetchBlockChildre
     return `Done: ${done}.\n\n${await readPage(page)}`;
   }
 
+  let lastPage = null; // the page this call last read or changed
+
   async function notion(a) {
     const action = a.action;
     if (action === "search") {
@@ -245,7 +247,10 @@ export function makeVoiceTools({ notionRoutes, calendarRoutes, fetchBlockChildre
       if (!results.length) return "Nothing shared matches that.";
       return results.map((r) => `${r.title}${r.object === "database" ? " (database: ask use_tools)" : ""}`).join("\n");
     }
-    const page = await findPage(a.page);
+    // The model often names the page on the read and drops it on the change
+    // that follows; the page it last read is the one it means.
+    const page = !a.page?.trim() && lastPage ? lastPage : await findPage(a.page);
+    lastPage = page;
     if (action === "read") return readPage(page);
 
     if (action === "add" || action === "write") {

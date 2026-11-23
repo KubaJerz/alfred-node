@@ -22,6 +22,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
   my browser" and gets the facts from a web search or another retailer.
 
 ### Fixed
+- 2B voice: the prompt says what each tool is for (notion is the user's pages: lists, notes, plans, ideas; calendar their events; get_time the time; use_tools the rest), and the use_tools description no longer claims "the user's own data", so a list read stops going the slow way (#138).
+- notion: a change that names no page goes to the page last read in this call, instead of failing with "say which page" (#138).
+
+### Fixed
 - 2B voice: no narration around quick tools. The line-first rule is now use_tools only, the prompt says to call notion, calendar and get_time without a word first and to stop after "Done.", and each quick tool's description says so too (#130).
 - 2B voice prompt condensed to one rule per behaviour: the wait-filling bullet is gone (the code says "still on it" itself), "say nothing between tool calls" covers a read followed by a change, every example is a terse reply, and use_tools' description opens with "Slow: say one short line first" to mirror the quick tools' "Quick:" (#130).
 - 2B voice prompt cut to about half (583 to 308 words): the tool descriptions already say quick, slow and goodbye-first, `toolOutput` already says to give a result even late, and the per-tool, Discord, "two results at once" and "with every detail" rules are gone, since a long prompt makes the small model wordy (#130).
