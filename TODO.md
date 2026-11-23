@@ -255,6 +255,36 @@ allow list stops strangers, not a determined attacker. These close the gaps.
 - [ ] **Send Alfred the caller's own words** with each `use_tools` request,
       so a request the voice retold wrong can be checked against them.
 
+### Web access — debug Alfred's browser, find the best web tools for agents
+
+A big one. Alfred's headed Chrome (agent-browser, own profile,
+`AutomationControlled` off) gets bot-blocked by some big stores, and the block
+is disguised: patagonia.com (Akamai Bot Manager) serves a static "System
+maintenance is in progress" page, so Alfred told Kuba the site was down
+(2026-11-23). Facts so far: Kuba's Mac on the same public IP gets the real
+store; Alfred's Chrome, the same Chrome with a fresh empty profile, and curl
+all get the maintenance page. So it is not the IP and not stale cookies; it is
+how the automated browser looks.
+
+- [ ] **Patagonia as the test case.** Open the product page with (1) a plain
+      Chrome on the box, no automation, (2) Alfred's Chrome after clearing
+      only patagonia.com cookies, (3) whatever replaces it below. Pass = the
+      price shows.
+- [ ] **Research the field.** Search (X, GitHub, blogs) for how people give
+      agents reliable web access in 2026: stealth Chrome builds and CDP-leak
+      fixes (e.g. patchright, nodriver, camoufox), connecting to a real
+      everyday Chrome, hosted browser APIs (Browserbase, Browser Use cloud,
+      Anchor, Hyperbrowser, Steel), scraping/search APIs (Firecrawl, Exa,
+      Tavily, Jina reader), and the vendors' own agent-browsing products.
+      Compare cost, reliability against Akamai/Cloudflare/DataDome, login
+      handling, and privacy (who sees the pages and cookies).
+- [ ] **Pick a combination.** Likely tiers: a fetch/search API first, the
+      local browser for logged-in sites, a hosted stealth browser as the
+      fallback for blocked stores.
+- [ ] **Honesty rule now.** In the browser skill: a "maintenance", "access
+      denied" or challenge page on a site that is otherwise up means "this
+      site blocks my browser", not "the site is down"; fall back to search.
+
 ### Remote access to the box
 
 - [x] **Reach the machine from anywhere — Tailscale + SSH.** Done by
