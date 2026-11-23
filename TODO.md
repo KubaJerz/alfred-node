@@ -186,6 +186,18 @@ risky jobs to small least-privilege agents instead of widening his reach.
       `get_time`. `use_tools` stays for everything else. Each direct write
       leaves Alfred a simple note (daily note, and a line at the front of his
       next message) until part 2 replaces it.
+- [x] **Make the voice terse and conversational (#130).** Prompt only for
+      now: quick tools get no words, "Done." after an action, one short line
+      before `use_tools`. Code ideas, held until a test call shows the prompt
+      isn't enough:
+  - [ ] Cut speech the voice queued just before a quick tool call: clear the
+    player and truncate the item, as a barge-in does (`realtime.js`).
+  - [ ] Cap the length of the reply after a quick-tool *change*
+    (`max_output_tokens` on that `response.create`), never after a read.
+  - [ ] notion tool: if the title is known, read it directly; search is for
+    a half-remembered title (saves a ~0.4 s round trip).
+  - [ ] Filler nudge: maybe 6 s instead of 8, and "this is the one time you
+    may speak" if the new prompt makes it go quiet.
 - [ ] **Part 2: one shared context for the voice and Alfred.** The voice
       starts every call blank; Alfred keeps one resumed Claude Code session.
       Goal: either side always knows what happened on the other, even when
