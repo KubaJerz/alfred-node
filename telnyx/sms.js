@@ -111,6 +111,37 @@ export async function sendSms({ apiKey, from, to, text, mediaUrls = [], messagin
   return json?.data?.id || null;
 }
 
+// SMS has no typing indicator. When a turn runs long, the sender thinks that
+// Alfred did not get the text, and sends it again. This timer sends one short
+// "on it" text when a turn is still running after delayMs.
+//
+// start() arms the timer. A second start() does nothing, so the typing loop can
+// call it every few seconds. done() clears the timer. Call it when the reply
+// goes out and when the turn ends. After done() or after the timer fires, the
+// ack is spent: start() never arms it again, so a later send cannot cause a
+// stray ack. delayMs 0 (or less) turns it off. setTimer and clearTimer are for
+// the tests.
+export const SMS_ACK_TEXT = "👀 On it…";
+export function makeSmsAck({ delayMs, send, setTimer = setTimeout, clearTimer = clearTimeout, log = console.error }) {
+  let timer = null;
+  let spent = !(delayMs > 0);
+  return {
+    start() {
+      if (spent || timer) return;
+      timer = setTimer(() => {
+        timer = null;
+        spent = true;
+        Promise.resolve().then(send).catch((err) => log(`📵 SMS ack: ${err.message}`));
+      }, delayMs);
+    },
+    done() {
+      spent = true;
+      if (timer) clearTimer(timer);
+      timer = null;
+    },
+  };
+}
+
 // The route for messaging events. It filters to an inbound text from an
 // allowed number to Alfred's number, then calls onText. A text from any other
 // number is logged and dropped with no reply. A reply would confirm to a
