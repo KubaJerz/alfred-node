@@ -23,6 +23,7 @@ import { transcribe, transcriptionAvailable } from "./voice/transcribe.js";
 import { isVoiceInput } from "./voice/detect.js";
 import { browserEnv } from "./browser.js";
 import { startTelnyxWebhook, makeMessagingRoute, sendSms, smsText, parseNumberList, normalizeNumber } from "./telnyx/sms.js";
+import { downloadMedia, pickMmsFiles, makeMediaHost, MEDIA_ROUTE } from "./telnyx/mms.js";
 import { makeVoiceLlmRoutes } from "./telnyx/voice.js";
 import { makeVoicePipeline, EVENTS_PATH as VOICE_EVENTS_PATH } from "./telnyx/pipeline.js";
 import { startLocalSpeech, sidecarConfig } from "./voice/local-speech.js";
@@ -54,6 +55,12 @@ const TELNYX_MESSAGING_PROFILE_ID = process.env.TELNYX_MESSAGING_PROFILE_ID || "
 const SMS_MIRROR_CHANNEL = process.env.SMS_MIRROR_CHANNEL || "";
 const SMS_WEBHOOK_PORT = parseInt(process.env.SMS_WEBHOOK_PORT || "8788");
 const smsConfigured = !!(TELNYX_API_KEY && TELNYX_PUBLIC_KEY && TELNYX_PHONE_NUMBER && SMS_ALLOWED_NUMBERS.length);
+// Files in a reply go out as MMS. Telnyx fetches each one from this public URL
+// (the tunnel in front of the webhook server; see telnyx/mms.js). Unset, reply
+// files stay Discord-only, as before. It defaults to VOICE_PUBLIC_URL, the same
+// tunnel.
+const SMS_PUBLIC_URL = process.env.SMS_PUBLIC_URL || process.env.VOICE_PUBLIC_URL || "";
+const mediaHost = smsConfigured && SMS_PUBLIC_URL ? makeMediaHost({ publicUrl: SMS_PUBLIC_URL }) : null;
 // Alfred reads this tag at the top of an SMS turn (see agent/SOUL.md).
 const SMS_TAG = "[via SMS]";
 
@@ -1242,22 +1249,39 @@ function discordTarget(msg) {
 // The two sends are independent: a failed SMS still leaves the Discord copy,
 // and the mirror says that the SMS did not go. Typing and reactions exist only
 // on the Discord side.
+//
+// Reply files go in the text as MMS when the media host is on and they fit
+// (telnyx/mms.js). The rest are named in the text. If the MMS is refused, the
+// words go again as a plain SMS, so a bad file never loses the reply.
 function smsTarget({ to, discord = null, who = discord?.who }) {
+  const sendText = (text, mediaUrls = []) =>
+    sendSms({ apiKey: TELNYX_API_KEY, from: TELNYX_PHONE_NUMBER, to, text, mediaUrls, messagingProfileId: TELNYX_MESSAGING_PROFILE_ID });
+  const textNote = (text, skipped) => smsText(text, discord ? { files: skipped } : {
+    files: skipped,
+    filesNote: mediaHost ? "too big to text" : "not sent — SMS cannot carry files",
+    overflowNote: "(cut)",
+  });
+  async function sendSmsCopy(text, files) {
+    const local = files.map((f) => ({ path: f.attachment, name: f.name }));
+    const { send, skip } = mediaHost ? await pickMmsFiles(local) : { send: [], skip: local };
+    const body = textNote(text, skip.length);
+    if (!send.length) return body ? sendText(body) : null;
+    try {
+      return await sendText(body, send.map((f) => mediaHost.publish(f)));
+    } catch (err) {
+      console.error(`📵 MMS refused (${err.message}); sending the words alone`);
+      const words = textNote(text, files.length);
+      return words ? sendText(words) : null;
+    }
+  }
   return {
     who,
     via: "sms",
     typing: () => discord?.typing() ?? Promise.resolve(),
     react: (emoji) => discord?.react(emoji) ?? Promise.resolve(),
     send: async (text, files = []) => {
-      const body = smsText(text, discord ? { files: files.length } : {
-        files: files.length,
-        filesNote: "not sent — SMS cannot carry files",
-        overflowNote: "(cut)",
-      });
       const [sms, mirror] = await Promise.allSettled([
-        body
-          ? sendSms({ apiKey: TELNYX_API_KEY, from: TELNYX_PHONE_NUMBER, to, text: body, messagingProfileId: TELNYX_MESSAGING_PROFILE_ID })
-          : Promise.resolve(null),
+        sendSmsCopy(text, files),
         discord ? discord.send(text, files) : Promise.resolve(),
       ]);
       if (sms.status === "rejected") {
@@ -1276,36 +1300,63 @@ function smsTarget({ to, discord = null, who = discord?.who }) {
 // set), then queue it as a normal turn. The mirror post is what Alfred's
 // Discord-side reply answers, so the thread reads in order. The text runs the
 // same path as a Discord message, so "/c …" clears from a phone too.
-async function onSmsText({ from, text, media }) {
-  if (!text) {
-    // MMS with no words. Media download is not built yet.
-    if (media.length) {
-      await smsTarget({ to: from, who: { tag: `sms:${from}`, id: from, channel: "sms" } })
-        .send("I can read only text by SMS for now. Send photos in Discord.")
-        .catch(() => {});
-    }
+//
+// An MMS brings files. They are saved at once (Telnyx's links expire) and go to
+// the turn like Discord attachments. A voice message — one audio file and no
+// words — is transcribed locally, as in Discord: the reply "🎙️ heard: …" goes
+// back first, so a mishear shows before the turn acts on it.
+async function onSmsText({ id, from, text, media }) {
+  const who = { tag: `sms:${from}`, id: from, channel: SMS_MIRROR_CHANNEL || "sms" };
+  const reply = (words) => smsTarget({ to: from, who }).send(words).catch(() => {});
+  const msgId = `sms-${String(id || Date.now()).replace(/[^\w-]/g, "")}`;
+  let files = await downloadMedia({
+    media,
+    dir: dailyDir(MEMORIES_DIR),
+    nameFor: (i, name) => attachmentName(msgId, i, name),
+  });
+  if (!text && !files.length) {
+    if (media.length) await reply("I couldn't open that attachment. Try sending it again.");
     return;
   }
-  console.log(`📱 SMS from ${from}: ${text.slice(0, 100)}`);
+
+  let heard = "";
+  const atts = files.map((f) => ({ contentType: f.contentType, name: f.name }));
+  if (isVoiceInput({ atts, isVoiceNote: false, caption: text })) {
+    try {
+      heard = await transcribe(files[0].path);
+    } catch (err) {
+      console.error(`🎙️  SMS voice message: transcription failed: ${err.message}`);
+      await reply("🎙️ Sorry — I couldn't transcribe that voice message.");
+      return;
+    }
+    if (!heard) {
+      await reply("🎙️ I didn't catch any speech in that voice message.");
+      return;
+    }
+    console.log(`🎙️  SMS voice message → "${heard.slice(0, 100)}"`);
+    await reply(`🎙️ heard: "${heard}"`);
+    text = heard;
+  }
+  console.log(`📱 SMS from ${from}: ${text.slice(0, 100)}${files.length && !heard ? ` (+${files.length} file${files.length === 1 ? "" : "s"})` : ""}`);
 
   let discord = null;
   if (SMS_MIRROR_CHANNEL) {
     try {
       const channel = await client.channels.fetch(SMS_MIRROR_CHANNEL);
-      const posted = await channel.send({ content: `📱 ${text}`.slice(0, 2000), allowedMentions: { parse: [] } });
+      const posted = await channel.send({
+        content: (heard ? `📱 🎙️ "${heard}"` : `📱 ${text}`).slice(0, 2000),
+        files: files.map((f) => new AttachmentBuilder(f.path, { name: f.name })),
+        allowedMentions: { parse: [] },
+      });
       discord = discordTarget(posted);
     } catch (err) {
       console.error(`⚠️  Couldn't post the SMS in the mirror channel: ${err.message}`);
     }
   }
-  const target = smsTarget({
-    to: from,
-    discord,
-    who: { tag: `sms:${from}`, id: from, channel: SMS_MIRROR_CHANNEL || "sms" },
-  });
-  if (media.length) text += "\n(The user also sent a picture by MMS. You cannot see it.)";
+  const target = smsTarget({ to: from, discord, who });
+  if (heard) files = []; // the transcript replaces the audio, as in Discord
   if (pendingTurns > 0) target.react("⏳");
-  await enqueueTurn(() => handleTurn(target, text));
+  await enqueueTurn(() => handleTurn(target, text, files.map((f) => f.path)));
 }
 
 // Where a call posts what it cannot speak: files, and answers that came back
@@ -1589,18 +1640,21 @@ if (smsConfigured || voiceConfigured || voicePipeline) {
       } : {}),
       ...(voicePipeline ? voicePipeline.routes : {}),
     },
-    httpRoutes: voiceConfigured ? makeVoiceLlmRoutes({
-      token: VOICE_LLM_TOKEN,
-      allowFrom: VOICE_ALLOWED_NUMBERS,
-      normalize: normalizeNumber,
-      onTurn: onCallTurn,
-      fillerMs: VOICE_FILLER_MS,
-      fillerRepeatMs: VOICE_FILLER_REPEAT_MS,
-      backgroundAudio: path.join(REPO_DIR, "telnyx", "assets", "whoosh.mp3"),
-    }) : {},
+    httpRoutes: {
+      ...(mediaHost ? { [MEDIA_ROUTE]: (req, res) => mediaHost.route(req, res) } : {}),
+      ...(voiceConfigured ? makeVoiceLlmRoutes({
+        token: VOICE_LLM_TOKEN,
+        allowFrom: VOICE_ALLOWED_NUMBERS,
+        normalize: normalizeNumber,
+        onTurn: onCallTurn,
+        fillerMs: VOICE_FILLER_MS,
+        fillerRepeatMs: VOICE_FILLER_REPEAT_MS,
+        backgroundAudio: path.join(REPO_DIR, "telnyx", "assets", "whoosh.mp3"),
+      }) : {}),
+    },
   })
     .then((hook) => {
-      if (smsConfigured) console.log(`📱 SMS is on — Telnyx webhook on ${hook.url}/telnyx/messaging${SMS_MIRROR_CHANNEL ? ", mirrored to Discord" : ""}`);
+      if (smsConfigured) console.log(`📱 SMS is on — Telnyx webhook on ${hook.url}/telnyx/messaging${SMS_MIRROR_CHANNEL ? ", mirrored to Discord" : ""}, ${mediaHost ? `MMS files served for ${SMS_PUBLIC_URL}` : "reply files Discord-only (no SMS_PUBLIC_URL)"}`);
       if (voiceConfigured) console.log(`📞 Calls are on — model endpoint on ${hook.url}/telnyx/voice/v1${VOICE_MIRROR_CHANNEL ? ", mirrored to Discord" : ""}`);
       if (voicePipeline) {
         hook.server.on("upgrade", voicePipeline.handleUpgrade);

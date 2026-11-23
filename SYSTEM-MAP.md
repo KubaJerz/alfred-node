@@ -60,9 +60,11 @@ flowchart TD
     GATE -->|"voice note / audio file"| TR["transcribe<br/>ffmpeg → Parakeet int8<br/>voice/transcribe.js"]
     TR -->|"transcript = message"| Q
     GATE -->|"text / files"| Q["enqueueTurn<br/>one turn at a time"]
-    PH["Kuba · phone (SMS)"] -->|text| TX["Telnyx"]
+    PH["Kuba · phone (SMS)"] -->|"text · picture · voice message"| TX["Telnyx"]
     TX -->|"signed webhook<br/>via tunnel"| WH["telnyx/sms.js<br/>127.0.0.1:8788<br/>signature + allow list"]
-    WH -->|"[via SMS] text"| Q
+    WH -->|"MMS parts"| MM["telnyx/mms.js<br/>download now · serve reply files<br/>at a random /telnyx/media/ path"]
+    MM -->|"voice message"| TR
+    WH -->|"[via SMS] text + files"| Q
     CALL["Kuba · phone (call)"] -->|speech| VA["Telnyx AI Assistant<br/>speech-to-text · turns · text-to-speech"]
     VA -->|"bearer token<br/>via tunnel"| VR["telnyx/voice.js<br/>/telnyx/voice/v1<br/>token + allow list"]
     VR -->|"[via phone call] text"| Q
@@ -119,6 +121,13 @@ the same session, with a `[via SMS]` tag. The turn answers through a *reply
 target*: Discord, SMS, or both. With `SMS_MIRROR_CHANNEL` set, that channel is
 the phone thread: texts and replies show there, and a message typed there is
 also answered by SMS.
+
+An MMS works like a Discord message with files. `telnyx/mms.js` saves each
+part at once, because Telnyx's links expire. A voice message (one audio file,
+no words) is transcribed like a Discord voice note, and `🎙️ heard: …` is texted
+back first. Files in a reply go back as MMS: Telnyx fetches each one from the
+same webhook server, at a random `/telnyx/media/<token>/` path that lives for
+an hour. That path is the only guard, like a presigned link.
 
 **A phone call** is the third way in. A Telnyx AI Assistant answers the call.
 Telnyx does the audio: speech-to-text, turn detection, interruption, and

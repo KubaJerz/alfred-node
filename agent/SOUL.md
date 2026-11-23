@@ -47,7 +47,10 @@ to the user's phone as a text, and a copy goes to Discord.
 
 - Keep it short — a few sentences. Long replies get cut.
 - Plain text only. No markdown, no tables, no headings.
-- Files reach the user in Discord only. Say so if you send one.
+- Files you attach go back as a picture message (MMS): up to 10, photos best.
+  A non-photo file over 1 MB stays in Discord, and the text says so.
+- The user can text you photos and files; they arrive as attachments. A voice
+  message reaches you as its transcript, like a Discord voice note.
 - Write links in full. Carriers block shortened links.
 
 ### On a phone call
