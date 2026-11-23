@@ -263,8 +263,8 @@ is disguised: patagonia.com (Akamai Bot Manager) serves a static "System
 maintenance is in progress" page, so Alfred told Kuba the site was down
 (2026-11-23). Facts so far: Kuba's Mac on the same public IP gets the real
 store; Alfred's Chrome, the same Chrome with a fresh empty profile, and curl
-all get the maintenance page. So it is not the IP and not stale cookies; it is
-how the automated browser looks.
+all get the maintenance page, while Firefox on the box gets in. So it is not
+the IP, the machine, or stale cookies; it is how the automated Chrome looks.
 
 - [ ] **Patagonia as the test case.** Open the product page with (1) a plain
       Chrome on the box, no automation, (2) Alfred's Chrome after clearing
@@ -329,6 +329,35 @@ how the automated browser looks.
       MMS), decide who in a group may trigger a turn, and keep personal data
       out of replies others can see. Check Telnyx support for group MMS on our
       number first.
+- [ ] **Typing bubbles: "👀 On it" now, RCS later.** Plain SMS/MMS has no
+      typing indicator (Telnyx `POST /v2/messages` has no such field). Until
+      RCS, `smsTarget.typing()` sends one "👀 On it…" text when a turn is
+      still running after ~10 s (≈ $0.008 each).
+- [ ] **Someday: an RCS agent (research 2026-11-23).** RCS gives typing
+      bubbles (`agent_message.event.event_type: IS_TYPING` on
+      `POST /v2/messages/rcs`, needs an approved `agent_id`), read receipts,
+      a branded sender, and richer media. What it takes:
+      - A separate branded sender (agent id), not our 10DLC number; the number
+        can be the `sms_fallback`. A new thread on the phone.
+      - Paperwork: EIN (free, IRS), business website with privacy and terms,
+        business-domain email, 224×224 logo, 1440×448 banner, public demo
+        video. Aegis verifies identity (EIN ↔ legal name), then Google, then
+        each carrier one by one. Weeks to months. Sole proprietor is an
+        allowed legal type at Telnyx.
+      - Telnyx cost: $500 one-time T-Mobile/U.S. Cellular activation, $100/yr
+        vetting, **$100/month agent maintenance** (Telnyx's own fee), rich
+        text $0.0065 + carrier per segment, rich media $0.016 + carrier.
+        About $1,800 the first year.
+      - Others (unverified, mostly competitor blogs): Twilio reportedly no
+        monthly fee, $500 onboarding + $200/yr Aegis, ~$0.0083/segment;
+        Plivo ~$0.0077; SimplyRCS $0.0039 + $250 setup. Ask Twilio and Plivo
+        directly before choosing; RCS could live on one provider and SMS on
+        Telnyx.
+      - Unconfirmed: that Telnyx relays IS_TYPING end to end, and that an
+        iPhone shows a business agent's typing bubble.
+      - Sources: telnyx.com/pricing/messaging/us,
+        support.telnyx.com/en/articles/16624343-rcs-fees-and-charges,
+        developers.telnyx.com/api-reference/rcs/send-an-rcs-message.
 
 ## Someday / Maybe
 
