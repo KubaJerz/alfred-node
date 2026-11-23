@@ -35,6 +35,11 @@ work before approval.
 A message typed in the mirror channel also gets its reply by SMS, to the first
 number in `SMS_ALLOWED_NUMBERS`. Other channels stay Discord only.
 
+SMS has no typing indicator (#133). When a turn from a text runs for
+`SMS_ACK_MS` (default 10 s) with no reply, Alfred texts `👀 On it…` once. A
+fast turn sends nothing extra. The ack never goes after the reply. A turn typed
+in the mirror channel gets no ack, because Discord shows the typing indicator.
+
 The messaging profile answers STOP, START, and HELP itself (Keywords tab).
 Those texts start no turn. The reply texts there must stay the same as the
 ones in the campaign.

@@ -5,6 +5,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
 
 ## [Unreleased]
 
+### Added
+- **"👀 On it…" for a slow text (#133).** SMS has no typing indicator. When a
+  turn from a text runs for 10 s with no reply, Alfred texts `👀 On it…` once,
+  so the owner does not send the text again. A fast turn sends nothing extra.
+  The ack never goes after the reply. Calls, Discord, and turns typed in the
+  mirror channel get no ack. Cost: about $0.008 per ack. New setting:
+  `SMS_ACK_MS` (default 10000, `0` turns it off).
+
 ### Fixed
 - 2B voice: no narration around quick tools. The line-first rule is now use_tools only, the prompt says to call notion, calendar and get_time without a word first and to stop after "Done.", and each quick tool's description says so too (#130).
 - 2B voice prompt condensed to one rule per behaviour: the wait-filling bullet is gone (the code says "still on it" itself), "say nothing between tool calls" covers a read followed by a change, every example is a terse reply, and use_tools' description opens with "Slow: say one short line first" to mirror the quick tools' "Quick:" (#130).

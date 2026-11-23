@@ -22,7 +22,7 @@ import { parseClearCommand } from "./commands.js";
 import { transcribe, transcriptionAvailable } from "./voice/transcribe.js";
 import { isVoiceInput } from "./voice/detect.js";
 import { browserEnv } from "./browser.js";
-import { startTelnyxWebhook, makeMessagingRoute, sendSms, smsText, parseNumberList, normalizeNumber } from "./telnyx/sms.js";
+import { startTelnyxWebhook, makeMessagingRoute, sendSms, smsText, parseNumberList, normalizeNumber, makeSmsAck, SMS_ACK_TEXT } from "./telnyx/sms.js";
 import { downloadMedia, pickMmsFiles, makeMediaHost, MEDIA_ROUTE } from "./telnyx/mms.js";
 import { makeVoiceLlmRoutes } from "./telnyx/voice.js";
 import { makeVoicePipeline, EVENTS_PATH as VOICE_EVENTS_PATH } from "./telnyx/pipeline.js";
@@ -63,6 +63,9 @@ const SMS_PUBLIC_URL = process.env.SMS_PUBLIC_URL || process.env.VOICE_PUBLIC_UR
 const mediaHost = smsConfigured && SMS_PUBLIC_URL ? makeMediaHost({ publicUrl: SMS_PUBLIC_URL }) : null;
 // Alfred reads this tag at the top of an SMS turn (see agent/SOUL.md).
 const SMS_TAG = "[via SMS]";
+// A turn from a text that runs this long with no reply sends one "👀 On it…"
+// text, since SMS has no typing indicator. 0 turns it off.
+const SMS_ACK_MS = parseInt(process.env.SMS_ACK_MS || "10000");
 
 // Phone calls over a Telnyx AI Assistant (telnyx/voice.js). Telnyx does the
 // audio. bot.js is the assistant's model: each caller turn is an Alfred turn.
@@ -1018,6 +1021,7 @@ async function handleTurn(target, userMessage, attachments = [], { signal, onTex
     await logTurn({ dir: "out", kind: "error", text: errReply, error: err.message });
   } finally {
     clearInterval(typingInterval);
+    target.done?.();
   }
 }
 
@@ -1253,7 +1257,11 @@ function discordTarget(msg) {
 // Reply files go in the text as MMS when the media host is on and they fit
 // (telnyx/mms.js). The rest are named in the text. If the MMS is refused, the
 // words go again as a plain SMS, so a bad file never loses the reply.
-function smsTarget({ to, discord = null, who = discord?.who }) {
+//
+// ackMs: a turn from a text sends one "👀 On it…" text when it runs this long
+// with no reply (makeSmsAck). typing() starts the timer. send() and done() (the
+// end of the turn) stop it. Without ackMs, nothing extra goes.
+function smsTarget({ to, discord = null, who = discord?.who, ackMs = 0 }) {
   const sendText = (text, mediaUrls = []) =>
     sendSms({ apiKey: TELNYX_API_KEY, from: TELNYX_PHONE_NUMBER, to, text, mediaUrls, messagingProfileId: TELNYX_MESSAGING_PROFILE_ID });
   const textNote = (text, skipped) => smsText(text, discord ? { files: skipped } : {
@@ -1274,12 +1282,21 @@ function smsTarget({ to, discord = null, who = discord?.who }) {
       return words ? sendText(words) : null;
     }
   }
+  const ack = makeSmsAck({ delayMs: ackMs, send: () => {
+    console.log(`👀 Slow SMS turn — texting "${SMS_ACK_TEXT}" to ${to}`);
+    return sendText(SMS_ACK_TEXT);
+  } });
   return {
     who,
     via: "sms",
-    typing: () => discord?.typing() ?? Promise.resolve(),
+    typing: () => {
+      ack.start();
+      return discord?.typing() ?? Promise.resolve();
+    },
     react: (emoji) => discord?.react(emoji) ?? Promise.resolve(),
+    done: () => ack.done(),
     send: async (text, files = []) => {
+      ack.done();
       const [sms, mirror] = await Promise.allSettled([
         sendSmsCopy(text, files),
         discord ? discord.send(text, files) : Promise.resolve(),
@@ -1353,7 +1370,7 @@ async function onSmsText({ id, from, text, media }) {
       console.error(`⚠️  Couldn't post the SMS in the mirror channel: ${err.message}`);
     }
   }
-  const target = smsTarget({ to: from, discord, who });
+  const target = smsTarget({ to: from, discord, who, ackMs: SMS_ACK_MS });
   if (heard) files = []; // the transcript replaces the audio, as in Discord
   if (pendingTurns > 0) target.react("⏳");
   await enqueueTurn(() => handleTurn(target, text, files.map((f) => f.path)));

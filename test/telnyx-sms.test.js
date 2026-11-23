@@ -10,6 +10,8 @@ import {
   makeMessagingRoute,
   startTelnyxWebhook,
   SMS_MAX_CHARS,
+  makeSmsAck,
+  SMS_ACK_TEXT,
 } from "../telnyx/sms.js";
 
 // A real Ed25519 pair, so the check runs the same code path as production.
@@ -148,4 +150,91 @@ test("webhook server checks the signature, answers 200, and drops repeats", asyn
   } finally {
     await hook.close();
   }
+});
+
+// A fake clock for makeSmsAck: timers run only when the test calls tick().
+function fakeTimers() {
+  let now = 0;
+  const timers = new Map();
+  let next = 1;
+  return {
+    setTimer: (fn, ms) => { timers.set(next, { fn, at: now + ms }); return next++; },
+    clearTimer: (id) => { timers.delete(id); },
+    tick(ms) {
+      now += ms;
+      for (const [id, t] of [...timers]) {
+        if (t.at <= now) { timers.delete(id); t.fn(); }
+      }
+    },
+    pending: () => timers.size,
+  };
+}
+const flush = () => new Promise((r) => setImmediate(r));
+
+test("makeSmsAck sends one ack after the delay", async () => {
+  const clock = fakeTimers();
+  const sent = [];
+  const ack = makeSmsAck({ delayMs: 10_000, send: () => sent.push(SMS_ACK_TEXT), ...clock });
+  ack.start();
+  clock.tick(9_999);
+  await flush();
+  assert.equal(sent.length, 0);
+  clock.tick(1);
+  await flush();
+  assert.deepEqual(sent, ["👀 On it…"]);
+  ack.start(); // the typing loop calls start() again after the ack
+  clock.tick(60_000);
+  await flush();
+  assert.equal(sent.length, 1);
+  assert.equal(clock.pending(), 0);
+});
+
+test("makeSmsAck sends nothing when the reply goes first", async () => {
+  const clock = fakeTimers();
+  let sent = 0;
+  const ack = makeSmsAck({ delayMs: 10_000, send: () => { sent++; }, ...clock });
+  ack.start();
+  clock.tick(5_000);
+  ack.done(); // the reply went out
+  ack.start(); // a later typing() call, for example a deferred follow-up
+  clock.tick(60_000);
+  await flush();
+  assert.equal(sent, 0);
+  assert.equal(clock.pending(), 0);
+});
+
+test("makeSmsAck keeps one timer when start() repeats", async () => {
+  const clock = fakeTimers();
+  let sent = 0;
+  const ack = makeSmsAck({ delayMs: 10_000, send: () => { sent++; }, ...clock });
+  for (let i = 0; i < 4; i++) { ack.start(); clock.tick(8_000); }
+  await flush();
+  assert.equal(sent, 1);
+  assert.equal(clock.pending(), 0);
+});
+
+test("makeSmsAck with delay 0 is off", async () => {
+  const clock = fakeTimers();
+  let sent = 0;
+  const ack = makeSmsAck({ delayMs: 0, send: () => { sent++; }, ...clock });
+  ack.start();
+  assert.equal(clock.pending(), 0);
+  clock.tick(60_000);
+  await flush();
+  assert.equal(sent, 0);
+});
+
+test("makeSmsAck logs a failed ack and does not throw", async () => {
+  const clock = fakeTimers();
+  const logged = [];
+  const ack = makeSmsAck({
+    delayMs: 10,
+    send: async () => { throw new Error("blocked"); },
+    log: (m) => logged.push(m),
+    ...clock,
+  });
+  ack.start();
+  clock.tick(10);
+  await flush();
+  assert.deepEqual(logged, ["📵 SMS ack: blocked"]);
 });
