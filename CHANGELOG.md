@@ -10,6 +10,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
 - 2B voice prompt condensed to one rule per behaviour: the wait-filling bullet is gone (the code says "still on it" itself), "say nothing between tool calls" covers a read followed by a change, every example is a terse reply, and use_tools' description opens with "Slow: say one short line first" to mirror the quick tools' "Quick:" (#130).
 - 2B voice prompt cut to about half (583 to 308 words): the tool descriptions already say quick, slow and goodbye-first, `toolOutput` already says to give a result even late, and the per-tool, Discord, "two results at once" and "with every detail" rules are gone, since a long prompt makes the small model wordy (#130).
 - notion add/write with `line` means `under` that line; before, it was ignored and the lines landed at the end of the page (#130).
+- 2B voice: before a Notion or calendar change it says "Got it," and the end result ("Got it, removing the tomatoes."), so a mishearing can be stopped; when done, "Done.", "All done." or "Finished." Reads and get_time get no lead-in (#130).
 
 ### Added
 - 2B voice: notion `write` takes markdown, and indented lines nest, so "a temporary list under Greens with milk on it" is one call. `add` and `write` take `after` to place lines right after a line; under a heading means the end of its section (#126).
