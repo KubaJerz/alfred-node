@@ -25,7 +25,8 @@ export const NOTION_TOOL = {
   type: "function",
   name: "notion",
   description:
-    "The user's Notion pages: lists (like the shopping list), notes and ideas. Read a page before changing it; " +
+    "Quick: call it without saying anything first. The user's Notion pages: lists (like the shopping list), notes " +
+    "and ideas. Read a page before changing it; " +
     "lines are numbered, and a change names the line number. To add under a section, give its line number as " +
     "'under', or 'after' to put them right after a line. add is for a few plain items; for a new sub-list, a " +
     "heading with items, or anything with structure, use write with markdown.",
@@ -42,7 +43,8 @@ export const NOTION_TOOL = {
         description:
           "write: the lines, one per line. '- [ ] ' checkbox, '- ' bullet, '1. ' numbered, '## ' heading, '> ' quote, " +
           "plain text for a note. Indent 2 spaces to put a line inside the line above, at most 2 deep. A heading " +
-          "holds nothing: put its items after it, not indented. Example: '- Temporary list\\n  - [ ] Milk'.",
+          "holds nothing: put its items after it, not indented. Don't repeat the line you write under. Example, under " +
+          "Greens: '- Temporary list\\n  - [ ] Milk'.",
       },
       items: { type: "array", items: { type: "string" }, description: "add, create: the lines to add, one per item." },
       text: { type: "string", description: "edit: the line's new text. create: the new page's title." },
@@ -55,7 +57,7 @@ export const CALENDAR_TOOL = {
   type: "function",
   name: "calendar",
   description:
-    "The user's Google Calendar. Times are Eastern, written like 2026-11-27T15:00; a date alone (2026-11-27) is all " +
+    "Quick: call it without saying anything first. The user's Google Calendar. Times are Eastern, written like 2026-11-27T15:00; a date alone (2026-11-27) is all " +
     "day. Read a day before editing or deleting; events are numbered, and each change returns the day renumbered. " +
     "Never guess a time: ask. Colors: banana " +
     "school, tomato important personal, peacock general, grape AI Institute, basil Leo's group, tangerine Valafar lab.",
@@ -79,7 +81,7 @@ export const CALENDAR_TOOL = {
 export const TIME_TOOL = {
   type: "function",
   name: "get_time",
-  description: "The current date, weekday and time where the user is.",
+  description: "Quick: call it without saying anything first. The current date, weekday and time where the user is.",
   parameters: { type: "object", properties: {} },
 };
 
@@ -247,6 +249,7 @@ export function makeVoiceTools({ notionRoutes, calendarRoutes, fetchBlockChildre
     if (action === "read") return readPage(page);
 
     if (action === "add" || action === "write") {
+      if (a.line && !a.under && !a.after) a = { ...a, under: a.line }; // the model sometimes says line for under
       let markdown, what;
       const spot = await place(page, a);
       if (action === "add") {

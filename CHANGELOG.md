@@ -5,6 +5,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
 
 ## [Unreleased]
 
+### Fixed
+- 2B voice: no narration around quick tools. The line-first rule is now use_tools only, the prompt says to call notion, calendar and get_time without a word first and to stop after "Done.", and each quick tool's description says so too (#130).
+- notion add/write with `line` means `under` that line; before, it was ignored and the lines landed at the end of the page (#130).
+
 ### Added
 - 2B voice: notion `write` takes markdown, and indented lines nest, so "a temporary list under Greens with milk on it" is one call. `add` and `write` take `after` to place lines right after a line; under a heading means the end of its section (#126).
 - Notion: `markdownToBlocks` nests lines indented 2 spaces (two levels, never under a heading), and `POST /notion/append` takes `after` (#126).

@@ -261,3 +261,10 @@ test("numberLines records each line's parent", () => {
   const { map } = numberLines([todo("a", "A", false, [todo("b", "B")]), todo("c", "C")]);
   assert.deepEqual([...map.values()].map((l) => l.parentId), [null, "a", null]);
 });
+
+test("add or write with line means under that line", async () => {
+  const { t, n } = tools();
+  await t.call("notion", { action: "read", page: "Shopping list" });
+  await t.call("notion", { action: "write", page: "Shopping list", line: 2, markdown: "- Temporary list\n  - [ ] Milk" });
+  assert.deepEqual(n.log.at(-1), ["append", "b2", "- Temporary list\n  - [ ] Milk"]);
+});

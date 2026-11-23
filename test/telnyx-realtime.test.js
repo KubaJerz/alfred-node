@@ -199,7 +199,8 @@ test("the prompt keeps the voice in character as Alfred", async () => {
   const file = readFileSync(new URL("../agent/phone-voice.md", import.meta.url), "utf8").trim();
   assert.equal(DEFAULT_INSTRUCTIONS, file);
   assert.match(file, /Never mention a tool/);
-  assert.match(file, /before every use_tools call, say one short line/);
+  assert.match(file, /use_tools is the one exception[\s\S]*say one\s+short line/);
+  assert.match(file, /without a word first/);
   assert.match(file, /every request gets its own answer/);
   assert.match(file, /do not start with\s+"yes" or "no"/);
   assert.doesNotMatch(file, /real Alfred|Alfred's voice/);
