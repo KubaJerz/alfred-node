@@ -197,6 +197,60 @@ claude -p "<user message>" \
 #                      PATH=node_modules/.bin:…
 ```
 
+## A phone call (2B)
+
+Option 2B splits a call between two minds. The **voice** is one OpenAI Realtime
+session per call: it hears, decides when the caller has finished, and talks.
+**Alfred** is the same `claude -p` turn as Discord, reached only through the
+`use_tools` function. The voice starts each call blank, with only
+`agent/phone-voice.md`; Alfred resumes his session as usual. Quick work skips
+Alfred: `telnyx/voice-tools.js` gives the voice its own notion, calendar
+and get_time tools, run in process on the broker's route table — no
+HTTP hop and no token, but the same guarded routes.
+
+```mermaid
+flowchart TD
+    CALL["Kuba · phone (call)"] -->|speech| CC["Telnyx Call Control<br/>media stream"]
+    CC -->|"signed webhook + media socket<br/>via tunnel"| VP["telnyx/pipeline.js<br/>signature + token + allow list"]
+    VP <-->|"PCMU both ways"| RT["telnyx/realtime.js<br/>one session per call<br/>prompt: phone-voice.md"]
+    RT <-->|"audio · turns · function calls"| OA["OpenAI Realtime<br/>the voice"]
+    RT -->|"notion · calendar<br/>get_time"| VT["telnyx/voice-tools.js<br/>exact titles · read before write"]
+    VT ==>|"in process"| BR["broker routes<br/>NOTION_ROUTES · GOOGLE_ROUTES"]
+    BR --> N["Notion"]
+    BR --> G["Google Calendar"]
+    VT -.->|"each change"| NOTE["phone actions<br/>+ today's daily note"]
+    NOTE -.->|"prefixed to the next turn"| SPAWN
+    RT -->|"use_tools: the caller's request"| Q["onCallTurn → enqueueTurn<br/>[via phone call]"]
+    Q --> SPAWN["claude -p --resume<br/>Alfred: email, memory, files, web"]
+    SPAWN -->|"reply = function output"| RT
+    RT -->|"end_call: after the goodbye"| HU["hangup"]
+    HU --> CC
+    classDef external fill:#d6e2f2,stroke:#1f5fb8,color:#123f7d
+    classDef gateway fill:#d8ebe2,stroke:#1b6b52,color:#12503c
+    classDef stack fill:#f5e8d5,stroke:#b07a2a,color:#6e4a12
+    class CALL,CC,OA,N,G external
+    class VP,BR gateway
+    class SPAWN stack
+```
+
+**One caller turn.** The voice decides which path: answer itself (small talk,
+or something already said in this call), a direct tool, or `use_tools`. A
+direct tool returns in under 2 s and the voice says the result. `use_tools`
+takes a full Alfred turn (8 s or more), so the voice says a short line first;
+the reply comes back as the function output and the voice says it in its own
+words. Barge-in clears the audio and truncates the voice's item where the
+caller stopped hearing it.
+
+**Who knows what.** Every direct-tool change is written to today's daily note
+and queued as a phone action; the next Alfred turn starts with that list, so
+he is never surprised by an edit he didn't make. The other way does not work
+yet: the voice gets no briefing of recent chat. That is part 2 in `TODO.md`.
+
+**Guarantees here.** The allow list, signature and token checks in
+`pipeline.js`, and the broker's own rules (no guest-deletes), are code. In
+`voice-tools.js`, exact-title page lookup and "read before write" are code too.
+Everything about how the voice talks is the prompt, so it is guidance.
+
 ## Inbound mail (Pub/Sub)
 
 The second way something enters the system. Gmail publishes a change

@@ -29,7 +29,7 @@ function fakeNotion() {
       return { results: [{ id: "p1", object: "page", title: "Shopping list" }, { id: "p2", object: "page", title: "Shopping ideas" }] };
     },
     "POST /notion/append": async ({ params, body }) => {
-      log.push(["append", params.get("id"), body.markdown]);
+      log.push(["append", params.get("id"), body.markdown, ...(body.after ? [body.after] : [])]);
       const lines = body.markdown.split("\n").map((l, i) => todo(`n${log.length}_${i}`, l.replace(/^- \[ \] /, "")));
       if (params.get("id") === "p1") blocks.push(...lines);
       else find(params.get("id")).children.push(...lines);
@@ -213,4 +213,51 @@ test("calendar times get seconds, which Google requires", async () => {
   await t.call("calendar", { action: "add", title: "X", start: "2026-11-27T15:00", end: "2026-11-27T16:00" });
   assert.equal(c.log.at(-1)[1].start, "2026-11-27T15:00:00");
   assert.equal(c.log.at(-1)[1].end, "2026-11-27T16:00:00");
+});
+
+test("a calendar change returns the day renumbered, so the next change needs no read", async () => {
+  const { t, c } = tools();
+  await t.call("calendar", { action: "read", from: "2026-11-27" });
+  const out = await t.call("calendar", { action: "edit", event: 1, start: "2026-11-27T16:00", end: "2026-11-27T17:00" });
+  assert.match(out, /Done: changed "Lab meeting"[\s\S]*\n1\. .*Lab meeting\n2\. .*Holiday/);
+  assert.deepEqual(c.log.at(-1), ["list", "2026-11-27", "2026-11-28"]);
+  assert.match(await t.call("calendar", { action: "delete", event: 1 }), /Done: deleted "Lab meeting"/);
+});
+
+test("write nests markdown inside a line; after puts lines next to one, at its level", async () => {
+  const { t, n, notes } = tools();
+  await t.call("notion", { action: "read", page: "Shopping list" });
+  const out = await t.call("notion", { action: "write", page: "Shopping list", under: 2, markdown: "- Temporary list\n  - [ ] Milk" });
+  assert.match(out, /Done: added "Temporary list", "Milk" under "Greens"/);
+  assert.deepEqual(n.log.at(-1), ["append", "b2", "- Temporary list\n  - [ ] Milk"]);
+  await t.call("notion", { action: "add", page: "Shopping list", after: 3, items: ["Lime"] });
+  assert.deepEqual(n.log.at(-1), ["append", "b2", "- [ ] Lime", "b3"]); // b3 sits inside Greens
+  await t.call("notion", { action: "add", page: "Shopping list", after: 1, items: ["Oats"] });
+  assert.deepEqual(n.log.at(-1).slice(1), ["p1", "- [ ] Oats", "b1"]);
+  assert.match(await t.call("notion", { action: "write", page: "Shopping list" }), /give the markdown/);
+  assert.equal(notes.length, 3);
+});
+
+test("under a heading means the end of its section, since a heading holds no lines", async () => {
+  const h = (id, text) => ({ id, type: "heading_2", heading_2: { rich_text: [{ plain_text: text, text: { content: text }, annotations: {} }] } });
+  const blocks = [h("h1", "Food"), todo("f1", "Milk"), todo("f2", "Eggs", false, [todo("f3", "brown")]), h("h2", "Other"), todo("o1", "Soap")];
+  const log = [];
+  const t = makeVoiceTools({
+    notionRoutes: {
+      "GET /notion/search": async () => ({ results: [{ id: "p1", object: "page", title: "List" }] }),
+      "POST /notion/append": async ({ params, body }) => (log.push([params.get("id"), body.markdown, body.after]), { appended: 1 }),
+    },
+    calendarRoutes: {},
+    fetchBlockChildren: async () => structuredClone(blocks),
+  });
+  await t.call("notion", { action: "read", page: "List" });
+  await t.call("notion", { action: "add", page: "List", under: 1, items: ["Bread"] });
+  assert.deepEqual(log.at(-1), ["p1", "- [ ] Bread", "f2"]); // after Eggs, not after its child
+  await t.call("notion", { action: "add", page: "List", under: 5, items: ["Sponge"] });
+  assert.deepEqual(log.at(-1), ["p1", "- [ ] Sponge", "o1"]);
+});
+
+test("numberLines records each line's parent", () => {
+  const { map } = numberLines([todo("a", "A", false, [todo("b", "B")]), todo("c", "C")]);
+  assert.deepEqual([...map.values()].map((l) => l.parentId), [null, "a", null]);
 });

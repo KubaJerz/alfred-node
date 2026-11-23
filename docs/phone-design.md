@@ -590,14 +590,17 @@ Besides `use_tools` and `end_call`, the voice has its own tools
 (`telnyx/voice-tools.js`), which call the broker routes in process, in
 0.2–0.8 s instead of 6–9 s through Alfred:
 
-- `notion`: search, read, add (optionally under a line), check, uncheck,
-  edit, remove, create a subpage. Lines are numbered by `read`; a write names
+- `notion`: search, read, add (optionally under or after a line), write
+  (markdown; indented lines nest, 2.35.0), check, uncheck, edit, remove,
+  create a subpage. Under a heading means the end of its section, since a
+  heading holds no lines. Lines are numbered by `read`; a write names
   a number from the latest read in this call and returns the page renumbered.
   A page is found by its exact title only: Notion's search is fuzzy and takes
   20–40 s to index a new page, so its top hit can be a different page. Column
   `set` stays with Alfred.
 - `calendar`: read, add, edit, delete, with the broker's guards (no guests,
-  no deleting an event with guests).
+  no deleting an event with guests). A change returns the last-read days
+  renumbered (2.35.0), so the next edit or delete needs no new read.
 - `get_time`: the date, weekday and time, Eastern.
 
 Every write leaves Alfred a note: a line in today's daily note, and a block at

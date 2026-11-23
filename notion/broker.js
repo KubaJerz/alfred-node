@@ -179,16 +179,17 @@ export const NOTION_ROUTES = {
     return { id: created.id, url: created.url || "", title };
   }),
 
-  // Append markdown to an existing page. Additive — the safest write here, since
-  // nothing is overwritten.
+  // Append markdown to an existing page or block, at the end or `after` one of
+  // its child blocks. Additive — the safest write here, since nothing is
+  // overwritten. Indented lines nest under the line above.
   "POST /notion/append": asRoute(async ({ params, body }) => {
     const id = params.get("id");
     if (!id) return { error: "id required", status: 400 };
-    const { markdown } = body || {};
+    const { markdown, after } = body || {};
     if (!markdown) return { error: "markdown required", status: 400 };
     const blocks = markdownToBlocks(markdown);
     if (!blocks.length) return { error: "nothing to append", status: 400 };
-    const appended = await appendBlocks(id, blocks);
+    const appended = await appendBlocks(id, blocks, { after });
     return { id, appended };
   }),
 

@@ -4,6 +4,15 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [SemVer](https://semver.org/).
 
 ## [Unreleased]
+
+### Added
+- 2B voice: notion `write` takes markdown, and indented lines nest, so "a temporary list under Greens with milk on it" is one call. `add` and `write` take `after` to place lines right after a line; under a heading means the end of its section (#126).
+- Notion: `markdownToBlocks` nests lines indented 2 spaces (two levels, never under a heading), and `POST /notion/append` takes `after` (#126).
+- SYSTEM-MAP.md: "A phone call (2B)" — the voice, its direct tools, `use_tools` to Alfred, and who knows what (#126).
+
+### Fixed
+- 2B voice talks less: one general rule, say only what the moment needs and confirm an action in a few words (#126).
+- A calendar add, edit or delete returns the last-read days renumbered, so a delete after an edit no longer needs another read (#126).
 ### Added
 - **The phone voice has its own tools (2B).** `notion` (search, read, add,
   check, uncheck, edit, remove, create), `calendar` (read, add, edit, delete)
