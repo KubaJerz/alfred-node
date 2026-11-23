@@ -268,3 +268,11 @@ test("add or write with line means under that line", async () => {
   await t.call("notion", { action: "write", page: "Shopping list", line: 2, markdown: "- Temporary list\n  - [ ] Milk" });
   assert.deepEqual(n.log.at(-1), ["append", "b2", "- Temporary list\n  - [ ] Milk"]);
 });
+
+test("a change with no page goes to the page last read", async () => {
+  const { t, n } = tools();
+  assert.match(await t.call("notion", { action: "add", items: ["x"] }), /say which page/);
+  await t.call("notion", { action: "read", page: "Shopping list" });
+  assert.match(await t.call("notion", { action: "add", under: 2, items: ["Bread"] }), /Done: added "Bread" under "Greens"/);
+  assert.deepEqual(n.log.at(-1), ["append", "b2", "- [ ] Bread"]);
+});
