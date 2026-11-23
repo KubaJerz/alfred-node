@@ -5,6 +5,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
 
 ## [Unreleased]
 
+### Changed
+- 2B voice, terse style: before a change it says just the change ("Adding bread."), and after, "Done." and nothing more unless the caller needs to know. notion's `under` is only for a section the caller names, so "add bread to the list" goes at the end of the page (#139).
+
 ### Added
 - **"👀 On it…" for a slow text (#133).** SMS has no typing indicator. When a
   turn from a text runs for 10 s with no reply, Alfred texts `👀 On it…` once,
