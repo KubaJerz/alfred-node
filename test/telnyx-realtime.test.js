@@ -198,16 +198,19 @@ test("the prompt keeps the voice in character as Alfred", async () => {
   const { readFileSync } = await import("fs");
   const file = readFileSync(new URL("../agent/phone-voice.md", import.meta.url), "utf8").trim();
   assert.equal(DEFAULT_INSTRUCTIONS, file);
-  assert.match(file, /Never mention a\s+tool/);
-  assert.match(file, /use_tools is the one exception[\s\S]*say one\s+short line/);
+  assert.match(file, /never mention a\s+tool/);
+  assert.match(file, /use_tools alone gets one short line first/);
   assert.match(file, /quick tools get no words/);
-  assert.match(file, /without saying anything first/);
-  assert.match(file, /every use_tools result gets told/);
+  assert.match(file, /Say nothing before notion, calendar or\s+get_time/);
+  assert.match(file, /Every use_tools result gets told/);
   assert.doesNotMatch(file, /Let me check/);
   assert.match(USE_TOOLS.description, /^Slow: say one short line first/);
-  assert.match(file, /do not start with\s+"yes" or "no"/);
+  assert.match(file, /do\s+not\s+start\s+with\s+"yes" or "no"/);
   assert.doesNotMatch(file, /real Alfred|Alfred's voice/);
-  assert.match(file, /read every item/);
+  assert.match(file, /read in full, every\s+item in order/);
+  // About half the first #130 pass: a long prompt makes the small model
+  // wordy, and the tool descriptions already carry the per-tool rules.
+  assert.ok(file.split(/\s+/).length <= 320, `${file.split(/\s+/).length} words`);
   assert.doesNotMatch(USE_TOOLS.description, /Alfred/);
 });
 
