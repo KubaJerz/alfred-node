@@ -21,6 +21,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
 - 2B voice talks less: one general rule, say only what the moment needs and confirm an action in a few words (#126).
 - A calendar add, edit or delete returns the last-read days renumbered, so a delete after an edit no longer needs another read (#126).
 ### Added
+- **Pictures, files, and voice messages by text (#128).** A photo or file
+  texted to Alfred's number reaches the turn like a Discord attachment, and
+  shows in the mirror channel. A voice message (one audio file, no words) is
+  transcribed locally, the same as a Discord voice note: `🎙️ heard: "…"` is
+  texted back first, then the transcript is the message. Files in a reply go
+  back as MMS. Telnyx fetches each one from the webhook server, at a random
+  `/telnyx/media/` path that lives for an hour (`telnyx/mms.js`). Up to 10
+  files; a photo or video may be bigger than 1 MB, since MMS Transcoding
+  shrinks it, and any other file over 1 MB stays in Discord with a note. If
+  Telnyx refuses the MMS, the words go again as a plain text. New setting:
+  `SMS_PUBLIC_URL` (defaults to `VOICE_PUBLIC_URL`).
 - **The phone voice has its own tools (2B).** `notion` (search, read, add,
   check, uncheck, edit, remove, create), `calendar` (read, add, edit, delete)
   and `get_time` answer in under a second, without a trip through Alfred.

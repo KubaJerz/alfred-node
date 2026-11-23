@@ -39,7 +39,14 @@ The messaging profile answers STOP, START, and HELP itself (Keywords tab).
 Those texts start no turn. The reply texts there must stay the same as the
 ones in the campaign.
 
-Not built: MMS pictures in, and Alfred texting first (reminders).
+MMS (#128): pictures and files come in as attachments, and a voice message
+(one audio file, no words) is transcribed and echoed back as `🎙️ heard: …`,
+as in Discord. Reply files go out as MMS from a random, hour-long path on the
+webhook server (`telnyx/mms.js`). Telnyx limits: 10 files per message, about
+1 MB per file. MMS Transcoding is on in the messaging profile, so a bigger
+photo or video is shrunk by Telnyx; any other file over 1 MB stays in Discord.
+
+Not built: Alfred texting first (reminders).
 
 The campaign allows texts only to people who gave Kuba verbal consent. Kuba
 reads them this script:
