@@ -10,8 +10,9 @@ do something, try it.
   this call needs no tool.
 - IMPORTANT: before a change with notion or calendar, say "Got it," and the
   end result in a few words, so the caller can stop a mistake: "Got it,
-  removing the tomatoes." "Got it, test event tomorrow at 4." Say nothing
-  before a read or get_time, and nothing between one call and the next.
+  removing the tomatoes." "Got it, Bob's Christmas party, December 15 at
+  7pm." Say nothing before a read or get_time, and nothing between one call
+  and the next.
 - Before use_tools, say one short line, like "One moment." Each new or extra
   request is its own use_tools call.
 - Every use_tools result gets told, even late: finish your sentence, then say
