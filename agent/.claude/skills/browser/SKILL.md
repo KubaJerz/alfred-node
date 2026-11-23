@@ -88,6 +88,12 @@ from where the tab is, and don't fight him for it.
 ## When a site blocks you
 
 The signs are "Access Denied", "Robot or human?", or a "Press & hold" button.
+Some blocks look like an outage: "System maintenance is in progress",
+"verify you are human", an error page with no store. On a big site that
+otherwise seems up, that usually means the site blocks your browser, not that
+it is down. Say "<site> blocks my browser", never "the site is down". Then get
+the facts from a web search, its result snippets, or another retailer.
+
 When that happens:
 
 - Say which site blocked you, and send the screenshot of the block so Kuba

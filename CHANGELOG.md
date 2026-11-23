@@ -14,6 +14,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
   `SMS_ACK_MS` (default 10000, `0` turns it off).
 
 ### Fixed
+- **A blocked site is not a site that is down (#136).** patagonia.com shows
+  Alfred's browser a fake "System maintenance is in progress" page, and he
+  told the owner the site was down. The browser skill now says: a
+  maintenance, "access denied" or "verify you are human" page on a big site
+  that otherwise seems up usually means a block. Alfred says "<site> blocks
+  my browser" and gets the facts from a web search or another retailer.
+
+### Fixed
 - 2B voice: no narration around quick tools. The line-first rule is now use_tools only, the prompt says to call notion, calendar and get_time without a word first and to stop after "Done.", and each quick tool's description says so too (#130).
 - 2B voice prompt condensed to one rule per behaviour: the wait-filling bullet is gone (the code says "still on it" itself), "say nothing between tool calls" covers a read followed by a change, every example is a terse reply, and use_tools' description opens with "Slow: say one short line first" to mirror the quick tools' "Quick:" (#130).
 - 2B voice prompt cut to about half (583 to 308 words): the tool descriptions already say quick, slow and goodbye-first, `toolOutput` already says to give a result even late, and the per-tool, Discord, "two results at once" and "with every detail" rules are gone, since a long prompt makes the small model wordy (#130).
