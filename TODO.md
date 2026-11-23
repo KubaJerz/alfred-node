@@ -180,6 +180,14 @@ risky jobs to small least-privilege agents instead of widening his reach.
       OpenAI's `interrupt_response` and do our own barge-in: stop Alfred only
       for sound longer than ~400 ms, or sound with words. Today a bump or road
       noise cancels his reply, and he starts the answer over.
+- [ ] **Research: adaptive noise reduction (far field vs near field).** 2B
+      sends OpenAI `noise_reduction: far_field` on every call
+      (`VOICE_OPENAI_NOISE`). Near field suits a phone held to the ear; far
+      field suits speakerphone or a car. Find out whether we can pick per
+      call or switch mid-call (a `session.update` with a new type), what
+      signal would tell us which one fits (call audio level, background noise,
+      a caller setting), and whether the wrong one hurts turn detection or
+      transcription. Compare both on real calls first.
 - [ ] **Part 1: direct tools for the voice (#124).** `notion` (search, read
       with numbered lines, add under a section, check/uncheck, edit, remove,
       create subpage; any shared page), `calendar` (read, add, edit, delete),
