@@ -88,12 +88,15 @@ export function smsText(text, { files = 0, filesNote = "sent in Discord", overfl
   return (t + tail).trim();
 }
 
-// Send one SMS. Returns the Telnyx message id. Throws with the API's own error
-// text, so a carrier block (for example, an unverified toll-free number) is
-// visible in the log.
-export async function sendSms({ apiKey, from, to, text, messagingProfileId, fetchImpl = fetch }) {
+// Send one SMS, or an MMS when mediaUrls is not empty (public URLs that Telnyx
+// fetches; see telnyx/mms.js). Returns the Telnyx message id. Throws with the
+// API's own error text, so a carrier block (for example, an unverified
+// toll-free number) is visible in the log.
+export async function sendSms({ apiKey, from, to, text, mediaUrls = [], messagingProfileId, fetchImpl = fetch }) {
   if (!apiKey) throw new Error("TELNYX_API_KEY is not set");
-  const body = { from, to, text };
+  const body = { from, to };
+  if (text) body.text = text;
+  if (mediaUrls.length) body.media_urls = mediaUrls;
   if (messagingProfileId) body.messaging_profile_id = messagingProfileId;
   const res = await fetchImpl("https://api.telnyx.com/v2/messages", {
     method: "POST",
@@ -150,7 +153,9 @@ export function makeMessagingRoute({ ourNumber, allowFrom, onText, log = console
 // the event's `data` object. httpRoutes maps a path to a plain handler
 // (req, res, rawBody) that does its own auth and writes its own response. The
 // voice model endpoint (telnyx/voice.js) is one: Telnyx does not sign those
-// requests, so they skip the signature check and carry a bearer token.
+// requests, so they skip the signature check and carry a bearer token. A key
+// that ends in "/" matches every path under it (the MMS file host,
+// telnyx/mms.js).
 // The server answers 200 before it runs the handler:
 // Telnyx wants a 2xx inside 2 seconds, and a turn takes far longer. Telnyx
 // retries a delivery that did not get a 2xx, so the same event can arrive more
@@ -176,7 +181,8 @@ export async function startTelnyxWebhook({
     try {
       const path = new URL(req.url, "http://x").pathname;
       const route = routes[path];
-      const httpRoute = httpRoutes[path];
+      const httpRoute = httpRoutes[path] ||
+        Object.entries(httpRoutes).find(([k]) => k.endsWith("/") && path.startsWith(k))?.[1];
       if (!httpRoute && (req.method !== "POST" || !route)) return end(404);
 
       const chunks = [];
