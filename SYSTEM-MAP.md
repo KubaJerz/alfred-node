@@ -204,8 +204,8 @@ session per call: it hears, decides when the caller has finished, and talks.
 **Alfred** is the same `claude -p` turn as Discord, reached only through the
 `use_tools` function. The voice starts each call blank, with only
 `agent/phone-voice.md`; Alfred resumes his session as usual. Quick work skips
-Alfred: `telnyx/voice-tools.js` gives the voice its own notion, calendar,
-get_time and remember tools, run in process on the broker's route table — no
+Alfred: `telnyx/voice-tools.js` gives the voice its own notion, calendar
+and get_time tools, run in process on the broker's route table — no
 HTTP hop and no token, but the same guarded routes.
 
 ```mermaid
@@ -214,7 +214,7 @@ flowchart TD
     CC -->|"signed webhook + media socket<br/>via tunnel"| VP["telnyx/pipeline.js<br/>signature + token + allow list"]
     VP <-->|"PCMU both ways"| RT["telnyx/realtime.js<br/>one session per call<br/>prompt: phone-voice.md"]
     RT <-->|"audio · turns · function calls"| OA["OpenAI Realtime<br/>the voice"]
-    RT -->|"notion · calendar<br/>get_time · remember"| VT["telnyx/voice-tools.js<br/>exact titles · read before write"]
+    RT -->|"notion · calendar<br/>get_time"| VT["telnyx/voice-tools.js<br/>exact titles · read before write"]
     VT ==>|"in process"| BR["broker routes<br/>NOTION_ROUTES · GOOGLE_ROUTES"]
     BR --> N["Notion"]
     BR --> G["Google Calendar"]

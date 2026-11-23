@@ -302,3 +302,13 @@ test("a valid-shaped call with no token fails closed without leaking anything", 
   assert.ok(!/stack|at Object|node:internal/i.test(body.error), "a stack leaked to the caller");
   assert.ok(!body.error.includes(broker.token), "the broker token was echoed back");
 });
+
+test("indented lines nest under the line above, two levels at most, never under a heading", () => {
+  const blocks = markdownToBlocks("- List\n  - [ ] Milk\n    - note\n      - too deep\n## Head\n  - [ ] stays level\n\tx");
+  assert.deepEqual(blocks.map((b) => b.type), ["bulleted_list_item", "heading_2", "to_do", "paragraph"]);
+  const milk = blocks[0].bulleted_list_item.children[0];
+  assert.equal(milk.type, "to_do");
+  assert.deepEqual(milk.to_do.children.map((b) => b.bulleted_list_item.rich_text[0].text.content), ["note", "too deep"]);
+  assert.equal(blocks[1].heading_2.children, undefined);
+  assert.equal(blocks[3].paragraph.rich_text[0].text.content, "x");
+});

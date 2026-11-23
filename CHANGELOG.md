@@ -6,7 +6,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
 ## [Unreleased]
 
 ### Added
-- 2B voice: a `remember` tool. What the caller asks to keep goes to today's daily note and to Alfred's next turn (#126).
+- 2B voice: notion `write` takes markdown, and indented lines nest, so "a temporary list under Greens with milk on it" is one call. `add` and `write` take `after` to place lines right after a line; under a heading means the end of its section (#126).
+- Notion: `markdownToBlocks` nests lines indented 2 spaces (two levels, never under a heading), and `POST /notion/append` takes `after` (#126).
 - SYSTEM-MAP.md: "A phone call (2B)" — the voice, its direct tools, `use_tools` to Alfred, and who knows what (#126).
 
 ### Fixed

@@ -17,7 +17,7 @@
 import { blockLine, markdownToBlocks } from "../notion/blocks.js";
 import { TIMEZONE } from "../google/calendar-rules.js";
 
-const NOTION_ACTIONS = ["search", "read", "add", "check", "uncheck", "edit", "remove", "create"];
+const NOTION_ACTIONS = ["search", "read", "add", "write", "check", "uncheck", "edit", "remove", "create"];
 const CALENDAR_ACTIONS = ["read", "add", "edit", "delete"];
 const COLORS = ["banana", "tomato", "peacock", "grape", "basil", "tangerine"];
 
@@ -27,14 +27,23 @@ export const NOTION_TOOL = {
   description:
     "The user's Notion pages: lists (like the shopping list), notes and ideas. Read a page before changing it; " +
     "lines are numbered, and a change names the line number. To add under a section, give its line number as " +
-    "'under'. To make a new section, add the section line first, then add under it.",
+    "'under', or 'after' to put them right after a line. add is for a few plain items; for a new sub-list, a " +
+    "heading with items, or anything with structure, use write with markdown.",
   parameters: {
     type: "object",
     properties: {
       action: { type: "string", enum: NOTION_ACTIONS },
       page: { type: "string", description: "The page title, e.g. Shopping list. For search: words in the title." },
       line: { type: "integer", description: "check, uncheck, edit, remove: the line number from the last read." },
-      under: { type: "integer", description: "add: put the items under this line." },
+      under: { type: "integer", description: "add, write: put the new lines inside this line, at the end of it." },
+      after: { type: "integer", description: "add, write: put the new lines right after this line, at its level." },
+      markdown: {
+        type: "string",
+        description:
+          "write: the lines, one per line. '- [ ] ' checkbox, '- ' bullet, '1. ' numbered, '## ' heading, '> ' quote, " +
+          "plain text for a note. Indent 2 spaces to put a line inside the line above, at most 2 deep. A heading " +
+          "holds nothing: put its items after it, not indented. Example: '- Temporary list\\n  - [ ] Milk'.",
+      },
       items: { type: "array", items: { type: "string" }, description: "add, create: the lines to add, one per item." },
       text: { type: "string", description: "edit: the line's new text. create: the new page's title." },
     },
@@ -64,19 +73,6 @@ export const CALENDAR_TOOL = {
       color: { type: "string", enum: COLORS },
     },
     required: ["action"],
-  },
-};
-
-export const REMEMBER_TOOL = {
-  type: "function",
-  name: "remember",
-  description:
-    "Write down something the caller asks you to remember (a fact, a preference, something for later), so it is " +
-    "kept after the call. Use their words.",
-  parameters: {
-    type: "object",
-    properties: { text: { type: "string", description: "What to remember, as one sentence." } },
-    required: ["text"],
   },
 };
 
@@ -111,16 +107,16 @@ export function nextDay(date) {
 export function numberLines(blocks) {
   const lines = [];
   const map = new Map();
-  const walk = (bs, depth) => {
+  const walk = (bs, depth, parentId) => {
     for (const b of bs || []) {
       const n = lines.length + 1;
       const text = blockLine(b);
-      map.set(n, { id: b.id, type: b.type, text, children: b.children || [] });
+      map.set(n, { id: b.id, type: b.type, text, children: b.children || [], parentId });
       lines.push(`${n}. ${"  ".repeat(depth)}${text}`);
-      if (b.type !== "child_page") walk(b.children, depth + 1);
+      if (b.type !== "child_page") walk(b.children, depth + 1, b.id);
     }
   };
-  walk(blocks, 0);
+  walk(blocks, 0, null); // a top-level line's parent is the page
   return { text: lines.join("\n") || "(the page is empty)", map };
 }
 
@@ -200,6 +196,40 @@ export function makeVoiceTools({ notionRoutes, calendarRoutes, fetchBlockChildre
     return line;
   }
 
+  // Where new lines go: inside a line (`under`), right after one (`after`), or
+  // at the end of the page. A heading holds no children in Notion, so "under a
+  // heading" means the end of its section: after the last line before the next
+  // heading at its level. `style` is the line kind to copy for plain items.
+  async function place(page, a) {
+    if (a.after) {
+      const line = lineOf(page, a.after);
+      return { parentId: line.parentId || page.id, after: line.id, style: line.type, where: ` after "${words(line.text)}"` };
+    }
+    if (a.under) {
+      const line = lineOf(page, a.under);
+      const where = ` under "${words(line.text)}"`;
+      if (!/^heading_/.test(line.type)) {
+        const style = line.children.find((c) => c.type !== "child_page")?.type || line.type;
+        return { parentId: line.id, style, where };
+      }
+      const siblings = [...reads.get(page.id).values()].filter((l) => l.parentId === line.parentId);
+      const section = siblings.slice(siblings.indexOf(line) + 1);
+      const end = section.findIndex((l) => /^heading_/.test(l.type));
+      const body = end === -1 ? section : section.slice(0, end);
+      const last = body.at(-1) || line;
+      return {
+        parentId: line.parentId || page.id,
+        after: last.id,
+        style: body.find((l) => l.type !== "child_page")?.type,
+        where,
+      };
+    }
+    const top = reads.get(page.id)
+      ? [...reads.get(page.id).values()].filter((l) => !l.parentId)
+      : (await fetchBlockChildren(page.id)).map((b) => ({ type: b.type }));
+    return { parentId: page.id, style: top.filter((l) => l.type !== "child_page").at(-1)?.type, where: "" };
+  }
+
   // After a write: what happened, the note for Alfred, and the page renumbered.
   async function wrote(page, done) {
     note(`${done} (Notion page "${page.title}")`);
@@ -216,26 +246,21 @@ export function makeVoiceTools({ notionRoutes, calendarRoutes, fetchBlockChildre
     const page = await findPage(a.page);
     if (action === "read") return readPage(page);
 
-    if (action === "add") {
-      const items = (a.items || []).map(String).map((s) => s.trim()).filter(Boolean);
-      if (!items.length) throw new Error("give the items to add");
-      let parentId = page.id;
-      let style;
-      let where = "";
-      if (a.under) {
-        const under = lineOf(page, a.under);
-        parentId = under.id;
-        style = under.children.find((c) => c.type !== "child_page")?.type || under.type;
-        where = ` under "${words(under.text)}"`;
+    if (action === "add" || action === "write") {
+      let markdown, what;
+      const spot = await place(page, a);
+      if (action === "add") {
+        const items = (a.items || []).map(String).map((s) => s.trim()).filter(Boolean);
+        if (!items.length) throw new Error("give the items to add");
+        markdown = items.map((i) => lineFor(i, spot.style)).join("\n");
+        what = quoted(items);
       } else {
-        const top = reads.get(page.id)
-          ? [...reads.get(page.id).values()]
-          : (await fetchBlockChildren(page.id)).map((b) => ({ type: b.type }));
-        style = top.filter((l) => l.type !== "child_page").at(-1)?.type;
+        markdown = String(a.markdown || "").replace(/\s+$/, "");
+        if (!markdown.trim()) throw new Error("give the markdown to write");
+        what = quoted(markdown.split("\n").map((l) => words(l.trim())).filter(Boolean));
       }
-      const markdown = items.map((i) => lineFor(i, style)).join("\n");
-      await N("POST /notion/append", { params: params({ id: parentId }), body: { markdown } });
-      return wrote(page, `added ${quoted(items)}${where}`);
+      await N("POST /notion/append", { params: params({ id: spot.parentId }), body: { markdown, after: spot.after } });
+      return wrote(page, `added ${what}${spot.where}`);
     }
 
     if (action === "check" || action === "uncheck") {
@@ -342,16 +367,10 @@ export function makeVoiceTools({ notionRoutes, calendarRoutes, fetchBlockChildre
     notion,
     calendar,
     get_time: async () => timeNow(now()),
-    remember: async (a) => {
-      const text = String(a.text || "").trim();
-      if (!text) throw new Error("say what to remember");
-      note(`was asked to remember: "${text}"`);
-      return "Done: written down.";
-    },
   };
 
   return {
-    defs: [NOTION_TOOL, CALENDAR_TOOL, TIME_TOOL, REMEMBER_TOOL],
+    defs: [NOTION_TOOL, CALENDAR_TOOL, TIME_TOOL],
     // The id of a page this call found or made, by title (for the smoke test).
     pageId: (title) => pages.get(String(title).trim().toLowerCase())?.id || null,
     names: Object.keys(run),

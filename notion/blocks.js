@@ -110,10 +110,12 @@ function lineToBlock(line) {
  * Markdown → an array of Notion block objects, ready for pages.create children
  * or blocks.children.append. Blank lines are separators, not blocks. A fenced
  * ```lang block is collected whole so its contents aren't parsed as markdown.
+ * A line indented two spaces under another becomes its child.
  */
 export function markdownToBlocks(md) {
   const lines = String(md || "").replace(/\r\n/g, "\n").split("\n");
   const blocks = [];
+  const stack = []; // { level, depth, block, siblings } for each open line, shallowest first
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const fence = /^```(.*)$/.exec(line);
@@ -129,10 +131,22 @@ export function markdownToBlocks(md) {
       continue;
     }
     if (line.trim() === "") continue;
-    blocks.push(lineToBlock(line));
+    const block = lineToBlock(line.trimStart());
+    const level = Math.floor(line.match(/^[ \t]*/)[0].replace(/\t/g, "  ").length / 2);
+    // Indented two spaces per level → a child of the nearest shallower line.
+    // Notion takes two levels of children per request, and a heading, divider
+    // or code block holds none, so such a line stays at its parent's level.
+    while (stack.length && stack.at(-1).level >= level) stack.pop();
+    const parent = stack.at(-1);
+    const nest = parent && parent.depth < 2 && HOLDS_CHILDREN.has(parent.block.type);
+    const siblings = nest ? (parent.block[parent.block.type].children ??= []) : parent ? parent.siblings : blocks;
+    siblings.push(block);
+    stack.push({ level, depth: nest ? parent.depth + 1 : parent ? parent.depth : 0, block, siblings });
   }
   return blocks;
 }
+
+const HOLDS_CHILDREN = new Set(["paragraph", "to_do", "bulleted_list_item", "numbered_list_item", "quote"]);
 
 // Notion's code language is an enum; "text"/"" isn't a member, "plain text" is.
 function normalizeLanguage(lang) {

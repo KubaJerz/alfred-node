@@ -87,13 +87,18 @@ export async function fetchBlockChildren(blockId, depth = 0, budget = { count: 0
 }
 
 // Notion's block append takes at most 100 children per call. Batch so a long
-// note isn't an all-or-nothing 100-block write.
-export async function appendBlocks(blockId, blocks) {
+// note isn't an all-or-nothing 100-block write. `after` (a child block id)
+// puts the new blocks right after it instead of at the end; each later batch
+// goes after the last block of the one before. (Notion-Version 2022-06-28 takes
+// `after`; newer versions replace it with `position`.)
+export async function appendBlocks(blockId, blocks, { after } = {}) {
   let appended = 0;
   for (let i = 0; i < blocks.length; i += 100) {
-    await notion("PATCH", `/blocks/${blockId}/children`, {
+    const r = await notion("PATCH", `/blocks/${blockId}/children`, {
       children: blocks.slice(i, i + 100),
+      ...(after ? { after } : {}),
     });
+    if (after) after = r?.results?.at(-1)?.id || after;
     appended += Math.min(100, blocks.length - i);
   }
   return appended;
