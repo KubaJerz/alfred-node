@@ -30,6 +30,10 @@ export const DEFAULT_VOICE = "cedar";
 export const DEFAULT_EAGERNESS = "medium";
 export const DEFAULT_TRANSCRIBE_MODEL = "gpt-4o-mini-transcribe";
 export const GREETING = "Hey.";
+// Response kinds, in metadata: a silent reply after a quick tool, and the
+// spoken answer a quiet reply ended with.
+const QUIET = "quiet";
+const SAY = "say";
 // OpenAI's input noise filter: far_field (speakerphone, car), near_field
 // (phone at the ear, headset), or "off". Road noise in the car cut Alfred off.
 export const DEFAULT_NOISE = "far_field";
@@ -444,7 +448,36 @@ export function makeRealtimeSession({
     log(`📞 ${m.name} ${oneLine(JSON.stringify(args))} → ${now() - t0} ms: ${oneLine(output).slice(0, 200)}`);
     if (ended) return;
     send({ type: "conversation.item.create", item: { type: "function_call_output", call_id: m.call_id, output } });
-    createResponse();
+    // The reply after a quick tool is text: the model narrates between calls
+    // whatever the prompt says, and text makes no sound. quietDone speaks the
+    // answer once the model stops calling tools.
+    createResponse({ metadata: { kind: QUIET }, output_modalities: ["text"] });
+  };
+
+  // A quiet reply ended. If it called another tool, it was still working and
+  // stays silent. If not, its text is the answer: say it, out of band, so the
+  // conversation does not hold it twice. A cancelled one (the caller talked)
+  // says nothing; the caller's own turn answers them. Returns true when it
+  // started speaking.
+  const quietDone = (r) => {
+    const out = r?.output || [];
+    const text = out
+      .filter((o) => o.type === "message")
+      .flatMap((o) => o.content || [])
+      .map((c) => c.text ?? c.transcript ?? "")
+      .join(" ")
+      .trim();
+    if (text) log(`🤫 Voice (silent): ${oneLine(text)}`);
+    const working = out.some((o) => o.type === "function_call" && o.name !== END_CALL.name);
+    if (r.status !== "completed" || working || !text) return false;
+    createResponse({
+      metadata: { kind: SAY },
+      conversation: "none",
+      output_modalities: ["audio"],
+      tool_choice: "none",
+      instructions: `Say exactly this and nothing else: "${text}"`,
+    });
+    return true;
   };
 
   const onMessage = (data) => {
@@ -497,10 +530,11 @@ export function makeRealtimeSession({
         return;
       case "response.done": {
         activeResponse = false;
-        if (hangingUp) hangUpAfterGoodbye();
+        const speaking = m.response?.metadata?.kind === QUIET && quietDone(m.response);
+        if (hangingUp && !speaking) hangUpAfterGoodbye();
         if (update && (!update.id || m.response?.id === update.id)) update = null;
         addUsage(usage, m.response?.usage);
-        if (pendingCreate) {
+        if (pendingCreate && !activeResponse) {
           const ev = pendingCreate;
           pendingCreate = null;
           activeResponse = true;

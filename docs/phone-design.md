@@ -619,6 +619,16 @@ Every write leaves Alfred a note: a line in today's daily note, and a block at
 the front of his next message on any channel. `scripts/voice-tools-smoke.mjs`
 runs every action against a scratch page and a test event, then trashes both.
 
+**Silent tool chains (2.38.0).** The model narrated between quick tool calls
+("Let me double-check…", "I'm updating the list…") whatever the prompt said,
+and OpenAI has no setting to stop it. So the reply after a direct tool's result
+is asked for as text (`output_modalities: ["text"]`): it can call the next tool,
+but makes no sound. When a quiet reply ends with no tool call, its text is the
+answer, and an out-of-band audio response says it exactly. The caller's first
+reply in a turn ("Got it.") is still audio, and so is everything after
+`use_tools`. Talking over a chain cancels the quiet reply; the caller's own turn
+answers them. The silent text is logged as `🤫 Voice (silent):`.
+
 ### Cost
 
 From openai.com pricing (read 2026-11-11), per 1M tokens:

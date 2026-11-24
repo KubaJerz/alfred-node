@@ -5,6 +5,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
 
 ## [Unreleased]
 
+### Added
+- **2B voice: silent tool chains (#144).** After a notion, calendar or get_time result, the next reply is text, not audio, so the steps between tool calls make no sound. When the model stops calling tools, its answer is spoken exactly. The narration between calls ("Let me double-check…") is logged as `🤫 Voice (silent):` instead of said.
+
 ### Changed
 - 2B voice: before a change it says just "Got it." or "Will do."; after, "Done." and what changed in a few words. The model restated the change after every result anyway, so announcing it first said everything twice (#142).
 - 2B voice: when a result comes back and it worked as announced, it says only "Done."; on a failure it tries to fix it, and speaks only when the caller must answer or decide. Reasoning back to `low` in `.env` (medium cost 2–3 s per turn) (#140).
