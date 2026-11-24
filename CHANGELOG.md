@@ -6,6 +6,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
 ## [Unreleased]
 
 ### Added
+- **Voice tools: several lines in one call (#148).** `check`, `uncheck` and `remove` take `lines` (numbers) or `items` (the lines' words, no read needed); calendar `edit` and `delete` take `events` or `match` (title words, with `from`). All targets are found before anything changes, then written one after another, with one re-read and one note. A number now holds for the whole call (gaps after a removal), so numbers from one read stay right, and tool calls run one at a time. Results are plain: "Done: removed …", or "Removed "Milk". No line says "cheese"." The voice may number a list it reads.
 - `VOICE_OPENAI_SILENT_CHAINS=0` turns 2B's silent tool chains off, so every reply is audio again, to compare the two. The call's settings log line says which is on (#146).
 - **2B voice: silent tool chains (#144).** After a notion, calendar or get_time result, the next reply is text, not audio, so the steps between tool calls make no sound. When the model stops calling tools, its answer is spoken exactly. The narration between calls ("Let me double-check…") is logged as `🤫 Voice (silent):` instead of said.
 

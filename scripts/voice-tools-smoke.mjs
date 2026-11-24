@@ -57,24 +57,28 @@ const scratch = t.pageId(PAGE);
 if (!scratch) throw new Error("the scratch page's id is unknown; stopping before any write");
 await NOTION_ROUTES["POST /notion/append"]({ params: new URLSearchParams({ id: scratch }), body: { markdown: "- [ ] test box" } });
 await step("read again", "notion", { action: "read", page: PAGE }, /\[ \] test box/);
-await step("check a box", "notion", { action: "check", page: PAGE, line: 2 }, /checked off "test box"[\s\S]*\[x\] test box/);
-await step("uncheck it", "notion", { action: "uncheck", page: PAGE, line: 2 }, /unchecked "test box"[\s\S]*\[ \] test box/);
+// Numbers hold all call: Greens (2) and its child (3) went, so test box is 4.
+await step("check a box", "notion", { action: "check", page: PAGE, lines: [4] }, /checked off "test box"[\s\S]*\[x\] test box/);
+await step("uncheck it", "notion", { action: "uncheck", page: PAGE, items: ["test box"] }, /unchecked "test box"[\s\S]*\[ \] test box/);
 await step("add matches the checkbox style", "notion", { action: "add", page: PAGE, items: ["test grapes"] }, /\[ \] test grapes/);
-// Page now: 1 test pears, 2 [ ] test box, 3 [ ] test grapes.
-await step("write a nested list inside a line", "notion", { action: "write", page: PAGE, under: 2, markdown: "- test sublist\n  - [ ] test milk" }, /2\. - \[ \] test box\n3\. {3}- test sublist\n4\. {5}- \[ \] test milk/);
-await step("write a heading after a line (Notion's after)", "notion", { action: "write", page: PAGE, after: 1, markdown: "## test head\n- [ ] test socks" }, /1\. test pears\n2\. ## test head\n3\. - \[ \] test socks\n4\. - \[ \] test box/);
-await step("add under a heading goes to the end of its section", "notion", { action: "add", page: PAGE, under: 2, items: ["test charger"] }, /test grapes\n8\. - \[ \] test charger/);
+// Page now: 1 test pears, 4 [ ] test box, 5 [ ] test grapes.
+await step("write a nested list inside a line", "notion", { action: "write", page: PAGE, under: 4, markdown: "- test sublist\n  - [ ] test milk" }, /4\. - \[ \] test box\n6\. {3}- test sublist\n7\. {5}- \[ \] test milk/);
+await step("write a heading after a line (Notion's after)", "notion", { action: "write", page: PAGE, after: 1, markdown: "## test head\n- [ ] test socks" }, /1\. test pears\n8\. ## test head\n9\. - \[ \] test socks\n4\. - \[ \] test box/);
+await step("add under a heading goes to the end of its section", "notion", { action: "add", page: PAGE, under: 8, items: ["test charger"] }, /test grapes\n10\. - \[ \] test charger/);
+await step("remove several by their words, one missing", "notion", { action: "remove", page: PAGE, items: ["test socks", "test charger", "test caviar"] }, /^Removed "test socks", "test charger" \(in Notion's Trash\)\. No line says "test caviar"\./);
 
 // Calendar: one event late on --day, then edit and delete it.
 await step("time", "get_time", {}, /Eastern/);
 await step("add an event", "calendar", { action: "add", title: "Phone tool test", start: `${day}T23:00`, end: `${day}T23:30` }, /^Done: added/);
 const list = await step("read the day", "calendar", { action: "read", from: day }, /Phone tool test/);
 const n = Number(/(\d+)\. \S+ \S+ Phone tool test/.exec(list)?.[1]);
-// A change returns the day renumbered, so the delete needs no read in between.
+// A change returns the day again, numbers kept, so the delete needs no read in between.
 const moved = await step("move it", "calendar", { action: "edit", event: n, start: `${day}T23:15`, end: `${day}T23:45` }, /^Done: changed[\s\S]*23:15–23:45 Phone tool test/);
 const m = Number(/(\d+)\. \S+ 23:15–23:45 Phone tool test/.exec(moved)?.[1]);
 await step("delete it, no read between", "calendar", { action: "delete", event: m }, /deleted "Phone tool test".*Trash/);
 await step("it is gone", "calendar", { action: "read", from: day }, /^(?![\s\S]*Phone tool test)/);
+await step("add another", "calendar", { action: "add", title: "Phone tool test 2", start: `${day}T23:00`, end: `${day}T23:30` }, /^Done: added/);
+await step("delete it by its title, no read", "calendar", { action: "delete", match: "phone tool test 2", from: day }, /^Done: deleted "Phone tool test 2"/);
 
 // Clean up: the scratch page to Notion's Trash.
 // Trash it only if the id still names the page this run made.

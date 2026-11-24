@@ -605,19 +605,28 @@ Besides `use_tools` and `end_call`, the voice has its own tools
 - `notion`: search, read, add (optionally under or after a line), write
   (markdown; indented lines nest, 2.35.0), check, uncheck, edit, remove,
   create a subpage. Under a heading means the end of its section, since a
-  heading holds no lines. Lines are numbered by `read`; a write names
-  a number from the latest read in this call and returns the page renumbered.
+  heading holds no lines. Lines are numbered by `read`, and a number holds
+  for the whole call (2.39.0): a line keeps it after others go, a new line
+  gets the next one, so several numbers from one read stay right. check,
+  uncheck and remove take several `lines`, or `items` (the lines' words, no
+  read needed); all targets are found first, the writes run one after
+  another, and the page is re-read once. A result is plain: "Done: removed
+  …", or "Removed "Milk". No line says "cheese"." when some were missing.
   A page is found by its exact title only: Notion's search is fuzzy and takes
   20–40 s to index a new page, so its top hit can be a different page. Column
   `set` stays with Alfred.
 - `calendar`: read, add, edit, delete, with the broker's guards (no guests,
   no deleting an event with guests). A change returns the last-read days
-  renumbered (2.35.0), so the next edit or delete needs no new read.
+  (2.35.0), numbers kept (2.39.0), so the next edit or delete needs no new
+  read. edit and delete take several `events`, or `match` (title words) with
+  `from` as the day, no read needed.
 - `get_time`: the date, weekday and time, Eastern.
 
 Every write leaves Alfred a note: a line in today's daily note, and a block at
 the front of his next message on any channel. `scripts/voice-tools-smoke.mjs`
 runs every action against a scratch page and a test event, then trashes both.
+Tool calls run one at a time within a call, so parallel calls from one reply
+never interleave their re-reads.
 
 **Silent tool chains (2.38.0).** The model narrated between quick tool calls
 ("Let me double-check…", "I'm updating the list…") whatever the prompt said,
