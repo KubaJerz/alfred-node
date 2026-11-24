@@ -241,6 +241,9 @@ export function makeRealtimeSession({
   // Fast tools that skip Alfred: { defs, names, call(name, args) }, or a
   // function that makes them, called once per call (their state is per call).
   directTools: makeTools = null,
+  // The reply after a quick tool is silent text (2.38.0); false makes it audio
+  // again, as before, to compare the two.
+  quietChains = true,
   greeting = GREETING,
   updateMs = UPDATE_MS,
   markLateMs = MARK_LATE_MS,
@@ -451,7 +454,7 @@ export function makeRealtimeSession({
     // The reply after a quick tool is text: the model narrates between calls
     // whatever the prompt says, and text makes no sound. quietDone speaks the
     // answer once the model stops calling tools.
-    createResponse({ metadata: { kind: QUIET }, output_modalities: ["text"] });
+    createResponse(quietChains ? { metadata: { kind: QUIET }, output_modalities: ["text"] } : undefined);
   };
 
   // A quiet reply ended. If it called another tool, it was still working and
@@ -550,7 +553,8 @@ export function makeRealtimeSession({
     log(
       `📞 OpenAI settings: ${model}, voice ${voice || DEFAULT_VOICE}, ` +
         `${silenceMs ? `turn end after ${silenceMs} ms of silence` : `eagerness ${eagerness || DEFAULT_EAGERNESS}`}, ` +
-        `reasoning ${reasoning || "default (low)"}, noise filter ${noise || DEFAULT_NOISE}`,
+        `reasoning ${reasoning || "default (low)"}, noise filter ${noise || DEFAULT_NOISE}, ` +
+        `silent tool chains ${quietChains ? "on" : "off"}`,
     );
     const sep = url.includes("?") ? "&" : "?";
     ws = new WebSocketImpl(`${url}${sep}model=${encodeURIComponent(model)}`, {

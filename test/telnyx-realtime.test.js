@@ -141,7 +141,7 @@ test("the log shows how long turn detection waited after the caller's last sound
 test("the call logs its OpenAI settings", async () => {
   const { session, ws, logs } = setup({ opts: { greeting: "", eagerness: "high", reasoning: "minimal" } });
   await waitFor(() => ws.sent.length >= 1);
-  assert.ok(logs.some((l) => l === "📞 OpenAI settings: gpt-realtime-2.1-mini, voice cedar, eagerness high, reasoning minimal, noise filter far_field"), logs.join("\n"));
+  assert.ok(logs.some((l) => l === "📞 OpenAI settings: gpt-realtime-2.1-mini, voice cedar, eagerness high, reasoning minimal, noise filter far_field, silent tool chains on"), logs.join("\n"));
   assert.deepEqual(ws.sent[0].session.reasoning, { effort: "minimal" });
   session.end("test", { hang: false });
 });
@@ -536,6 +536,21 @@ test("a direct tool answers without Alfred, and its result goes straight back", 
   const creates = ws.sent.filter((e) => e.type === "response.create");
   assert.equal(creates.length, 1);
   assert.deepEqual(creates[0].response, { metadata: { kind: "quiet" }, output_modalities: ["text"] }, "the reply after a quick tool is silent text");
+  session.end("test", { hang: false });
+});
+
+test("with quietChains off, the reply after a quick tool is plain audio", async () => {
+  const directTools = { defs: [], names: ["get_time"], call: async () => "Sunday 3:04 PM" };
+  const { session, ws, logs } = setup({ opts: { greeting: "", directTools, quietChains: false } });
+  await waitFor(() => ws.readyState === 1);
+  assert.ok(logs.some((l) => /silent tool chains off/.test(l)), logs.join("\n"));
+  ws.server({ type: "response.created", response: { id: "r1" } });
+  ws.server({ type: "response.function_call_arguments.done", name: "get_time", call_id: "c_t", arguments: "{}" });
+  await waitFor(() => ws.sent.some((e) => e.type === "conversation.item.create"));
+  ws.server({ type: "response.done", response: { id: "r1", status: "completed" } });
+  const creates = ws.sent.filter((e) => e.type === "response.create");
+  assert.equal(creates.length, 1);
+  assert.equal(creates[0].response, undefined, "a plain response.create: the session's audio");
   session.end("test", { hang: false });
 });
 

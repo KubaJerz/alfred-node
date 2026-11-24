@@ -628,6 +628,8 @@ answer, and an out-of-band audio response says it exactly. The caller's first
 reply in a turn ("Got it.") is still audio, and so is everything after
 `use_tools`. Talking over a chain cancels the quiet reply; the caller's own turn
 answers them. The silent text is logged as `🤫 Voice (silent):`.
+`VOICE_OPENAI_SILENT_CHAINS=0` turns this off (every reply audio, as before),
+to compare the two; the settings log line says which is on.
 
 ### Cost
 

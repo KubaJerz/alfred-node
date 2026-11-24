@@ -105,6 +105,8 @@ const VOICE_OPENAI = {
   reasoning: process.env.VOICE_OPENAI_REASONING || undefined,
   silenceMs: Number(process.env.VOICE_OPENAI_SILENCE_MS) || undefined,
   noise: process.env.VOICE_OPENAI_NOISE || undefined,
+  // "0": the reply after a quick tool is audio, not silent text (to compare).
+  quietChains: process.env.VOICE_OPENAI_SILENT_CHAINS !== "0",
   // The voice's own notion, calendar and get_time tools. "0" sends everything
   // through Alfred (use_tools) again.
   directTools: process.env.VOICE_OPENAI_DIRECT_TOOLS === "0" ? null : () =>
