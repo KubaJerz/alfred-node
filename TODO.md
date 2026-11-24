@@ -358,6 +358,65 @@ the IP, the machine, or stale cookies; it is how the automated Chrome looks.
       - Sources: telnyx.com/pricing/messaging/us,
         support.telnyx.com/en/articles/16624343-rcs-fees-and-charges,
         developers.telnyx.com/api-reference/rcs/send-an-rcs-message.
+- [ ] **PDFs from an iPhone can't reach Alfred by text (tested 2026-11-24).**
+      Alfred → iPhone PDF over MMS works (delivered and opened). iPhone →
+      Alfred never leaves the phone: Telnyx shows no inbound record. Apple's
+      Messages only attaches photos, video, audio and contact cards to a
+      green-bubble text; files go over iMessage or RCS only. Not a Telnyx or
+      carrier problem. Android (Google/Samsung Messages) can likely attach a
+      PDF to MMS within the carrier's ~1 MB cap, untested. For now: send PDFs
+      on Discord or by email, or screenshot the pages.
+      - RCS: the RBM inbound path accepts PDFs (Google `userFile`, Telnyx
+        `payload.body.user_file`, AWS lists `application/pdf`), but no doc or
+        first-hand report confirms an iPhone can attach a file in a business
+        RCS chat. Needs a real test if we ever build the RCS agent.
+- [ ] **Someday: blue-bubble iMessage (research 2026-11-24).** Would let the
+      iPhone send Alfred PDFs and any file. Options:
+      - **Mac mini + BlueBubbles Server** (recommended): used Apple Silicon
+        mini ~$150–350, ~7 W, free software, actively maintained. Dedicated
+        email-only Apple ID (a phone number needs a SIM in an iPhone, so the
+        Telnyx number can't be used). Webhook to `bot.js` on new messages,
+        REST API to fetch attachments and send. Data stays on our hardware.
+        Low ban risk for one person at low volume. Lighter fallback: `imsg`
+        (openclaw/imsg), attachment metadata only.
+      - **Hosted iMessage API** with a real number: Blooio $39/mo (free
+        20-message trial), Sendblue ~$100/mo. Grey area (vendor Mac/iPhone
+        farms), every message passes through them, a flagged line can change
+        number. PDF inbound unconfirmed — test on a trial first.
+      - **Ruled out:** Apple Messages for Business (needs an Apple-approved
+        MSP, enterprise-oriented, no bot-only deployments, customer-initiated
+        only); a macOS VM on this box (spoofed serials, fragile, against the
+        licence); Matrix bridges (still need a Mac); AirMessage (stalled);
+        pypush (no iMessage yet).
+      - Apple's iMessage terms bar commercial use; Beeper's Macs were cut off
+        in 2024. Keep Telnyx SMS/MMS as the fallback either way.
+      - Sources: docs.bluebubbles.app, github.com/openclaw/imsg,
+        blooio.com/integrations/api/pricing,
+        docs.sendblue.com/getting-started/receiving-messages,
+        register.apple.com/resources/messages/messaging-documentation,
+        developers.telnyx.com/docs/messaging/messages/receiving-rcs-webhooks.
+
+### Reminders
+
+- [ ] **Discuss: how to do reminders properly.** Added 2026-11-23, design not
+      started. Alfred has no reminder mechanism today: nothing in `bot.js` can
+      wake him at a set time, so "remind me at 5" has nowhere to go. Questions
+      to settle first:
+  - Where reminders live. Stay platform-agnostic: don't tie reminders to
+    one service. One idea: Alfred owns the source of truth and fires
+    reminders himself (cron jobs on this box), but there is still one place
+    to see them all. Also meet people in the app they already use: sync with
+    Google (Reminders now live in Google Tasks) and other popular calendars,
+    so a reminder made in either place shows up in both.
+  - What fires them: a timer in `bot.js`, cron, or something else. It has to
+    survive a restart and catch up on a reminder missed while the bot was
+    down.
+  - Which channel gets the reminder (Discord, SMS, a call), and whether that
+    depends on how urgent it is.
+  - Recurring reminders, snooze, and "done", and how to list or cancel them
+    by voice or chat.
+  - How it relates to the scheduled-job wrapper (Reliability) and the
+    someday todo store for Alfred himself.
 
 ## Someday / Maybe
 
