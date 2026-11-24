@@ -203,7 +203,8 @@ test("the prompt keeps the voice in character as Alfred", async () => {
   assert.match(file, /before a change with notion or calendar, first say just the\s+change/);
   assert.doesNotMatch(file, /Got it/);
   assert.match(file, /Say nothing\s+before\s+a read or get_time/);
-  assert.match(file, /When a change is done, say "Done\." and stop/);
+  assert.match(file, /if it worked and did what you said\s+you would, say only "Done\." and nothing else/);
+  assert.match(file, /If it failed, try to fix it\s+yourself/);
   assert.match(file, /Every use_tools result gets told/);
   assert.doesNotMatch(file, /Let me check/);
   assert.match(USE_TOOLS.description, /^Slow: say one short line first/);
