@@ -154,6 +154,40 @@ risky jobs to small least-privilege agents instead of widening his reach.
       runs as the same user. Real secrets go in a password manager or a
       root-owned file until the separate user exists.
 
+#### Phone and SMS (from the MMS review, 2026-11-23)
+
+SMS and MMS are not end to end encrypted: the carrier and Telnyx see every
+text and file, and Telnyx keeps them. Caller ID can be spoofed, so the
+allow list stops strangers, not a determined attacker. These close the gaps.
+
+- [ ] **Per-number permissions.** Today `SMS_ALLOWED_NUMBERS` is one tier: a
+      number in it can do anything Kuba can. Make it a table, so more people
+      can text Alfred, each with only what they need. For each number: may it
+      start a turn at all, send photos and files (MMS in), get files back (MMS
+      out), send voice messages, and which tools its turns may use (read-only,
+      calendar, mail…). Kuba's numbers keep full rights; a friend might get
+      text-only scheduling and nothing else. Ties into the verbal-consent list
+      the 10DLC campaign needs before Alfred texts anyone new.
+- [ ] **A PIN for risky actions by text and by call.** Sending mail,
+      deleting, buying, paying, or changing settings from SMS or a call needs
+      a spoken or texted PIN in the same turn. Closes caller-ID spoofing for
+      anything that matters. Same idea as the open point in
+      `docs/phone-design.md` for calls.
+- [ ] **Limit which files can go out by MMS.** `extractAttachments` takes any
+      path Alfred names, so a tricked turn could text `.env` or a token file,
+      in the clear, through the carrier. Allow only files under `agent/`
+      (dailies, screenshots, generated files) and never `agent/var/google/`,
+      `.env`, or dotfiles.
+- [ ] **Shorter MMS file links.** `MEDIA_TTL_MS` is 1 hour. Telnyx fetches in
+      seconds; cut to about 10 minutes, and drop a link after its first
+      successful fetch if Telnyx does not retry.
+- [ ] **No secrets by text.** A rule in `agent/SOUL.md`'s SMS section: never
+      text passwords, codes, ID numbers, or financial documents; say "sent in
+      Discord" instead.
+- [ ] **Treat text in photos as data.** An MMS photo or file is untrusted
+      content, like an email. Make sure the attachment block says so, so
+      instructions written in a picture never steer a turn.
+
 ## Next
 
 ### Phone — 2B on OpenAI
@@ -221,6 +255,36 @@ risky jobs to small least-privilege agents instead of widening his reach.
 - [ ] **Send Alfred the caller's own words** with each `use_tools` request,
       so a request the voice retold wrong can be checked against them.
 
+### Web access — debug Alfred's browser, find the best web tools for agents
+
+A big one. Alfred's headed Chrome (agent-browser, own profile,
+`AutomationControlled` off) gets bot-blocked by some big stores, and the block
+is disguised: patagonia.com (Akamai Bot Manager) serves a static "System
+maintenance is in progress" page, so Alfred told Kuba the site was down
+(2026-11-23). Facts so far: Kuba's Mac on the same public IP gets the real
+store; Alfred's Chrome, the same Chrome with a fresh empty profile, and curl
+all get the maintenance page, while Firefox on the box gets in. So it is not
+the IP, the machine, or stale cookies; it is how the automated Chrome looks.
+
+- [ ] **Patagonia as the test case.** Open the product page with (1) a plain
+      Chrome on the box, no automation, (2) Alfred's Chrome after clearing
+      only patagonia.com cookies, (3) whatever replaces it below. Pass = the
+      price shows.
+- [ ] **Research the field.** Search (X, GitHub, blogs) for how people give
+      agents reliable web access in 2026: stealth Chrome builds and CDP-leak
+      fixes (e.g. patchright, nodriver, camoufox), connecting to a real
+      everyday Chrome, hosted browser APIs (Browserbase, Browser Use cloud,
+      Anchor, Hyperbrowser, Steel), scraping/search APIs (Firecrawl, Exa,
+      Tavily, Jina reader), and the vendors' own agent-browsing products.
+      Compare cost, reliability against Akamai/Cloudflare/DataDome, login
+      handling, and privacy (who sees the pages and cookies).
+- [ ] **Pick a combination.** Likely tiers: a fetch/search API first, the
+      local browser for logged-in sites, a hosted stealth browser as the
+      fallback for blocked stores.
+- [ ] **Honesty rule now.** In the browser skill: a "maintenance", "access
+      denied" or challenge page on a site that is otherwise up means "this
+      site blocks my browser", not "the site is down"; fall back to search.
+
 ### Remote access to the box
 
 - [x] **Reach the machine from anywhere — Tailscale + SSH.** Done by
@@ -265,6 +329,94 @@ risky jobs to small least-privilege agents instead of widening his reach.
       MMS), decide who in a group may trigger a turn, and keep personal data
       out of replies others can see. Check Telnyx support for group MMS on our
       number first.
+- [ ] **Typing bubbles: "👀 On it" now, RCS later.** Plain SMS/MMS has no
+      typing indicator (Telnyx `POST /v2/messages` has no such field). Until
+      RCS, `smsTarget.typing()` sends one "👀 On it…" text when a turn is
+      still running after ~10 s (≈ $0.008 each).
+- [ ] **Someday: an RCS agent (research 2026-11-23).** RCS gives typing
+      bubbles (`agent_message.event.event_type: IS_TYPING` on
+      `POST /v2/messages/rcs`, needs an approved `agent_id`), read receipts,
+      a branded sender, and richer media. What it takes:
+      - A separate branded sender (agent id), not our 10DLC number; the number
+        can be the `sms_fallback`. A new thread on the phone.
+      - Paperwork: EIN (free, IRS), business website with privacy and terms,
+        business-domain email, 224×224 logo, 1440×448 banner, public demo
+        video. Aegis verifies identity (EIN ↔ legal name), then Google, then
+        each carrier one by one. Weeks to months. Sole proprietor is an
+        allowed legal type at Telnyx.
+      - Telnyx cost: $500 one-time T-Mobile/U.S. Cellular activation, $100/yr
+        vetting, **$100/month agent maintenance** (Telnyx's own fee), rich
+        text $0.0065 + carrier per segment, rich media $0.016 + carrier.
+        About $1,800 the first year.
+      - Others (unverified, mostly competitor blogs): Twilio reportedly no
+        monthly fee, $500 onboarding + $200/yr Aegis, ~$0.0083/segment;
+        Plivo ~$0.0077; SimplyRCS $0.0039 + $250 setup. Ask Twilio and Plivo
+        directly before choosing; RCS could live on one provider and SMS on
+        Telnyx.
+      - Unconfirmed: that Telnyx relays IS_TYPING end to end, and that an
+        iPhone shows a business agent's typing bubble.
+      - Sources: telnyx.com/pricing/messaging/us,
+        support.telnyx.com/en/articles/16624343-rcs-fees-and-charges,
+        developers.telnyx.com/api-reference/rcs/send-an-rcs-message.
+- [ ] **PDFs from an iPhone can't reach Alfred by text (tested 2026-11-24).**
+      Alfred → iPhone PDF over MMS works (delivered and opened). iPhone →
+      Alfred never leaves the phone: Telnyx shows no inbound record. Apple's
+      Messages only attaches photos, video, audio and contact cards to a
+      green-bubble text; files go over iMessage or RCS only. Not a Telnyx or
+      carrier problem. Android (Google/Samsung Messages) can likely attach a
+      PDF to MMS within the carrier's ~1 MB cap, untested. For now: send PDFs
+      on Discord or by email, or screenshot the pages.
+      - RCS: the RBM inbound path accepts PDFs (Google `userFile`, Telnyx
+        `payload.body.user_file`, AWS lists `application/pdf`), but no doc or
+        first-hand report confirms an iPhone can attach a file in a business
+        RCS chat. Needs a real test if we ever build the RCS agent.
+- [ ] **Someday: blue-bubble iMessage (research 2026-11-24).** Would let the
+      iPhone send Alfred PDFs and any file. Options:
+      - **Mac mini + BlueBubbles Server** (recommended): used Apple Silicon
+        mini ~$150–350, ~7 W, free software, actively maintained. Dedicated
+        email-only Apple ID (a phone number needs a SIM in an iPhone, so the
+        Telnyx number can't be used). Webhook to `bot.js` on new messages,
+        REST API to fetch attachments and send. Data stays on our hardware.
+        Low ban risk for one person at low volume. Lighter fallback: `imsg`
+        (openclaw/imsg), attachment metadata only.
+      - **Hosted iMessage API** with a real number: Blooio $39/mo (free
+        20-message trial), Sendblue ~$100/mo. Grey area (vendor Mac/iPhone
+        farms), every message passes through them, a flagged line can change
+        number. PDF inbound unconfirmed — test on a trial first.
+      - **Ruled out:** Apple Messages for Business (needs an Apple-approved
+        MSP, enterprise-oriented, no bot-only deployments, customer-initiated
+        only); a macOS VM on this box (spoofed serials, fragile, against the
+        licence); Matrix bridges (still need a Mac); AirMessage (stalled);
+        pypush (no iMessage yet).
+      - Apple's iMessage terms bar commercial use; Beeper's Macs were cut off
+        in 2024. Keep Telnyx SMS/MMS as the fallback either way.
+      - Sources: docs.bluebubbles.app, github.com/openclaw/imsg,
+        blooio.com/integrations/api/pricing,
+        docs.sendblue.com/getting-started/receiving-messages,
+        register.apple.com/resources/messages/messaging-documentation,
+        developers.telnyx.com/docs/messaging/messages/receiving-rcs-webhooks.
+
+### Reminders
+
+- [ ] **Discuss: how to do reminders properly.** Added 2026-11-23, design not
+      started. Alfred has no reminder mechanism today: nothing in `bot.js` can
+      wake him at a set time, so "remind me at 5" has nowhere to go. Questions
+      to settle first:
+  - Where reminders live. Stay platform-agnostic: don't tie reminders to
+    one service. One idea: Alfred owns the source of truth and fires
+    reminders himself (cron jobs on this box), but there is still one place
+    to see them all. Also meet people in the app they already use: sync with
+    Google (Reminders now live in Google Tasks) and other popular calendars,
+    so a reminder made in either place shows up in both.
+  - What fires them: a timer in `bot.js`, cron, or something else. It has to
+    survive a restart and catch up on a reminder missed while the bot was
+    down.
+  - Which channel gets the reminder (Discord, SMS, a call), and whether that
+    depends on how urgent it is.
+  - Recurring reminders, snooze, and "done", and how to list or cancel them
+    by voice or chat.
+  - How it relates to the scheduled-job wrapper (Reliability) and the
+    someday todo store for Alfred himself.
 
 ## Someday / Maybe
 
