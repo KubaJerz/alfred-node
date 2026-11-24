@@ -533,6 +533,79 @@ test("a direct tool answers without Alfred, and its result goes straight back", 
   assert.equal(calls[0].caller, "+15551234567");
   assert.ok(logs.some((l) => /📞 get_time \{\} → \d+ ms: Sunday 3:04 PM/.test(l)), logs.join("\n"));
   ws.server({ type: "response.done", response: { id: "r1", status: "completed" } });
-  assert.equal(ws.sent.filter((e) => e.type === "response.create").length, 1);
+  const creates = ws.sent.filter((e) => e.type === "response.create");
+  assert.equal(creates.length, 1);
+  assert.deepEqual(creates[0].response, { metadata: { kind: "quiet" }, output_modalities: ["text"] }, "the reply after a quick tool is silent text");
+  session.end("test", { hang: false });
+});
+
+// A quick tool whose result is back, so the next response.create is the quiet one.
+async function quietChain(over = {}) {
+  const directTools = {
+    defs: [{ type: "function", name: "notion", parameters: { type: "object", properties: {} } }],
+    names: ["notion"],
+    call: async () => "Done: removed \"Bread\".",
+  };
+  const t = setup({ opts: { greeting: "", directTools, ...over } });
+  await waitFor(() => t.ws.readyState === 1);
+  t.ws.server({ type: "response.created", response: { id: "r1" } });
+  t.ws.server({ type: "response.function_call_arguments.done", name: "notion", call_id: "c1", arguments: "{}" });
+  await waitFor(() => t.ws.sent.some((e) => e.type === "conversation.item.create"));
+  t.ws.server({ type: "response.done", response: { id: "r1", status: "completed" } });
+  t.ws.server({ type: "response.created", response: { id: "q1", metadata: { kind: "quiet" } } });
+  return t;
+}
+const say = (ws) => ws.sent.filter((e) => e.type === "response.create" && e.response?.metadata?.kind === "say");
+const message = (text) => ({ type: "message", role: "assistant", content: [{ type: "output_text", text }] });
+
+test("a quiet reply that calls another tool stays silent; its text is only logged", async () => {
+  const { session, ws, logs } = await quietChain();
+  ws.server({
+    type: "response.done",
+    response: { id: "q1", status: "completed", metadata: { kind: "quiet" }, output: [message("Now the eggs."), { type: "function_call", name: "notion", call_id: "c2" }] },
+  });
+  assert.equal(say(ws).length, 0);
+  assert.ok(logs.some((l) => l === "🤫 Voice (silent): Now the eggs."), logs.join("\n"));
+  session.end("test", { hang: false });
+});
+
+test("a quiet reply with no tool call is the answer, said out of band", async () => {
+  const { session, ws } = await quietChain();
+  ws.server({
+    type: "response.done",
+    response: { id: "q1", status: "completed", metadata: { kind: "quiet" }, output: [message("Done, bread is off the list.")] },
+  });
+  const [s] = say(ws);
+  assert.ok(s, "the answer is spoken");
+  assert.equal(s.response.conversation, "none");
+  assert.deepEqual(s.response.output_modalities, ["audio"]);
+  assert.equal(s.response.tool_choice, "none");
+  assert.match(s.response.instructions, /^Say exactly this and nothing else: "Done, bread is off the list\."$/);
+  session.end("test", { hang: false });
+});
+
+test("a quiet reply cut off by the caller says nothing", async () => {
+  const { session, ws } = await quietChain();
+  ws.server({
+    type: "response.done",
+    response: { id: "q1", status: "cancelled", metadata: { kind: "quiet" }, output: [message("Done, bread")] },
+  });
+  assert.equal(say(ws).length, 0);
+  session.end("test", { hang: false });
+});
+
+test("a quiet goodbye with end_call is said, then the call hangs up", async () => {
+  const { session, ws, hung } = await quietChain();
+  ws.server({ type: "response.function_call_arguments.done", name: "end_call", call_id: "c_end", arguments: "{}" });
+  ws.server({
+    type: "response.done",
+    response: { id: "q1", status: "completed", metadata: { kind: "quiet" }, output: [message("Goodbye."), { type: "function_call", name: "end_call", call_id: "c_end" }] },
+  });
+  assert.equal(say(ws).length, 1, "the goodbye is spoken");
+  await sleep(50);
+  assert.equal(hung(), 0, "not before the goodbye");
+  ws.server({ type: "response.created", response: { id: "s1", metadata: { kind: "say" } } });
+  ws.server({ type: "response.done", response: { id: "s1", status: "completed", metadata: { kind: "say" } } });
+  await waitFor(() => hung() === 1, 3000);
   session.end("test", { hang: false });
 });
