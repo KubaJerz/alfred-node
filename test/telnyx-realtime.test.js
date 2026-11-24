@@ -200,10 +200,10 @@ test("the prompt keeps the voice in character as Alfred", async () => {
   assert.equal(DEFAULT_INSTRUCTIONS, file);
   assert.match(file, /never mention a\s+tool/);
   assert.match(file, /Before use_tools, say one short line/);
-  assert.match(file, /before a change with notion or calendar, first say just the\s+change/);
-  assert.doesNotMatch(file, /Got it/);
+  assert.match(file, /Before a change with notion or calendar, say just "Got it\." or "Will do\."/);
+  assert.equal(file.match(/Got it/g).length, 1, '"Got it" only in the before-a-change rule');
   assert.match(file, /Say nothing\s+before\s+a read or get_time/);
-  assert.match(file, /if it worked and did what you said\s+you would, say only "Done\." and nothing else/);
+  assert.match(file, /When a change is done, say "Done\." and what changed in a few words/);
   assert.match(file, /If it failed, try to fix it\s+yourself/);
   assert.match(file, /Every use_tools result gets told/);
   assert.doesNotMatch(file, /Let me check/);

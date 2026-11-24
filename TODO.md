@@ -232,6 +232,11 @@ allow list stops strangers, not a determined attacker. These close the gaps.
     a half-remembered title (saves a ~0.4 s round trip).
   - [ ] Filler nudge: maybe 6 s instead of 8, and "this is the one time you
     may speak" if the new prompt makes it go quiet.
+- [ ] **Look for a voice model or serving setup that restates less.**
+      `gpt-realtime-2.1-mini` pads every result ("Done. Bread has been added
+      to your shopping list.") and narrates between tool calls whatever the
+      prompt says. Compare other realtime models, or a cascaded setup (STT →
+      LLM → TTS) where the spoken text can be trimmed before it is voiced.
 - [ ] **Part 2: one shared context for the voice and Alfred.** The voice
       starts every call blank; Alfred keeps one resumed Claude Code session.
       Goal: either side always knows what happened on the other, even when
