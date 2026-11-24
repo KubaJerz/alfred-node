@@ -25,7 +25,7 @@ export const NOTION_TOOL = {
   type: "function",
   name: "notion",
   description:
-    "Quick. Before a change, say just the change, like \"Adding bread.\"; nothing before a read. The user's Notion pages: lists (like the shopping list), notes " +
+    "Quick. Before a change, say just \"Got it.\" or \"Will do.\"; nothing before a read. The user's Notion pages: lists (like the shopping list), notes " +
     "and ideas. Read a page before changing it; " +
     "lines are numbered, and a change names the line number. To add under a section, give its line number as " +
     "'under', or 'after' to put them right after a line. add is for a few plain items; for a new sub-list, a " +
@@ -57,7 +57,7 @@ export const CALENDAR_TOOL = {
   type: "function",
   name: "calendar",
   description:
-    "Quick. Before a change, say just the change, like \"Adding bread.\"; nothing before a read. The user's Google Calendar. Times are Eastern, written like 2026-11-27T15:00; a date alone (2026-11-27) is all " +
+    "Quick. Before a change, say just \"Got it.\" or \"Will do.\"; nothing before a read. The user's Google Calendar. Times are Eastern, written like 2026-11-27T15:00; a date alone (2026-11-27) is all " +
     "day. Read a day before editing or deleting; events are numbered, and each change returns the day renumbered. " +
     "Never guess a time: ask. Colors: banana " +
     "school, tomato important personal, peacock general, grape AI Institute, basil Leo's group, tangerine Valafar lab.",
