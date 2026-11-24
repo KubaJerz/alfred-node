@@ -25,7 +25,7 @@ export const NOTION_TOOL = {
   type: "function",
   name: "notion",
   description:
-    "Quick. Before a change, say \"Got it,\" and the result; nothing before a read. The user's Notion pages: lists (like the shopping list), notes " +
+    "Quick. Before a change, say just the change, like \"Adding bread.\"; nothing before a read. The user's Notion pages: lists (like the shopping list), notes " +
     "and ideas. Read a page before changing it; " +
     "lines are numbered, and a change names the line number. To add under a section, give its line number as " +
     "'under', or 'after' to put them right after a line. add is for a few plain items; for a new sub-list, a " +
@@ -36,7 +36,7 @@ export const NOTION_TOOL = {
       action: { type: "string", enum: NOTION_ACTIONS },
       page: { type: "string", description: "The page title, e.g. Shopping list. For search: words in the title." },
       line: { type: "integer", description: "check, uncheck, edit, remove: the line number from the last read." },
-      under: { type: "integer", description: "add, write: put the new lines inside this line, at the end of it." },
+      under: { type: "integer", description: "add, write: put the new lines inside this line. Only when the caller names a section; otherwise leave it out and the lines go at the end of the page." },
       after: { type: "integer", description: "add, write: put the new lines right after this line, at its level." },
       markdown: {
         type: "string",
@@ -57,7 +57,7 @@ export const CALENDAR_TOOL = {
   type: "function",
   name: "calendar",
   description:
-    "Quick. Before a change, say \"Got it,\" and the result; nothing before a read. The user's Google Calendar. Times are Eastern, written like 2026-11-27T15:00; a date alone (2026-11-27) is all " +
+    "Quick. Before a change, say just the change, like \"Adding bread.\"; nothing before a read. The user's Google Calendar. Times are Eastern, written like 2026-11-27T15:00; a date alone (2026-11-27) is all " +
     "day. Read a day before editing or deleting; events are numbered, and each change returns the day renumbered. " +
     "Never guess a time: ask. Colors: banana " +
     "school, tomato important personal, peacock general, grape AI Institute, basil Leo's group, tangerine Valafar lab.",
@@ -238,6 +238,8 @@ export function makeVoiceTools({ notionRoutes, calendarRoutes, fetchBlockChildre
     return `Done: ${done}.\n\n${await readPage(page)}`;
   }
 
+  let lastPage = null; // the page this call last read or changed
+
   async function notion(a) {
     const action = a.action;
     if (action === "search") {
@@ -245,7 +247,10 @@ export function makeVoiceTools({ notionRoutes, calendarRoutes, fetchBlockChildre
       if (!results.length) return "Nothing shared matches that.";
       return results.map((r) => `${r.title}${r.object === "database" ? " (database: ask use_tools)" : ""}`).join("\n");
     }
-    const page = await findPage(a.page);
+    // The model often names the page on the read and drops it on the change
+    // that follows; the page it last read is the one it means.
+    const page = !a.page?.trim() && lastPage ? lastPage : await findPage(a.page);
+    lastPage = page;
     if (action === "read") return readPage(page);
 
     if (action === "add" || action === "write") {

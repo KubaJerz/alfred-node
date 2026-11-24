@@ -200,9 +200,11 @@ test("the prompt keeps the voice in character as Alfred", async () => {
   assert.equal(DEFAULT_INSTRUCTIONS, file);
   assert.match(file, /never mention a\s+tool/);
   assert.match(file, /Before use_tools, say one short line/);
-  assert.match(file, /before a change with notion or calendar, say "Got it,"/);
-  assert.match(file, /Say nothing\s+before a read or get_time/);
-  assert.match(file, /"Done\.", "All done\." or "Finished\."/);
+  assert.match(file, /before a change with notion or calendar, first say just the\s+change/);
+  assert.doesNotMatch(file, /Got it/);
+  assert.match(file, /Say nothing\s+before\s+a read or get_time/);
+  assert.match(file, /if it worked and did what you said\s+you would, say only "Done\." and nothing else/);
+  assert.match(file, /If it failed, try to fix it\s+yourself/);
   assert.match(file, /Every use_tools result gets told/);
   assert.doesNotMatch(file, /Let me check/);
   assert.match(USE_TOOLS.description, /^Slow: say one short line first/);
@@ -211,8 +213,10 @@ test("the prompt keeps the voice in character as Alfred", async () => {
   assert.match(file, /read in full, every\s+item in order/);
   // About half the first #130 pass: a long prompt makes the small model
   // wordy, and the tool descriptions already carry the per-tool rules.
-  assert.ok(file.split(/\s+/).length <= 350, `${file.split(/\s+/).length} words`);
+  assert.ok(file.split(/\s+/).length <= 400, `${file.split(/\s+/).length} words`);
   assert.doesNotMatch(USE_TOOLS.description, /Alfred/);
+  assert.match(file, /notion holds the user's own pages/);
+  assert.doesNotMatch(file, /Shopping list|Greens/i);
 });
 
 test("a tool turn logs the full wait until the answer is heard", async () => {

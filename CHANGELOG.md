@@ -5,6 +5,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
 
 ## [Unreleased]
 
+### Changed
+- 2B voice: when a result comes back and it worked as announced, it says only "Done."; on a failure it tries to fix it, and speaks only when the caller must answer or decide. Reasoning back to `low` in `.env` (medium cost 2–3 s per turn) (#140).
+- 2B voice, terse style: before a change it says just the change ("Adding bread."), and after, "Done." and nothing more unless the caller needs to know. notion's `under` is only for a section the caller names, so "add bread to the list" goes at the end of the page (#139).
+
+### Added
+- **"👀 On it…" for a slow text (#133).** SMS has no typing indicator. When a
+  turn from a text runs for 10 s with no reply, Alfred texts `👀 On it…` once,
+  so the owner does not send the text again. A fast turn sends nothing extra.
+  The ack never goes after the reply. Calls, Discord, and turns typed in the
+  mirror channel get no ack. Cost: about $0.008 per ack. New setting:
+  `SMS_ACK_MS` (default 10000, `0` turns it off).
+
+### Fixed
+- **A blocked site is not a site that is down (#136).** patagonia.com shows
+  Alfred's browser a fake "System maintenance is in progress" page, and he
+  told the owner the site was down. The browser skill now says: a
+  maintenance, "access denied" or "verify you are human" page on a big site
+  that otherwise seems up usually means a block. Alfred says "<site> blocks
+  my browser" and gets the facts from a web search or another retailer.
+
+### Fixed
+- 2B voice: the prompt says what each tool is for (notion is the user's pages: lists, notes, plans, ideas; calendar their events; get_time the time; use_tools the rest), and the use_tools description no longer claims "the user's own data", so a list read stops going the slow way (#138).
+- notion: a change that names no page goes to the page last read in this call, instead of failing with "say which page" (#138).
+
 ### Fixed
 - 2B voice: no narration around quick tools. The line-first rule is now use_tools only, the prompt says to call notion, calendar and get_time without a word first and to stop after "Done.", and each quick tool's description says so too (#130).
 - 2B voice prompt condensed to one rule per behaviour: the wait-filling bullet is gone (the code says "still on it" itself), "say nothing between tool calls" covers a read followed by a change, every example is a terse reply, and use_tools' description opens with "Slow: say one short line first" to mirror the quick tools' "Quick:" (#130).
