@@ -260,6 +260,13 @@ yet: the voice gets no briefing of recent chat. That is part 2 in `TODO.md`.
 `voice-tools.js`, exact-title page lookup and "read before write" are code too.
 Everything about how the voice talks is the prompt, so it is guidance.
 
+**Testing it without a phone.** `scripts/voice-eval.mjs` holds scripted calls
+with the same session code: `voice-eval/openai-call.js` stands in for Telnyx's
+media stream, `voice-eval/fakes.js` for Notion, the calendar and Alfred (the
+real `voice-tools.js` runs on top), `voice-eval/scenarios.js` holds the callers
+and their checks, and `voice-eval/score.js` scores each call. Dev-only: nothing
+in the running bot imports it. See `docs/voice-eval.md`.
+
 ## Inbound mail (Pub/Sub)
 
 The second way something enters the system. Gmail publishes a change

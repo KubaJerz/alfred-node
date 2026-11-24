@@ -232,6 +232,14 @@ allow list stops strangers, not a determined attacker. These close the gaps.
     a half-remembered title (saves a ~0.4 s round trip).
   - [ ] Filler nudge: maybe 6 s instead of 8, and "this is the one time you
     may speak" if the new prompt makes it go quiet.
+- [ ] **More engines for the voice eval (#151).** `scripts/voice-eval.mjs`
+      drives OpenAI Realtime only. Next, each as an engine with the same
+      scenarios and scoring: (1) a Claude "brain" (Haiku/Sonnet/Opus 5.5 with
+      the voice tools, text in and out) behind a speech front end such as
+      Telnyx's custom-LLM endpoint, which needs an Anthropic API key for real
+      latency; (2) Gemini Live; (3) GPT-Live (`gpt-live-1`, its own protocol);
+      (4) a robot call that dials a Telnyx assistant from our number and plays
+      the script, as the end-to-end check.
 - [ ] **Look for a voice model or serving setup that restates less.**
       `gpt-realtime-2.1-mini` pads every result ("Done. Bread has been added
       to your shopping list.") and narrates between tool calls whatever the
