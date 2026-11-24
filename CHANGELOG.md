@@ -6,6 +6,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning is [S
 ## [Unreleased]
 
 ### Added
+- `VOICE_OPENAI_SILENT_CHAINS=0` turns 2B's silent tool chains off, so every reply is audio again, to compare the two. The call's settings log line says which is on (#146).
 - **2B voice: silent tool chains (#144).** After a notion, calendar or get_time result, the next reply is text, not audio, so the steps between tool calls make no sound. When the model stops calling tools, its answer is spoken exactly. The narration between calls ("Let me double-check…") is logged as `🤫 Voice (silent):` instead of said.
 
 ### Changed
