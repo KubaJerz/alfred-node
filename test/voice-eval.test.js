@@ -44,6 +44,17 @@ test("the fake Notion's search is fuzzy, and a new page lands under its parent",
   assert.match(notion.dump().Home.join("\n"), /Think List/);
 });
 
+test("create with no parent makes the page in the home page, and a later add goes to it", async () => {
+  const notion = fakeNotion([{ title: "Teamspace Home" }, { title: "Shopping list", markdown: "- [ ] Milk", parent: "Teamspace Home" }]);
+  const tools = makeVoiceTools({ notionRoutes: notion.routes, calendarRoutes: {}, fetchBlockChildren: notion.fetchBlockChildren });
+  await tools.call("notion", { action: "read", page: "Shopping list" });
+  assert.equal(await tools.call("notion", { action: "create", text: "Think List" }), 'Done: made the page "Think List".');
+  assert.deepEqual(notion.dump()["Teamspace Home"], ["- 📄 Shopping list", "- 📄 Think List"]);
+  assert.match(await tools.call("notion", { action: "add", items: ["Why pay for anything?"] }), /^Done: added "Why pay for anything\?"/);
+  assert.deepEqual(notion.dump()["Think List"], ["Why pay for anything?"]);
+  assert.match(await tools.call("notion", { action: "create" }), /title as text/);
+});
+
 test("the fake calendar filters by range and refuses to delete an event with guests", async () => {
   const { calendar, tools } = world();
   const out = await tools.call("calendar", { action: "read", from: "2026-12-03" });

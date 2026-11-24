@@ -113,6 +113,10 @@ async function worker() {
     } catch (err) {
       console.log(`⚠️  ${name}: ${err.message}`);
       results.push({ id: s.id, name, error: err.message });
+      if (err.fatal) {
+        console.log("⛔ Stopping the run: every call after this would fail the same way.");
+        next = jobs.length;
+      }
     }
   }
 }

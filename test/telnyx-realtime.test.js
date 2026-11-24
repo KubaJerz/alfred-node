@@ -166,6 +166,14 @@ test("usage adds up and prices the mini model", () => {
   assert.ok(usageCost(t, "gpt-realtime-2.1") > usd);
 });
 
+test("the prompt opens with the date and time the call starts", async () => {
+  const { session, ws } = setup({ opts: { greeting: "", clock: () => new Date("2026-12-02T15:00:00Z") } });
+  await waitFor(() => ws.sent.length >= 1);
+  const { instructions } = ws.sent[0].session;
+  assert.match(instructions, /^It is Wednesday, December 2, 2026 at 10:00 AM \(Eastern\) as the call starts\.\n\nYou are Alfred/);
+  session.end("test", { hang: false });
+});
+
 test("on open: session.update, held caller audio, then the greeting", async () => {
   const { session, ws } = setup();
   session.onFrame({ event: "media", media: { track: "inbound", chunk: "1", payload: ulaw(20) } });

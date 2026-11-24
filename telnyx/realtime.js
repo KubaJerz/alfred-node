@@ -23,6 +23,7 @@
 import WebSocket from "ws";
 import { makePlayer, makeReorder } from "./pipeline.js";
 import { PHONE_RATE, mulawToLinear } from "./audio.js";
+import { timeNow } from "./voice-tools.js";
 
 export const REALTIME_URL = "wss://api.openai.com/v1/realtime";
 export const DEFAULT_MODEL = "gpt-realtime-2.1-mini";
@@ -56,11 +57,13 @@ export const DEFAULT_INSTRUCTIONS = `You are Alfred, the user's personal assista
 
 Your tools: notion holds the user's own pages, such as lists, notes, plans
 and ideas, which you can read and change. calendar holds their events.
-get_time gives the date and time. These are quick; use them yourself.
-use_tools is slower and does everything else: email, memory, files, the web.
+get_time gives the time. These are quick; use them yourself. use_tools
+reaches Alfred, who runs on the user's computer: email, memory, the web, and
+anything on the computer, like files or his to-do list. Anything on
+the computer, or local, goes to use_tools, never to notion.
 
-Your tools are part of you: never mention a tool, a system, a model or a
-company, and speak in the first person. Never make up the user's data, and
+Your tools are part of you: never mention a tool, system, model or company,
+and speak in the first person. Never make up the user's data, and
 never say something happened unless a tool said so. If asked whether you can
 do something, try it.
 
@@ -245,6 +248,9 @@ export function makeRealtimeSession({
   // again, as before, to compare the two.
   quietChains = true,
   greeting = GREETING,
+  // The date and time the prompt opens with. Without it the model guessed
+  // "Friday" a week off and booked it (voice eval, 2026-11-24).
+  clock = () => new Date(),
   updateMs = UPDATE_MS,
   markLateMs = MARK_LATE_MS,
   WebSocketImpl = WebSocket,
@@ -562,7 +568,8 @@ export function makeRealtimeSession({
     });
     ws.on("open", () => {
       if (ended) return ws.close();
-      send(sessionUpdate({ instructions, voice, eagerness, transcribeModel, reasoning, silenceMs, noise, tools: directTools?.defs }));
+      const today = `It is ${timeNow(clock())} as the call starts.`;
+      send(sessionUpdate({ instructions: `${today}\n\n${instructions || DEFAULT_INSTRUCTIONS}`, voice, eagerness, transcribeModel, reasoning, silenceMs, noise, tools: directTools?.defs }));
       for (const p of openQueue) send({ type: "input_audio_buffer.append", audio: p });
       openQueue = [];
       if (greeting) {

@@ -21,6 +21,7 @@ import { blockLine, markdownToBlocks } from "../notion/blocks.js";
 import { TIMEZONE } from "../google/calendar-rules.js";
 
 const NOTION_ACTIONS = ["search", "read", "add", "write", "check", "uncheck", "edit", "remove", "create"];
+export const DEFAULT_HOME_PAGE = "Teamspace Home";
 const CALENDAR_ACTIONS = ["read", "add", "edit", "delete"];
 const COLORS = ["banana", "tomato", "peacock", "grape", "basil", "tangerine"];
 
@@ -38,7 +39,10 @@ export const NOTION_TOOL = {
     type: "object",
     properties: {
       action: { type: "string", enum: NOTION_ACTIONS },
-      page: { type: "string", description: "The page title, e.g. Shopping list. For search: words in the title." },
+      page: {
+        type: "string",
+        description: "The page title, e.g. Shopping list. For search: words in the title. create: the page to put it inside, only if the caller names one; leave it out for a new page of its own.",
+      },
       lines: { type: "array", items: { type: "integer" }, description: "check, uncheck, remove: line numbers, one or many." },
       line: { type: "integer", description: "edit: the line number (or give its words as items)." },
       under: { type: "integer", description: "add, write: put the new lines inside this line. Only when the caller names a section; otherwise leave it out and the lines go at the end of the page." },
@@ -56,7 +60,7 @@ export const NOTION_TOOL = {
         items: { type: "string" },
         description: "add, create: the lines to add, one per item. check, uncheck, remove, edit: the lines' words, as the caller said them.",
       },
-      text: { type: "string", description: "edit: the line's new text. create: the new page's title." },
+      text: { type: "string", description: "edit: the line's new text. create: the new page's title (required)." },
     },
     required: ["action"],
   },
@@ -185,7 +189,17 @@ function eventLine(n, e) {
 
 // One call's tools. Page ids and the latest numbering live here, so they last
 // the call and no longer.
-export function makeVoiceTools({ notionRoutes, calendarRoutes, fetchBlockChildren, note = () => {}, now = () => new Date() }) {
+// homePage: where a new page goes when the caller names no parent. Notion lets
+// an internal integration create a page only inside a page shared with it, so
+// a "new page of its own" lives in the top shared page.
+export function makeVoiceTools({
+  notionRoutes,
+  calendarRoutes,
+  fetchBlockChildren,
+  note = () => {},
+  now = () => new Date(),
+  homePage = DEFAULT_HOME_PAGE,
+}) {
   const pages = new Map(); // lower-case title → { id, title }
   const reads = new Map(); // page id → numbered-line map from the latest read
   const nums = new Map(); // page id → the call's numbering for its lines
@@ -211,7 +225,7 @@ export function makeVoiceTools({ notionRoutes, calendarRoutes, fetchBlockChildre
   const C = (key, args) => route(calendarRoutes, key, args);
 
   async function findPage(name) {
-    if (!name?.trim()) throw new Error("say which page");
+    if (!name?.trim()) throw new Error("say which page, by its exact title");
     const key = name.trim().toLowerCase();
     if (pages.has(key)) return pages.get(key);
     // Exact title only. Notion's search is fuzzy and its index lags new pages,
@@ -335,6 +349,9 @@ export function makeVoiceTools({ notionRoutes, calendarRoutes, fetchBlockChildre
     }
     // The model often names the page on the read and drops it on the change
     // that follows; the page it last read is the one it means.
+    // A new page goes inside the page named, or else the home page, never
+    // the page last read.
+    if (action === "create") return create(a, await findPage(a.page?.trim() || homePage));
     const page = !a.page?.trim() && lastPage ? lastPage : await findPage(a.page);
     lastPage = page;
     if (action === "read") return readPage(page);
@@ -394,17 +411,22 @@ export function makeVoiceTools({ notionRoutes, calendarRoutes, fetchBlockChildre
       return wrote(page, `changed "${words(r.from)}" to "${words(r.to)}"`);
     }
 
-    if (action === "create") {
-      if (!a.text?.trim()) throw new Error("give the new page's title");
-      const items = (a.items || []).map(String).map((s) => s.trim()).filter(Boolean);
-      const r = await N("POST /notion/page", {
-        body: { page: page.id, title: a.text.trim(), markdown: items.map((i) => `- ${i}`).join("\n") || undefined },
-      });
-      pages.set(a.text.trim().toLowerCase(), { id: r.id, title: a.text.trim() }); // new pages are not searchable yet
-      note(`made the Notion page "${a.text.trim()}" under "${page.title}"`);
-      return `Done: made the page "${a.text.trim()}" under "${page.title}".`;
-    }
     throw new Error(`unknown action "${action}"`);
+  }
+
+  async function create(a, page) {
+    const title = a.text?.trim();
+    if (!title) throw new Error("give the new page's title as text");
+    const items = (a.items || []).map(String).map((s) => s.trim()).filter(Boolean);
+    const r = await N("POST /notion/page", {
+      body: { page: page.id, title, markdown: items.map((i) => `- ${i}`).join("\n") || undefined },
+    });
+    const made = { id: r.id, title };
+    pages.set(title.toLowerCase(), made); // new pages are not searchable yet
+    lastPage = made;
+    note(`made the Notion page "${title}" under "${page.title}"`);
+    const where = page.title.toLowerCase() === homePage.toLowerCase() ? "" : ` under "${page.title}"`;
+    return `Done: made the page "${title}"${where}.`;
   }
 
   const setRange = (from, to) => {

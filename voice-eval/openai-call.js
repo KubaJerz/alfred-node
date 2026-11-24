@@ -61,10 +61,14 @@ export async function runOpenAICall(scenario, {
   let ended = false;
   let endReason = "";
   let endedByAlfred = false;
+  let apiError = null;
 
   const log = (line) => {
     const t = at();
     logLines.push({ t, line });
+    // OpenAI refused the session (no credit, bad key, rate limit): the call
+    // measured nothing, so the run stops instead of scoring silence.
+    if (/^⚠️ {1,2}OpenAI Realtime/.test(line) && /credit|quota|insufficient|rate.?limit|invalid.*key|HTTP 4\d\d/i.test(line)) apiError ||= line;
     let m;
     if ((m = /^🗣️ {1,2}Voice: (.*)$/.exec(line))) events.push({ t, kind: "voice", text: m[1] });
     else if ((m = /^📞 Caller: (.*)$/.exec(line))) events.push({ t, kind: "heard", text: m[1] });
@@ -146,6 +150,7 @@ export async function runOpenAICall(scenario, {
     instructions,
     quietChains,
     directTools,
+    clock: () => new Date(EVAL_NOW.getTime() + at()),
   });
 
   // The phone line: a frame every 20 ms, the caller's words when there are
@@ -216,6 +221,7 @@ export async function runOpenAICall(scenario, {
     await sleep(300);
   }
 
+  if (apiError) throw Object.assign(new Error(apiError.replace(/^⚠️\s+/, "")), { fatal: true });
   return {
     id: scenario.id,
     model,
