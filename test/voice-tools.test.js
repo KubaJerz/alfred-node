@@ -136,7 +136,8 @@ test("add under a section uses its checkboxes, notes it, and renumbers", async (
   const out = await t.call("notion", { action: "add", page: "Shopping list", under: 2, items: ["Apples", "Flowers"] });
   assert.deepEqual(n.log.find((l) => l[0] === "append"), ["append", "b2", "- [ ] Apples\n- [ ] Flowers"]);
   assert.match(out, /^Done: added "Apples", "Flowers" under "Greens"\./);
-  assert.match(out, /5\.   - \[ \] Apples/);
+  // New lines get the next numbers; the old lines keep theirs.
+  assert.match(out, /7\.   - \[ \] Apples\n8\.   - \[ \] Flowers\n5\. - 📄 Old list\n6\. - \[ \] Eggs/);
   assert.deepEqual(notes, ['added "Apples", "Flowers" under "Greens" (Notion page "Shopping list")']);
 });
 
@@ -157,7 +158,7 @@ test("check, uncheck, edit and remove act on the numbered line", async () => {
   assert.deepEqual(n.log.at(-1), ["patch", "b1", { markdown: "- [x] Oat milk" }]);
   assert.match(edit, /changed "Milk" to "Oat milk"/);
   // Numbers are current after each write: Eggs is still line 6.
-  assert.match(await t.call("notion", { action: "remove", page: "Shopping list", line: 6 }), /removed "Eggs" \(it is in Notion's Trash\)/);
+  assert.match(await t.call("notion", { action: "remove", page: "Shopping list", line: 6 }), /^Done: removed "Eggs" \(in Notion's Trash\)\./);
   assert.deepEqual(n.log.at(-1), ["delete", "b7"]);
   assert.equal(notes.length, 4);
 });
@@ -165,7 +166,7 @@ test("check, uncheck, edit and remove act on the numbered line", async () => {
 test("a line number past the page is an error the voice can say", async () => {
   const { t } = tools();
   await t.call("notion", { action: "read", page: "Shopping list" });
-  assert.match(await t.call("notion", { action: "remove", page: "Shopping list", line: 40 }), /has no line 40/);
+  assert.match(await t.call("notion", { action: "remove", page: "Shopping list", line: 40 }), /didn't work: no line 40/);
 });
 
 test("search lists titles, and create makes a subpage", async () => {
@@ -196,7 +197,7 @@ test("calendar add, edit and delete; edits need a read; guests block a delete", 
   await t.call("calendar", { action: "read", from: "2026-11-27" });
   assert.match(await t.call("calendar", { action: "delete", event: 1 }), /deleted "Lab meeting".*Trash/);
   await t.call("calendar", { action: "read", from: "2026-11-27" });
-  assert.match(await t.call("calendar", { action: "delete", event: 2 }), /didn't work: has guests/);
+  assert.match(await t.call("calendar", { action: "delete", event: 2 }), /didn't work: "Holiday" was not deleted: has guests/);
   assert.equal(notes.length, 4);
 });
 
@@ -275,4 +276,85 @@ test("a change with no page goes to the page last read", async () => {
   await t.call("notion", { action: "read", page: "Shopping list" });
   assert.match(await t.call("notion", { action: "add", under: 2, items: ["Bread"] }), /Done: added "Bread" under "Greens"/);
   assert.deepEqual(n.log.at(-1), ["append", "b2", "- [ ] Bread"]);
+});
+
+test("remove takes several lines in one call; numbers from one read hold after each removal", async () => {
+  const { t, n, notes } = tools();
+  await t.call("notion", { action: "read", page: "Shopping list" });
+  const out = await t.call("notion", { action: "remove", page: "Shopping list", lines: [1, 6] });
+  assert.match(out, /^Done: removed "Milk", "Eggs" \(in Notion's Trash\)\./);
+  assert.deepEqual(n.log.filter((l) => l[0] === "delete"), [["delete", "b1"], ["delete", "b7"]]);
+  assert.match(out, /\n2\. - \[ \] Greens\n3\.   - \[ \] Sprite Zero/, "Greens keeps its number");
+  assert.equal(notes.length, 1, "one note for the batch");
+});
+
+test("a number from an earlier read still names the same line after other lines went", async () => {
+  const { t, n } = tools();
+  await t.call("notion", { action: "read", page: "Shopping list" });
+  await t.call("notion", { action: "remove", page: "Shopping list", lines: [1] });
+  await t.call("notion", { action: "remove", page: "Shopping list", lines: [6] });
+  assert.deepEqual(n.log.at(-1), ["delete", "b7"], "6 is still Eggs");
+});
+
+test("parallel removes from one read hit the right lines", async () => {
+  const { t, n } = tools();
+  await t.call("notion", { action: "read", page: "Shopping list" });
+  await Promise.all([
+    t.call("notion", { action: "remove", page: "Shopping list", lines: [6] }),
+    t.call("notion", { action: "remove", page: "Shopping list", lines: [1] }),
+  ]);
+  assert.deepEqual(n.log.filter((l) => l[0] === "delete"), [["delete", "b7"], ["delete", "b1"]]);
+});
+
+test("items name lines by their words, with no read first", async () => {
+  const { t, n } = tools();
+  const out = await t.call("notion", { action: "remove", page: "Shopping list", items: ["milk", "egg"] });
+  assert.match(out, /^Done: removed "Milk", "Eggs"/);
+  assert.deepEqual(n.log.filter((l) => l[0] === "delete"), [["delete", "b1"], ["delete", "b7"]]);
+});
+
+test("some found, some not: says what went, then what did not, in plain words", async () => {
+  const { t, n } = tools();
+  const out = await t.call("notion", { action: "remove", page: "Shopping list", items: ["milk", "caviar"] });
+  assert.match(out, /^Removed "Milk" \(in Notion's Trash\)\. No line says "caviar"\./);
+  assert.equal(n.log.filter((l) => l[0] === "delete").length, 1);
+});
+
+test("none found is an error; words that fit several lines ask which", async () => {
+  const { t, n } = tools();
+  assert.match(await t.call("notion", { action: "remove", page: "Shopping list", items: ["caviar"] }), /^That didn't work: no line says "caviar"\.$/);
+  await t.call("notion", { action: "add", page: "Shopping list", items: ["Shot glasses"] });
+  const out = await t.call("notion", { action: "remove", page: "Shopping list", items: ["shot"] });
+  assert.match(out, /"shot" could be "Shot cups" or "Shot glasses"; say which/);
+  assert.equal(n.log.filter((l) => l[0] === "delete").length, 0);
+});
+
+test("check and edit take items too", async () => {
+  const { t, n } = tools();
+  assert.match(await t.call("notion", { action: "check", page: "Shopping list", items: ["sprite zero", "eggs"] }), /^Done: checked off "Sprite Zero", "Eggs"\./);
+  assert.deepEqual(n.log.filter((l) => l[0] === "patch").map((l) => l[1]), ["b3", "b7"]);
+  assert.match(await t.call("notion", { action: "edit", page: "Shopping list", items: ["eggs"], text: "Brown eggs" }), /changed "Eggs" to "Brown eggs"/);
+});
+
+test("calendar delete takes several events; one blocked is said plainly", async () => {
+  const { t, c } = tools();
+  await t.call("calendar", { action: "read", from: "2026-11-27" });
+  const out = await t.call("calendar", { action: "delete", events: [1, 2] });
+  assert.match(out, /^Deleted "Lab meeting" \(in Google Calendar's Trash for 30 days\)\. "Holiday" was not deleted: has guests\./);
+  assert.deepEqual(c.log.filter((l) => l[0] === "delete"), [["delete", "e1"]]);
+});
+
+test("calendar match finds an event by its title on a day, with no read first", async () => {
+  const { t, c } = tools();
+  assert.match(await t.call("calendar", { action: "delete", match: "lab", from: "2026-11-27" }), /^Done: deleted "Lab meeting"/);
+  assert.deepEqual(c.log.filter((l) => l[0] === "delete"), [["delete", "e1"]]);
+  assert.match(await t.call("calendar", { action: "delete", match: "dentist", from: "2026-11-27" }), /didn't work: no event called "dentist" on 2026-11-27/);
+});
+
+test("calendar edit of several events changes one field on each, never their times", async () => {
+  const { t, c } = tools();
+  await t.call("calendar", { action: "read", from: "2026-11-27" });
+  assert.match(await t.call("calendar", { action: "edit", events: [1, 2], color: "tomato" }), /^Done: changed "Lab meeting", "Holiday" \(color tomato\)\./);
+  assert.equal(c.log.filter((l) => l[0] === "edit").length, 2);
+  assert.match(await t.call("calendar", { action: "edit", events: [1, 2], start: "2026-11-27T16:00" }), /change times one event at a time/);
 });

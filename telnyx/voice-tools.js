@@ -6,10 +6,13 @@
 // with Alfred, who reports the old value), no calendar guests, no deleting an
 // event that has guests.
 //
-// Lines and events are addressed by number. `read` numbers a page's lines (or a
-// day's events); a write names a number from the latest read in this call, and
-// the tool maps it to the real id. A write re-reads the page and returns the new
-// numbering, so the voice never works from numbers a write has shifted.
+// Lines and events are addressed by number, or by their words. `read` numbers a
+// page's lines (or a day's events), and a number holds for the whole call: a
+// line keeps it after other lines go or come, and a new line gets the next one.
+// So several numbers from one read stay right however many changes follow.
+// check, uncheck and remove take several lines in one call: every target is
+// found first, then the writes run one after another, and the page is re-read
+// once at the end.
 //
 // Every write calls `note` with one plain line, so Alfred learns what the voice
 // did without him (see bot.js).
@@ -25,17 +28,19 @@ export const NOTION_TOOL = {
   type: "function",
   name: "notion",
   description:
-    "Quick. Before a change, say just \"Got it.\" or \"Will do.\"; nothing before a read. The user's Notion pages: lists (like the shopping list), notes " +
-    "and ideas. Read a page before changing it; " +
-    "lines are numbered, and a change names the line number. To add under a section, give its line number as " +
-    "'under', or 'after' to put them right after a line. add is for a few plain items; for a new sub-list, a " +
-    "heading with items, or anything with structure, use write with markdown.",
+    "Quick. Before a change, say just \"Got it.\" or \"Will do.\"; nothing before a read. The user's Notion pages: lists, notes " +
+    "and ideas. Name the page by its exact title; search only when unsure of it. Lines are numbered, and a number " +
+    "stays the same all call. Several lines are one call: check, uncheck and remove take lines (numbers) or items " +
+    "(the lines' words, no read needed). To add under a section, give its line number as 'under', or 'after' to " +
+    "put them right after a line. add is for a few plain items; for a new sub-list, a heading with items, or " +
+    "anything with structure, use write with markdown.",
   parameters: {
     type: "object",
     properties: {
       action: { type: "string", enum: NOTION_ACTIONS },
       page: { type: "string", description: "The page title, e.g. Shopping list. For search: words in the title." },
-      line: { type: "integer", description: "check, uncheck, edit, remove: the line number from the last read." },
+      lines: { type: "array", items: { type: "integer" }, description: "check, uncheck, remove: line numbers, one or many." },
+      line: { type: "integer", description: "edit: the line number (or give its words as items)." },
       under: { type: "integer", description: "add, write: put the new lines inside this line. Only when the caller names a section; otherwise leave it out and the lines go at the end of the page." },
       after: { type: "integer", description: "add, write: put the new lines right after this line, at its level." },
       markdown: {
@@ -46,7 +51,11 @@ export const NOTION_TOOL = {
           "holds nothing: put its items after it, not indented. Don't repeat the line you write under. Example, under " +
           "Greens: '- Temporary list\\n  - [ ] Milk'.",
       },
-      items: { type: "array", items: { type: "string" }, description: "add, create: the lines to add, one per item." },
+      items: {
+        type: "array",
+        items: { type: "string" },
+        description: "add, create: the lines to add, one per item. check, uncheck, remove, edit: the lines' words, as the caller said them.",
+      },
       text: { type: "string", description: "edit: the line's new text. create: the new page's title." },
     },
     required: ["action"],
@@ -58,7 +67,8 @@ export const CALENDAR_TOOL = {
   name: "calendar",
   description:
     "Quick. Before a change, say just \"Got it.\" or \"Will do.\"; nothing before a read. The user's Google Calendar. Times are Eastern, written like 2026-11-27T15:00; a date alone (2026-11-27) is all " +
-    "day. Read a day before editing or deleting; events are numbered, and each change returns the day renumbered. " +
+    "day. Events are numbered, and a number stays the same all call. Several events are one call: edit and delete " +
+    "take events (numbers), or match (title words, with from as the day, no read needed). " +
     "Never guess a time: ask. Colors: banana " +
     "school, tomato important personal, peacock general, grape AI Institute, basil Leo's group, tangerine Valafar lab.",
   parameters: {
@@ -67,7 +77,8 @@ export const CALENDAR_TOOL = {
       action: { type: "string", enum: CALENDAR_ACTIONS },
       from: { type: "string", description: "read: first day (or time)." },
       to: { type: "string", description: "read: last day, if more than one." },
-      event: { type: "integer", description: "edit, delete: the event number from the last read." },
+      events: { type: "array", items: { type: "integer" }, description: "edit, delete: event numbers, one or many." },
+      match: { type: "string", description: "edit, delete: words of the event's title, instead of numbers. Give from too." },
       title: { type: "string" },
       start: { type: "string" },
       end: { type: "string" },
@@ -104,14 +115,23 @@ export function nextDay(date) {
   return d.toISOString().slice(0, 10);
 }
 
+// A number that holds for the whole call: an id keeps the number it got first.
+export const numbering = () => ({ byId: new Map(), next: 1 });
+const numberOf = (nums, id) => {
+  if (!nums.byId.has(id)) nums.byId.set(id, nums.next++);
+  return nums.byId.get(id);
+};
+
 // A page's blocks as numbered lines, children indented under their parent. A
-// subpage is one line; its own content is a different page.
-export function numberLines(blocks) {
+// subpage is one line; its own content is a different page. With `nums`, the
+// call's numbering, a line keeps its number across reads (gaps where lines
+// went); without it, lines are numbered from 1.
+export function numberLines(blocks, nums = numbering()) {
   const lines = [];
   const map = new Map();
   const walk = (bs, depth, parentId) => {
     for (const b of bs || []) {
-      const n = lines.length + 1;
+      const n = numberOf(nums, b.id);
       const text = blockLine(b);
       map.set(n, { id: b.id, type: b.type, text, children: b.children || [], parentId });
       lines.push(`${n}. ${"  ".repeat(depth)}${text}`);
@@ -139,6 +159,22 @@ const params = (o) =>
 // A line's words without its list marker, for notes and replies.
 const words = (line) => line.replace(/^[-*] (\[[ x]\] )?|^\d+\. |^#+ /, "").trim();
 const quoted = (list) => list.map((s) => `"${s}"`).join(", ");
+const cap = (t) => t.charAt(0).toUpperCase() + t.slice(1);
+const escape = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+// Whole words, with or without a plural s: "egg" finds "Eggs".
+const wordsRe = (term) => new RegExp(`\\b${escape(term.trim().replace(/s$/i, ""))}s?\\b`, "i");
+
+// Numbers from `lines` (or one `line`/`event`), as integers.
+const numbersIn = (many, one) => [...(Array.isArray(many) ? many : []), ...(one ? [one] : [])].map(Number);
+const termsIn = (items) => (Array.isArray(items) ? items : []).map(String).map((t) => t.trim()).filter(Boolean);
+
+// A batch's answer, in plain words: "Done: removed …" when every target went;
+// what went, then what did not, when some did; an error when none did.
+function batchAnswer(verb, done, missing, tail = "") {
+  if (!done.length) throw new Error(missing.join("; ") || `nothing to ${verb}`);
+  const what = `${verb} ${quoted(done)}${tail}`;
+  return { what, head: missing.length ? `${cap(what)}. ${missing.map(cap).join(". ")}.` : `Done: ${what}.` };
+}
 
 function eventLine(n, e) {
   const day = (iso) => (iso || "").slice(0, 10);
@@ -152,8 +188,19 @@ function eventLine(n, e) {
 export function makeVoiceTools({ notionRoutes, calendarRoutes, fetchBlockChildren, note = () => {}, now = () => new Date() }) {
   const pages = new Map(); // lower-case title → { id, title }
   const reads = new Map(); // page id → numbered-line map from the latest read
+  const nums = new Map(); // page id → the call's numbering for its lines
   let events = null; // number → event, from the latest calendar read
+  const eventNums = numbering(); // event id → its number, for the whole call
   let range = null; // the latest read's { from, to }, re-read after a change
+
+  // One tool call at a time: parallel calls from one reply would otherwise
+  // re-read and write the same page at once.
+  let busy = Promise.resolve();
+  const serial = (fn) => (a) => {
+    const p = busy.then(() => fn(a));
+    busy = p.catch(() => {});
+    return p;
+  };
 
   const route = async (routes, key, args) => {
     const r = await routes[key]({ params: new URLSearchParams(), body: {}, ...args });
@@ -185,7 +232,8 @@ export function makeVoiceTools({ notionRoutes, calendarRoutes, fetchBlockChildre
   }
 
   async function readPage(page) {
-    const numbered = numberLines(await fetchBlockChildren(page.id));
+    if (!nums.has(page.id)) nums.set(page.id, numbering());
+    const numbered = numberLines(await fetchBlockChildren(page.id), nums.get(page.id));
     reads.set(page.id, numbered.map);
     return `Page "${page.title}":\n${numbered.text}`;
   }
@@ -196,6 +244,44 @@ export function makeVoiceTools({ notionRoutes, calendarRoutes, fetchBlockChildre
     const line = map.get(Number(n));
     if (!line) throw new Error(`"${page.title}" has no line ${n}`);
     return line;
+  }
+
+  // The line a caller's words name. An exact match wins (the first one not
+  // already taken, so "bread" twice takes both copies); else the one line that
+  // has the words. Several → ask which.
+  function matchLine(page, term, taken) {
+    const open = [...reads.get(page.id).values()].filter((l) => !taken.has(l.id) && l.type !== "child_page");
+    const plain = (l) => words(l.text).toLowerCase();
+    const exact = open.find((l) => plain(l) === term.toLowerCase());
+    if (exact) return { line: exact };
+    const re = wordsRe(term);
+    const near = open.filter((l) => re.test(plain(l)));
+    if (near.length === 1) return { line: near[0] };
+    if (near.length) return { why: `"${term}" could be ${near.slice(0, 3).map((l) => `"${words(l.text)}"`).join(" or ")}; say which` };
+    return { why: `no line says "${term}"` };
+  }
+
+  // The lines a change names, by number and by words, all found before
+  // anything changes. Words need no read; numbers need one from this call.
+  async function targets(page, a) {
+    const numbers = numbersIn(a.lines, a.line);
+    const terms = termsIn(a.items);
+    if (!numbers.length && !terms.length) throw new Error("say which lines, by number or by their words");
+    if (numbers.length && !reads.has(page.id)) throw new Error(`read "${page.title}" first, or give the lines' words as items`);
+    if (!reads.has(page.id)) await readPage(page);
+    const found = new Map();
+    const missing = [];
+    for (const n of numbers) {
+      const line = reads.get(page.id).get(n);
+      if (line) found.set(line.id, line);
+      else missing.push(`no line ${n}`);
+    }
+    for (const t of terms) {
+      const r = matchLine(page, t, found);
+      if (r.line) found.set(r.line.id, r.line);
+      else missing.push(r.why);
+    }
+    return { lines: [...found.values()], missing };
   }
 
   // Where new lines go: inside a line (`under`), right after one (`after`), or
@@ -271,27 +357,41 @@ export function makeVoiceTools({ notionRoutes, calendarRoutes, fetchBlockChildre
       return wrote(page, `added ${what}${spot.where}`);
     }
 
-    if (action === "check" || action === "uncheck") {
-      const line = lineOf(page, a.line);
-      const r = await N("PATCH /notion/block", { params: params({ id: line.id }), body: { checked: action === "check" } });
-      return wrote(page, `${action === "check" ? "checked off" : "unchecked"} "${words(r.to)}"`);
+    if (action === "check" || action === "uncheck" || action === "remove") {
+      const { lines, missing } = await targets(page, a);
+      const done = [];
+      let under = false;
+      for (const line of lines) {
+        try {
+          if (action === "remove") {
+            const r = await N("DELETE /notion/block", { params: params({ id: line.id }) });
+            done.push(words(r.removed));
+            under ||= r.hasChildren;
+          } else {
+            const r = await N("PATCH /notion/block", { params: params({ id: line.id }), body: { checked: action === "check" } });
+            done.push(words(r.to));
+          }
+        } catch (err) {
+          missing.push(`"${words(line.text)}" failed: ${err.message}`);
+        }
+      }
+      const verb = { check: "checked off", uncheck: "unchecked", remove: "removed" }[action];
+      const tail = action === "remove" ? `${under ? (done.length > 1 ? " and the lines under them" : " and the lines under it") : ""} (in Notion's Trash)` : "";
+      const { what, head } = batchAnswer(verb, done, missing, tail);
+      note(`${what} (Notion page "${page.title}")`);
+      return `${head}\n\n${await readPage(page)}`;
     }
 
     if (action === "edit") {
-      const line = lineOf(page, a.line);
       if (!a.text?.trim()) throw new Error("give the new text");
+      const { lines, missing } = await targets(page, { line: a.line, items: (a.items || []).slice(0, 1) });
+      if (!lines.length) throw new Error(missing.join("; "));
+      const line = lines[0];
       // Keep the line's kind: a checkbox stays a checkbox, with its tick.
       const ticked = /^- \[x\]/.test(line.text);
       const markdown = line.type === "to_do" ? `- [${ticked ? "x" : " "}] ${a.text.trim()}` : lineFor(a.text, line.type);
       const r = await N("PATCH /notion/block", { params: params({ id: line.id }), body: { markdown } });
       return wrote(page, `changed "${words(r.from)}" to "${words(r.to)}"`);
-    }
-
-    if (action === "remove") {
-      const line = lineOf(page, a.line);
-      const r = await N("DELETE /notion/block", { params: params({ id: line.id }) });
-      const extra = r.hasChildren ? " and the lines under it" : "";
-      return wrote(page, `removed "${words(r.removed)}"${extra} (it is in Notion's Trash)`);
     }
 
     if (action === "create") {
@@ -307,34 +407,67 @@ export function makeVoiceTools({ notionRoutes, calendarRoutes, fetchBlockChildre
     throw new Error(`unknown action "${action}"`);
   }
 
-  function eventOf(n) {
-    if (!events) throw new Error("read the day first, so the event numbers are current");
-    const e = events.get(Number(n));
-    if (!e) throw new Error(`there is no event ${n} in the last read`);
-    return e;
-  }
+  const setRange = (from, to) => {
+    const end = to ? (to.length === 10 ? nextDay(to) : to) : from.length === 10 ? nextDay(from) : undefined;
+    range = { from, to: end, label: to ? `${from} to ${to}` : from };
+  };
 
   async function readRange() {
     const r = await C("GET /calendar/events", { params: params({ from: range.from, to: range.to, limit: 50 }) });
-    events = new Map(r.events.map((e, i) => [i + 1, e]));
+    events = new Map();
     if (!r.events.length) return `Nothing on the calendar from ${range.label}.`;
-    return r.events.map((e, i) => eventLine(i + 1, e)).join("\n");
+    return r.events
+      .map((e) => {
+        const n = numberOf(eventNums, e.id);
+        events.set(n, e);
+        return eventLine(n, e);
+      })
+      .join("\n");
   }
 
-  // After a change: what happened, and the last-read days renumbered, so the
-  // next edit or delete works without another read.
-  async function changed(done) {
-    events = null; // the numbering has moved
-    if (!range) return `Done: ${done}.`;
-    return `Done: ${done}.\n\n${await readRange()}`;
+  // The events a change names: numbers from a read, or `match`, title words
+  // on the day `from` (read here, no separate read needed).
+  async function eventTargets(a) {
+    if (a.match?.trim()) {
+      if (a.from) {
+        setRange(a.from, a.to);
+        await readRange();
+      }
+      if (!events) throw new Error("give from, the day of the event");
+      const re = wordsRe(a.match);
+      const hits = [...events.values()].filter((e) => re.test(e.summary || ""));
+      if (!hits.length) throw new Error(`no event called "${a.match.trim()}" on ${range.label}`);
+      if (hits.length > 1 && !numbersIn(a.events, a.event).length) {
+        const which = [...events.entries()].filter(([, e]) => hits.includes(e)).map(([n, e]) => eventLine(n, e));
+        throw new Error(`"${a.match.trim()}" could be:\n${which.join("\n")}\nsay which by number`);
+      }
+      return { list: hits, missing: [] };
+    }
+    const numbers = numbersIn(a.events, a.event);
+    if (!numbers.length) throw new Error("say which event, by number or match");
+    if (!events) throw new Error("read the day first, or give match and from");
+    const list = [];
+    const missing = [];
+    for (const n of numbers) {
+      const e = events.get(n);
+      if (e && !list.includes(e)) list.push(e);
+      else if (!e) missing.push(`no event ${n}`);
+    }
+    return { list, missing };
+  }
+
+  // After a change: what happened, and the last-read days again (numbers kept),
+  // so the next edit or delete works without another read.
+  async function changed(head) {
+    if (!range) return head;
+    return `${head}\n\n${await readRange()}`;
   }
 
   async function calendar(a) {
     const action = a.action;
     if (action === "read") {
       if (!a.from) throw new Error("say which day");
-      const to = a.to ? (a.to.length === 10 ? nextDay(a.to) : a.to) : a.from.length === 10 ? nextDay(a.from) : undefined;
-      range = { from: a.from, to, label: a.to ? `${a.from} to ${a.to}` : a.from };
+      setRange(a.from, a.to);
       return readRange();
     }
 
@@ -346,34 +479,53 @@ export function makeVoiceTools({ notionRoutes, calendarRoutes, fetchBlockChildre
       await C("POST /calendar/events", { body });
       const done = `added "${a.title}" on ${a.start}${a.start.length > 10 ? `–${end.slice(11, 16)}` : " (all day)"}`;
       note(`${done} to the calendar`);
-      return changed(done);
+      return changed(`Done: ${done}.`);
     }
 
     if (action === "edit") {
-      const e = eventOf(a.event);
       const body = {};
       for (const [k, v] of [["summary", a.title], ["start", withSeconds(a.start)], ["end", withSeconds(a.end)], ["location", a.location], ["color", a.color]]) {
         if (v) body[k] = v;
       }
       if (!Object.keys(body).length) throw new Error("say what to change");
-      await C("PATCH /calendar/events", { params: params({ id: e.id }), body });
-      const done = `changed "${e.summary}" (${Object.entries(body).map(([k, v]) => `${k} ${v}`).join(", ")})`;
-      note(`${done} on the calendar`);
-      return changed(done);
+      const { list, missing } = await eventTargets(a);
+      if (list.length > 1 && (body.start || body.end)) throw new Error("change times one event at a time");
+      const done = [];
+      for (const e of list) {
+        try {
+          await C("PATCH /calendar/events", { params: params({ id: e.id }), body });
+          done.push(e.summary);
+        } catch (err) {
+          missing.push(`"${e.summary}" failed: ${err.message}`);
+        }
+      }
+      const fields = Object.entries(body).map(([k, v]) => `${k} ${v}`).join(", ");
+      const { what, head } = batchAnswer("changed", done, missing, ` (${fields})`);
+      note(`${what} on the calendar`);
+      return changed(head);
     }
 
     if (action === "delete") {
-      const e = eventOf(a.event);
-      await C("DELETE /calendar/events", { params: params({ id: e.id }) });
-      note(`deleted "${e.summary}" (${e.start}) from the calendar`);
-      return changed(`deleted "${e.summary}" (it is in Google Calendar's Trash for 30 days)`);
+      const { list, missing } = await eventTargets(a);
+      const done = [];
+      for (const e of list) {
+        try {
+          await C("DELETE /calendar/events", { params: params({ id: e.id }) });
+          done.push(e.summary);
+        } catch (err) {
+          missing.push(`"${e.summary}" was not deleted: ${err.message}`);
+        }
+      }
+      const { what, head } = batchAnswer("deleted", done, missing, " (in Google Calendar's Trash for 30 days)");
+      note(`${what} from the calendar`);
+      return changed(head);
     }
     throw new Error(`unknown action "${action}"`);
   }
 
   const run = {
-    notion,
-    calendar,
+    notion: serial(notion),
+    calendar: serial(calendar),
     get_time: async () => timeNow(now()),
   };
 
