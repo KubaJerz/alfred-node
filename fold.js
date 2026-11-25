@@ -403,10 +403,20 @@ export async function readTemplate(agentDir) {
 // Read/Write/Edit, as the /clear pass always ran. Resolves { ok, detail }, and
 // never rejects: a failed run is a result. ok needs exit 0 and a JSON result
 // that is not an error, so a lapsed login does not count as a fold.
+//
+// --tools is what holds a run to those three. With
+// --dangerously-skip-permissions, --allowedTools holds nothing back: a test
+// fold of a copy of the real notes wrote them with Bash and python. The
+// transcript carries outside text (mail, web pages), so a run gets no shell
+// and no MCP server (--strict-mcp-config).
 export function claudeRunner({ cwd, timeoutMs = FOLD_TIMEOUT_MS, spawnImpl = spawn } = {}) {
   return (prompt) =>
     new Promise((resolve) => {
-      const args = ["-p", prompt, "--output-format", "json", "--allowedTools", "Read,Write,Edit", "--dangerously-skip-permissions"];
+      const args = [
+        "-p", prompt, "--output-format", "json",
+        "--tools", "Read,Write,Edit", "--strict-mcp-config",
+        "--allowedTools", "Read,Write,Edit", "--dangerously-skip-permissions",
+      ];
       let proc;
       try {
         // stdin is /dev/null: an open pipe makes the CLI wait 3 s for input.

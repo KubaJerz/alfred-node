@@ -596,8 +596,11 @@ test("the runner runs claude -p in the agent dir with Read/Write/Edit, as the /c
   assert.deepEqual(res, { ok: true, detail: "Added two entries." });
   const [call] = fake.calls;
   assert.equal(call.cmd, "claude");
+  // --tools, not --allowedTools, is what keeps Bash and MCP servers out of a
+  // run that skips permissions.
   assert.deepEqual(call.args, [
     "-p", "the prompt", "--output-format", "json",
+    "--tools", "Read,Write,Edit", "--strict-mcp-config",
     "--allowedTools", "Read,Write,Edit", "--dangerously-skip-permissions",
   ]);
   assert.equal(call.opts.cwd, "/r/agent");
@@ -775,7 +778,9 @@ test("fold-day.mjs --nightly runs claude in the agent dir and moves the watermar
 
   const ok = cli(w, "fold-day.mjs", ["--nightly", "--agent-dir", w.agentDir, "--state-dir", w.stateDir]);
   assert.equal(ok.status, 0, ok.stdout + ok.stderr);
-  assert.match(ok.calls, new RegExp(`cwd=${w.agentDir} args=7`));
+  assert.match(ok.calls, new RegExp(`cwd=${w.agentDir} args=10`));
+  assert.match(ok.calls, /flag=--tools\n/);
+  assert.match(ok.calls, /flag=--strict-mcp-config\n/);
   assert.match(ok.calls, /flag=--allowedTools\n/);
   assert.match(ok.calls, /flag=--dangerously-skip-permissions\n/);
   assert.ok((await readWatermark(w.stateDir)).through);
