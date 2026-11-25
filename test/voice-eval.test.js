@@ -129,6 +129,16 @@ test("the common checks catch a false 'I can't' and a repeated failed call", () 
   assert.equal(fine.passed, fine.total);
 });
 
+test("the calendar scenarios take Mom said the British way, as Mum", () => {
+  const named = (id, text) =>
+    scoreChecks(record([text]), SCENARIOS.find((s) => s.id === id)).checks.find((c) => c.name === "named gym, mom/mum").pass;
+  for (const id of ["calendar-tomorrow", "multi-request"]) {
+    assert.equal(named(id, "The gym at 7, then a call with your mum at 6."), true, id);
+    assert.equal(named(id, "The gym at 7, then the call with Mom at 6."), true, id);
+    assert.equal(named(id, "Just the gym at 7."), false, id);
+  }
+});
+
 test("the transcript shows the script, what was heard, and tool calls in order", () => {
   const r = record(["Got it."], [{ t: 1500, kind: "use_tools", request: "Read TODO.md", reply: "1. Reminders" }]);
   const text = transcript(r);

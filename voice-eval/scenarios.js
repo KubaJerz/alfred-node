@@ -119,8 +119,8 @@ const AFTER_EARLIER_CALL = `- [ ] Milk
   - [ ] Kale
 - [ ] Eggs`;
 // Another list with a Greens section, where spinach could go just as well.
-// Without the briefing, "the list we were adding to" could be either; only the
-// last call says which.
+// Without the briefing, "the greens on the list we were adding to" could be
+// either; only the last call says which.
 const GARDEN = { title: "Garden list", markdown: "- [ ] Tomatoes\n- [ ] Greens\n  - [ ] Lettuce\n- [ ] Basil", parent: "Teamspace Home" };
 // The usual world, with one page's text changed, and more pages after it.
 const worldWith = (title, markdown, more = []) => ({
@@ -198,9 +198,11 @@ const check = {
     test: (r) => words.every((w) => findLine(r, title, w)?.checked === true),
   }),
   said: (label, re) => ({ name: `said ${label}`, test: (r) => re.test(allVoice(r)) }),
+  // A word can give its spellings, "mom/mum": the voice talks like a British
+  // butler, so "Call with Mom" can come out as "your mum".
   saidAll: (words) => ({
     name: `named ${words.join(", ")}`,
-    test: (r) => words.every((w) => new RegExp(`\\b${w}`, "i").test(allVoice(r))),
+    test: (r) => words.every((w) => new RegExp(`\\b(?:${w.replace(/\//g, "|")})`, "i").test(allVoice(r))),
   }),
   askedAlfred: (label, re = /./) => ({
     name: `asked Alfred (use_tools) ${label}`,
@@ -313,7 +315,7 @@ export const SCENARIOS = [
     id: "calendar-tomorrow",
     goal: "Say what's on the calendar tomorrow (Thursday): gym at 7 and the call with Mom at 6 PM.",
     turns: [{ say: "What do I have tomorrow?" }],
-    checks: [check.saidAll(["gym", "mom"]), check.notAskedAlfred()],
+    checks: [check.saidAll(["gym", "mom/mum"]), check.notAskedAlfred()],
   },
   {
     id: "calendar-add",
@@ -331,7 +333,7 @@ export const SCENARIOS = [
     id: "multi-request",
     goal: "Add bread to the shopping list AND say what's on tomorrow's calendar, in one turn.",
     turns: [{ say: "Add bread to the shopping list, and what's on my calendar tomorrow?" }],
-    checks: [check.added("Shopping list", "Bread"), check.saidAll(["gym", "mom"])],
+    checks: [check.added("Shopping list", "Bread"), check.saidAll(["gym", "mom/mum"])],
   },
   {
     id: "time",
@@ -447,12 +449,15 @@ export const SCENARIOS = [
     checks: [check.said("pasta", /\bpasta\b/i), check.noTools()],
   },
   {
-    // Call A added kale under Greens; call B goes on with the same list.
+    // Call A added kale under Greens; call B goes on with the same list. The
+    // caller names the section: the notion tool nests a line only then, so
+    // "add spinach to the list we were adding to" rightly put it at the end
+    // of the list. Which list's greens, only the briefing says.
     id: "brief-last-call",
-    goal: "A call 20 minutes ago added a Greens section with kale to the shopping list. Now 'add spinach to the list we were adding to': add spinach to the shopping list (not the Garden list, which has Greens too), under Greens with the kale, directly in Notion, without asking Alfred or the caller which list.",
+    goal: "A call 20 minutes ago added a Greens section with kale to the shopping list. Now 'add spinach to the greens on the list we were adding to': add spinach under Greens on the shopping list, with the kale (not the Garden list, which has Greens too), directly in Notion, without asking Alfred or the caller which list.",
     briefing: { ...BACKGROUND, rows: [...MORNING, ...EARLIER_CALL] },
     world: worldWith("Shopping list", AFTER_EARLIER_CALL, [GARDEN]),
-    turns: [{ say: "Add spinach to the list we were adding to." }],
+    turns: [{ say: "Add spinach to the greens on the list we were adding to." }],
     checks: [
       // The Garden list has Greens too: only the briefing says which list.
       check.briefed("the last call's kale under Greens", 'you did (on the call): added "Kale" under "Greens" (Notion page "Shopping list")'),

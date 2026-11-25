@@ -149,8 +149,12 @@ caller's next turn and never speaks up about it:
 
 ```
 [Meanwhile, by text, the user said: "Thoughts on these?", and sent a photo. You answer it by text, not on the call: ...]
-[You replied by text: "Those are Hoka Clifton 9s." Do not repeat it unless the caller asks.]
+[You replied by text: "Those are Hoka Clifton 9s." It counts as already said on this call: do not repeat it unless the caller asks, and then answer from it, with no tool.]
 ```
+
+The reply says it counts as already said on this call, the words that
+`phone-voice.md` lets go without a tool. Told only "do not repeat it", the
+voice asked `use_tools` what a photo showed after the reply had said it.
 
 It is not a `session.update`, which would replace the instructions and their
 cached prefix. The call never gets its own rows (`via: "call"`). `/clear`
@@ -173,10 +177,11 @@ It is Wednesday, December 2, 2026 at 10:00 AM (Eastern) as the call starts.
 About the user, your memory, the daily notes of yesterday and today, and what
 was said in the last 6 hours, and before that when no note has it yet: by
 text, by SMS and on earlier calls. ...
-It is background only. What it says counts as already said: it needs no tool,
-even about the user's own life. For anything it does not say, and anything to
-change, still use your tools. Do not recite it, or bring it up, unless the
-caller asks.
+It is background only. What it says counts as already said on this call, even
+about the user's own life: when the caller asks about it, answer from it at
+once, with no tool, not even a look at the calendar or notion to check. For
+anything it does not say, and anything to change, still use your tools. Do not
+recite it, or bring it up, unless the caller asks.
 
 [About the user]                         USER.md
 [Your memory]                            MEMORY.md
@@ -191,7 +196,10 @@ The guidance lives in the code that builds the block, not in
 `phone-voice.md`, which stays under its 400-word cap. That prompt sends "the
 user's own life" to a tool and lets only "what was already said on this call"
 go without one; the head says the background is the second, so "when's the
-dentist?" answers from an SMS in it instead of reading the calendar.
+dentist?" answers from an SMS in it instead of reading the calendar. "It needs
+no tool" alone was not enough: in the voice eval the voice still read the
+calendar first, to check, and answered about 3 s later, so the head rules out
+even a look.
 
 **What the messages show.** The ledger rows of the last 6 hours, and older
 ones that no fold has put in a note yet, as for a new session

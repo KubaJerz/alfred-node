@@ -58,8 +58,10 @@ node scripts/voice-eval.mjs --compare agent/var/voice-eval/runs/<a> agent/var/vo
   briefing gets the prompt alone, so the other scenarios run as before. The
   `brief-*` scenarios use it: pasta texted an hour before ("what am I making
   tonight?", no tool), a call 20 minutes before that put kale under Greens
-  ("add spinach to the list we were adding to": spinach under Greens, no
-  Alfred; a Garden list has Greens too, so only the briefing says which), and
+  ("add spinach to the greens on the list we were adding to": spinach under
+  Greens, no Alfred; a Garden list has Greens too, so only the briefing says
+  which; the caller names the section, since the notion tool nests a line only
+  then), and
   the dentist by SMS ("when's the dentist?": Tuesday at 3, no tool, though the
   calendar does not have it).
 - **Control runs.** `--no-briefing` starts each call with the prompt alone (as

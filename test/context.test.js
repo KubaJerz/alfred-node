@@ -519,10 +519,16 @@ test("a live update tells the call what was texted, and the reply, as Alfred's o
     liveUpdate(sms),
     '[Meanwhile, by SMS, the user said: "I\'m out of eggs, remind me later". You answer it by SMS, not on the call: do not act on it or bring it up unless the caller asks.]',
   );
-  assert.equal(liveUpdate(reply), '[You replied by SMS: "Noted. I\'ll remind you this evening." Do not repeat it unless the caller asks.]');
+  // The reply counts as said on the call, in the voice prompt's own words, so
+  // the voice answers from it instead of asking again (live-photo).
+  assert.equal(
+    liveUpdate(reply),
+    '[You replied by SMS: "Noted. I\'ll remind you this evening." It counts as already said on this call: ' +
+      "do not repeat it unless the caller asks, and then answer from it, with no tool.]",
+  );
   // Discord is "by text", and so is an older row with no via.
   assert.match(liveUpdate({ dir: "in", via: "discord", text: "hi" }), /^\[Meanwhile, by text, the user said: "hi"\. You answer it by text, not on the call/);
-  assert.match(liveUpdate({ dir: "out", kind: "reply", text: "Hello!" }), /^\[You replied by text: "Hello!" Do not repeat it/);
+  assert.match(liveUpdate({ dir: "out", kind: "reply", text: "Hello!" }), /^\[You replied by text: "Hello!" It counts as already said on this call/);
   // One persona: no other assistant, model or service.
   for (const text of [liveUpdate(sms), liveUpdate(reply), CLEARED_UPDATE]) {
     for (const word of ["voice", "OpenAI", "Claude", "model", "assistant", "Alfred"]) {
@@ -550,7 +556,7 @@ test("a file is named by its kind, never sent, and the call is told not to guess
   // An older row has only the count.
   assert.match(liveUpdate({ dir: "in", text: "see attached", attachments: 2 }), /"see attached", and sent 2 files\. .*You have not seen the files yet/);
   // Alfred's reply says how many files went with it.
-  assert.equal(liveUpdate({ dir: "out", via: "discord", kind: "reply", text: "Here you go.", files: 2 }), '[You replied by text, with 2 files: "Here you go." Do not repeat it unless the caller asks.]');
+  assert.match(liveUpdate({ dir: "out", via: "discord", kind: "reply", text: "Here you go.", files: 2 }), /^\[You replied by text, with 2 files: "Here you go\." It counts as already said on this call/);
   assert.equal(liveUpdate({ dir: "out", via: "discord", kind: "reply", text: "", files: 1 }), "[You replied by text with a file and no words.]");
 });
 
@@ -682,7 +688,12 @@ test("the call's briefing: the prompt, then one headed background block: USER, M
   // prompt sends "the user's own life" to a tool and lets only "what was
   // already said on this call" go without one: the head puts the background
   // with the second, by name, so the two never pull apart (brief-dentist).
-  assert.match(b.background, /It is background only\. What it says counts as already said: it needs no tool, even about the user's own life\. For anything it does not say, and anything to change, still use your tools\. Do not recite it, or bring it up, unless the caller asks\./);
+  // And it rules out a look to check: "needs no tool" alone still read the
+  // calendar first.
+  assert.match(
+    b.background,
+    /It is background only\. What it says counts as already said on this call, even about the user's own life: when the caller asks about it, answer from it at once, with no tool, not even a look at the calendar or notion to check\. For anything it does not say, and anything to change, still use your tools\. Do not recite it, or bring it up, unless the caller asks\./,
+  );
   const voicePrompt = readFileSync(path.join(REPO, "agent", "phone-voice.md"), "utf8").replace(/\s+/g, " ");
   assert.match(voicePrompt, /The user's own life, anything to do, and anything current go to a tool\. What was already said on this call needs no tool\./, "the rule the head answers");
   assert.match(b.background, /"You" in it is you, on every channel\./);

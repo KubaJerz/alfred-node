@@ -468,7 +468,14 @@ export function liveUpdate(row, { lineChars = LINE_MAX_CHARS } = {}) {
   if (FAILED.has(row.kind)) return `[Your reply ${where} to that failed: the user got an error, not an answer.]`;
   const sent = row.files > 0 ? some(row.files, "file") : "";
   if (!words) return sent ? `[You replied ${where} with ${sent} and no words.]` : null;
-  return `[You replied ${where}${sent ? `, with ${sent}` : ""}: ${stop(words)} Do not repeat it unless the caller asks.]`;
+  // In the prompt's own words, the reply is already said on the call, so the
+  // voice answers from it. Told only not to repeat it, the voice asked
+  // use_tools what a photo showed when the reply had said it (live-photo in
+  // the voice eval, 2 calls of 3).
+  return (
+    `[You replied ${where}${sent ? `, with ${sent}` : ""}: ${stop(words)} ` +
+    "It counts as already said on this call: do not repeat it unless the caller asks, and then answer from it, with no tool.]"
+  );
 }
 
 // While a 2B call is live: each row written elsewhere goes into the call as
@@ -507,14 +514,18 @@ const NOTE_CUT = "(The start of this note is left out.)";
 // of it. That prompt sends "the user's own life" to a tool, and lets only what
 // was already said on the call go without one. So the head says, in the
 // prompt's own words, which of the two the background is: otherwise "when's
-// the dentist?" reads the calendar instead of the SMS that says it. No line
-// names a model, a service or another assistant.
+// the dentist?" reads the calendar instead of the SMS that says it. "Needs no
+// tool" alone was not enough: the voice still read the calendar first, to
+// check, and answered 3 s later (brief-dentist in the voice eval, 3 calls of
+// 3). So it says to answer at once, without even a look. No line names a
+// model, a service or another assistant.
 const briefingHead = (hours) =>
   [
     "=== BACKGROUND: WHAT YOU KNOW FROM BEFORE THIS CALL ===",
     `About the user, your memory, the daily notes of yesterday and today, and what was said in the last ${plural(hours, "hour")}, ` +
       'and before that when no note has it yet: by text, by SMS and on earlier calls. "You" in it is you, on every channel.',
-    "It is background only. What it says counts as already said: it needs no tool, even about the user's own life. " +
+    "It is background only. What it says counts as already said on this call, even about the user's own life: " +
+      "when the caller asks about it, answer from it at once, with no tool, not even a look at the calendar or notion to check. " +
       "For anything it does not say, and anything to change, still use your tools. " +
       "Do not recite it, or bring it up, unless the caller asks.",
   ].join("\n");
