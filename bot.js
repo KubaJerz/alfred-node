@@ -110,7 +110,14 @@ const VOICE_OPENAI = {
   // The voice's own notion, calendar and get_time tools. "0" sends everything
   // through Alfred (use_tools) again.
   directTools: process.env.VOICE_OPENAI_DIRECT_TOOLS === "0" ? null : () =>
-    makeVoiceTools({ notionRoutes: NOTION_ROUTES, calendarRoutes: GOOGLE_ROUTES, fetchBlockChildren, note: notePhoneAction }),
+    makeVoiceTools({
+      notionRoutes: NOTION_ROUTES,
+      calendarRoutes: GOOGLE_ROUTES,
+      fetchBlockChildren,
+      note: notePhoneAction,
+      // Where "make a new page" puts it when no page is named (a shared page).
+      homePage: process.env.VOICE_NOTION_HOME || undefined,
+    }),
   // "0" turns off the caller transcript in the log (it costs a little).
   ...(process.env.VOICE_OPENAI_TRANSCRIBE === "0" ? { transcribeModel: "" } : {}),
 };
