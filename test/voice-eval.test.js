@@ -55,6 +55,16 @@ test("create with no parent makes the page in the home page, and a later add goe
   assert.match(await tools.call("notion", { action: "create" }), /title as text/);
 });
 
+test("a tick with no page finds the page that has the items, else lists the recent pages", async () => {
+  const { notion, tools } = world();
+  assert.match(await tools.call("notion", { action: "check", items: ["kale", "eggs"] }), /^Done: checked off "Kale", "Eggs"/);
+  assert.deepEqual(notion.lines("Shopping list").filter((l) => l.checked).map((l) => l.text), ["- [x] Kale", "- [x] Eggs"]);
+
+  const fresh = world();
+  assert.match(await fresh.tools.call("notion", { action: "check", items: ["caviar"] }), /say which page.*Recent pages: "Home", "Shopping list"/);
+  assert.match(await fresh.tools.call("notion", { action: "add", items: ["Bread"] }), /Recent pages/);
+});
+
 test("the fake calendar filters by range and refuses to delete an event with guests", async () => {
   const { calendar, tools } = world();
   const out = await tools.call("calendar", { action: "read", from: "2026-12-03" });

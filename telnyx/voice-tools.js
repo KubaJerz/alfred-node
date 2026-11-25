@@ -245,6 +245,28 @@ export function makeVoiceTools({
     return page;
   }
 
+  // No page named and none used yet this call ("tick off limes and kefir"):
+  // the recent page that has the most of the items, if one clearly does; else
+  // the recent titles, so the next call can name one instead of asking the caller.
+  async function guessPage(a) {
+    const { results } = await N("GET /notion/search", { params: params({ q: "", type: "page", limit: 8 }) });
+    const recent = results.filter((r) => r.object !== "database").map((r) => ({ id: r.id, title: r.title }));
+    const terms = termsIn(a.items);
+    if (terms.length && ["check", "uncheck", "remove"].includes(a.action)) {
+      const candidates = recent.slice(0, 5);
+      await Promise.all(candidates.map((p) => readPage(p)));
+      const scored = candidates
+        .map((p) => ({ p, n: terms.filter((t) => matchLine(p, t, new Set()).line).length }))
+        .sort((x, y) => y.n - x.n);
+      if (scored[0]?.n && scored[0].n > (scored[1]?.n || 0)) {
+        pages.set(scored[0].p.title.toLowerCase(), scored[0].p);
+        return scored[0].p;
+      }
+    }
+    const titles = recent.map((p) => `"${p.title}"`).join(", ");
+    throw new Error(`say which page, by its exact title${titles ? `. Recent pages: ${titles}` : ""}`);
+  }
+
   async function readPage(page) {
     if (!nums.has(page.id)) nums.set(page.id, numbering());
     const numbered = numberLines(await fetchBlockChildren(page.id), nums.get(page.id));
@@ -352,7 +374,7 @@ export function makeVoiceTools({
     // A new page goes inside the page named, or else the home page, never
     // the page last read.
     if (action === "create") return create(a, await findPage(a.page?.trim() || homePage));
-    const page = !a.page?.trim() && lastPage ? lastPage : await findPage(a.page);
+    const page = a.page?.trim() ? await findPage(a.page) : lastPage || (await guessPage(a));
     lastPage = page;
     if (action === "read") return readPage(page);
 
