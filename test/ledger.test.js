@@ -391,3 +391,81 @@ test("readFrom waits for an append that started before it, so it never misses th
   await written;
   assert.deepEqual((await read).rows.map((r) => r.text), ["said just now"]);
 });
+
+// ── The emitter: a reader that must know at once ────────────────────────────
+
+test("subscribe hears each row as written, in file order, src filled in; the stop ends it", async () => {
+  const { file, ledger } = setup({ now: () => Date.parse("2026-11-24T15:00:00.000Z") });
+  const heard = [];
+  const stop = ledger.subscribe((ev) => heard.push(ev));
+  const written = await ledger.append({ dir: "in", via: "discord", text: "one" });
+  // Two appends at once still reach the subscriber in the order of the file.
+  await Promise.all([ledger.append({ dir: "out", via: "discord", kind: "reply", text: "two" }), ledger.append(callRow({ type: "start", ...CALL }))]);
+  assert.deepEqual(heard.map((e) => e.type), ["row", "row", "row"]);
+  assert.deepEqual(heard[0].row, { ...written, src: "chat" });
+  assert.deepEqual(heard.map((e) => e.row.ts), lines(file).map((r) => r.ts));
+  assert.equal(heard[2].row.src, "call");
+  stop();
+  stop(); // a second stop is harmless
+  await ledger.append({ dir: "in", text: "after the stop" });
+  assert.equal(heard.length, 3);
+});
+
+test("one function subscribed twice hears each row twice, and each stop ends one", async () => {
+  const { ledger } = setup();
+  const heard = [];
+  const fn = (ev) => heard.push(ev.row.text);
+  const first = ledger.subscribe(fn);
+  ledger.subscribe(fn);
+  await ledger.append({ dir: "in", text: "a" });
+  first();
+  await ledger.append({ dir: "in", text: "b" });
+  assert.deepEqual(heard, ["a", "a", "b"]);
+});
+
+test("a row the disk refused is not told", async () => {
+  const ledger = makeLedger({ file: path.join(tmp(), "no-such-dir", "messages.jsonl"), logsDir: tmp(), log: { error: () => {} } });
+  const heard = [];
+  ledger.subscribe((ev) => heard.push(ev));
+  assert.equal(await ledger.append({ dir: "in", text: "lost" }), null);
+  assert.deepEqual(heard, []);
+});
+
+test("archive is told once the live file is empty, with the archive path or null; a row after it is told after it", async () => {
+  const { file, ledger } = setup();
+  const heard = [];
+  ledger.subscribe((ev) => heard.push(ev.type === "archive" ? { ...ev, left: readFileSync(file, "utf8") } : ev.row.text));
+  await ledger.append({ dir: "in", text: "before" });
+  const archivePath = await ledger.archive();
+  await ledger.append({ dir: "in", text: "after" });
+  assert.deepEqual(heard, ["before", { type: "archive", path: archivePath, left: "" }, "after"]);
+  // /clear on an empty file archives nothing, and is still told: it ran.
+  writeFileSync(file, "");
+  assert.equal(await ledger.archive(), null);
+  assert.deepEqual(heard.at(-1), { type: "archive", path: null, left: "" });
+});
+
+test("a subscriber that throws or rejects is logged; the row is still written, and the others still hear it", async () => {
+  const errors = [];
+  const { file, ledger } = setup({ log: { error: (m) => errors.push(m) } });
+  const heard = [];
+  ledger.subscribe(() => {
+    throw new Error("boom");
+  });
+  ledger.subscribe(async () => {
+    throw new Error("late boom");
+  });
+  ledger.subscribe((ev) => heard.push(ev.type === "row" ? ev.row.text : ev.type));
+  const row = await ledger.append({ dir: "in", text: "still here" });
+  assert.equal(row.text, "still here");
+  assert.deepEqual(lines(file).map((r) => r.text), ["still here"]);
+  assert.ok(await ledger.archive(), "the archive went too");
+  await new Promise((r) => setImmediate(r)); // the rejections are caught a tick later
+  assert.deepEqual(heard, ["still here", "archive"]);
+  assert.deepEqual(errors.sort(), [
+    "⚠️  A ledger subscriber failed on archive: boom",
+    "⚠️  A ledger subscriber failed on archive: late boom",
+    "⚠️  A ledger subscriber failed on row: boom",
+    "⚠️  A ledger subscriber failed on row: late boom",
+  ]);
+});

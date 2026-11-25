@@ -19,7 +19,7 @@ import { resolveRonnieLabels } from "./ronnie/labels.js";
 import { ensureLabels } from "./google/gmail-labels.js";
 import { dailyDir, dailyNotePath, attachmentName, buildAttachmentBlock } from "./dailies.js";
 import { makeLedger, inboundRow, callRow, toolRow } from "./ledger.js";
-import { makeCatchUp, sessionContext } from "./context.js";
+import { makeCatchUp, sessionContext, liveFeed } from "./context.js";
 import { ensureWatermark } from "./fold.js";
 import { parseClearCommand } from "./commands.js";
 import { transcribe, transcriptionAvailable } from "./voice/transcribe.js";
@@ -124,6 +124,10 @@ const VOICE_OPENAI = {
   // "0" turns off the caller transcript (it costs a little): in the log, and
   // the caller's lines in messages.jsonl, so the call keeps only the voice's.
   ...(process.env.VOICE_OPENAI_TRANSCRIBE === "0" ? { transcribeModel: "" } : {}),
+  // A message sent by text or SMS while a call is live, and Alfred's reply to
+  // it, go into the call as they are written, with no reply asked (liveFeed in
+  // context.js). "0" keeps the call to what is said on it.
+  feed: process.env.VOICE_OPENAI_LIVE === "0" ? null : ({ push }) => liveFeed({ ledger, push }),
 };
 // The pipeline speaks Alfred's reply sentence by sentence while he writes it.
 // "0" makes it wait for the whole reply, as before.
@@ -190,6 +194,7 @@ const LAST_DREAM_FILE = path.join(STATE_DIR, "last-dream");
 // per line, both inbound (user → bot) and outbound (bot → user). This is the
 // bot's OWN log, separate from Claude Code's per-session .jsonl files.
 // ledger.js owns the file: it writes the rows, archives them, and reads them.
+// It also tells a live 2B call each new row as it is written (VOICE_OPENAI.feed).
 const CHAT_LOG = path.join(STATE_DIR, "messages.jsonl");
 
 // On /clear, the live transcript is archived under LOGS_DIR, and FOLD_SCRIPT

@@ -1,6 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "events";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { makeLedger, callRow, inboundRow } from "../ledger.js";
+import { liveFeed, CLEARED_UPDATE } from "../context.js";
 import {
   makeRealtimeSession,
   sessionUpdate,
@@ -802,4 +807,132 @@ test("an onCallEvent that throws or rejects is logged, and the call goes on", as
       ["start", "line", "line", "end"],
     );
   }
+});
+
+// ── The live feed ───────────────────────────────────────────────────────────
+
+// The texts of the system items sent to OpenAI.
+const systemItems = (ws) =>
+  ws.sent.filter((e) => e.type === "conversation.item.create" && e.item?.role === "system").map((e) => e.item.content[0].text);
+const asItem = (text) => ({ type: "conversation.item.create", item: { type: "message", role: "system", content: [{ type: "input_text", text }] } });
+
+test("the feed starts with the call's id and caller, and stops once when the call ends", async () => {
+  const started = [];
+  let stops = 0;
+  const feed = (who) => {
+    started.push(who);
+    return () => stops++;
+  };
+  const { session, ws } = setup({ opts: { greeting: "", feed } });
+  assert.equal(started.length, 1);
+  assert.equal(started[0].callId, "v3:abc");
+  assert.equal(started[0].caller, "+15551234567");
+  assert.equal(typeof started[0].push, "function");
+  await waitFor(() => ws.readyState === 1);
+  assert.equal(stops, 0);
+  session.end("call hung up", { hang: false });
+  session.end("again", { hang: false });
+  assert.equal(stops, 1);
+});
+
+test("a push before the socket opens is held, then goes in right after the session.update", async () => {
+  let push;
+  const feed = (f) => {
+    push = f.push;
+    f.push('[Meanwhile, by text, the user said: "one".]');
+    return () => {};
+  };
+  const { session, ws, logs } = setup({ opts: { feed } });
+  push('[You replied by text: "two"]');
+  assert.equal(ws.sent.length, 0, "nothing goes before the socket is open");
+  await waitFor(() => ws.sent.length >= 4);
+  assert.deepEqual(ws.types().slice(0, 4), ["session.update", "conversation.item.create", "conversation.item.create", "response.create"]);
+  assert.deepEqual(ws.sent[1], asItem('[Meanwhile, by text, the user said: "one".]'));
+  assert.deepEqual(ws.sent[2], asItem('[You replied by text: "two"]'));
+  assert.match(ws.sent[3].response.instructions, new RegExp(GREETING), "the only response is the greeting");
+  assert.ok(logs.includes('📞 Live update for the call (held until the socket opens): [Meanwhile, by text, the user said: "one".]'), logs.join("\n"));
+  session.end("test", { hang: false });
+});
+
+test("a push during the call is a system item and nothing more: no response.create, no session.update", async () => {
+  let push;
+  const { session, ws } = setup({ opts: { greeting: "", feed: (f) => ((push = f.push), () => {}) } });
+  await waitFor(() => ws.sent.length >= 1);
+  push('[Meanwhile, by SMS, the user said: "eggs".]');
+  assert.deepEqual(ws.sent.at(-1), asItem('[Meanwhile, by SMS, the user said: "eggs".]'));
+  // While a response runs, the item goes in and the response is left alone.
+  ws.server({ type: "response.created", response: { id: "r1" } });
+  push('[You replied by SMS: "ok"]');
+  ws.server({ type: "response.done", response: { id: "r1", status: "completed" } });
+  push("  "); // no words: nothing
+  assert.deepEqual(systemItems(ws), ['[Meanwhile, by SMS, the user said: "eggs".]', '[You replied by SMS: "ok"]']);
+  assert.deepEqual(ws.types().filter((t) => t !== "conversation.item.create"), ["session.update"], "no response asked, none cut, settings unchanged");
+  session.end("test", { hang: false });
+});
+
+test("after the call ends, a push is dropped, and what was held never goes", async () => {
+  let push;
+  const { session, ws, logs } = setup({ opts: { greeting: "", feed: (f) => ((push = f.push), () => {}) } });
+  push("[held]");
+  session.end("call hung up", { hang: false }); // before the socket opened
+  await sleep(10); // the socket opens, and the call closes it at once
+  push("[too late]");
+  assert.deepEqual(ws.sent, []);
+  assert.equal(logs.filter((l) => /Live update/.test(l)).length, 1);
+});
+
+test("a feed that throws at the start, or whose stop throws, is logged, and the call goes on", async () => {
+  const fails = setup({ opts: { greeting: "", feed: () => { throw new Error("no ledger"); } } });
+  await waitFor(() => fails.ws.sent.length >= 1);
+  assert.equal(fails.ws.sent[0].type, "session.update");
+  assert.ok(fails.logs.includes("⚠️  The call's live feed did not start: no ledger"), fails.logs.join("\n"));
+  fails.ws.server({ type: "response.function_call_arguments.done", name: "use_tools", call_id: "c1", arguments: '{"request":"today"}' });
+  await waitFor(() => fails.turns.length === 1);
+  fails.session.end("test", { hang: false });
+  assert.equal(fails.ended(), 1);
+
+  const stuck = setup({ opts: { greeting: "", feed: () => () => { throw new Error("already gone"); } } });
+  await waitFor(() => stuck.ws.readyState === 1);
+  stuck.session.end("call hung up", { hang: false });
+  assert.equal(stuck.ended(), 1, "the call still ended");
+  assert.ok(stuck.logs.includes("⚠️  The call's live feed did not stop: already gone"), stuck.logs.join("\n"));
+});
+
+test("through a real ledger: a text during the call reaches the voice, its own lines never do, /clear tells it to forget", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "alfred-live-"));
+  const ledger = makeLedger({ file: path.join(dir, "messages.jsonl"), logsDir: path.join(dir, "logs") });
+  const writes = [];
+  // As bot.js wires it: the call writes its own rows, and the feed tells it the rest.
+  const { session, ws } = setup({
+    opts: {
+      greeting: "",
+      feed: ({ push }) => liveFeed({ ledger, push }),
+      onCallEvent: (ev) => {
+        const row = callRow(ev);
+        if (row) writes.push(ledger.append(row));
+      },
+    },
+  });
+  await waitFor(() => ws.sent.length >= 1);
+  ws.server({ type: "conversation.item.input_audio_transcription.completed", item_id: "i1", transcript: "Hang on, I'm texting you." });
+  ws.server({ type: "response.created", response: { id: "r1" } });
+  ws.server({ type: "response.output_audio_transcript.done", response_id: "r1", item_id: "o1", transcript: "Of course." });
+  await Promise.all(writes);
+  const who = { tag: "kuba", id: "1", channel: "c1" };
+  await ledger.append(inboundRow({ who, via: "discord", text: "Thoughts on these?", agentDir: dir, attachments: [path.join(dir, "var", "9-0-shoes.jpg")] }));
+  await ledger.append({ dir: "out", via: "discord", kind: "reply", text: "Hoka Clifton 9s, in blue.", files: 0 });
+  await ledger.archive();
+  const items = systemItems(ws);
+  assert.equal(items.length, 3, items.join("\n"));
+  assert.match(items[0], /^\[Meanwhile, by text, the user said: "Thoughts on these\?", and sent a photo\./);
+  assert.match(items[1], /^\[You replied by text: "Hoka Clifton 9s, in blue\."/);
+  assert.equal(items[2], CLEARED_UPDATE);
+  assert.equal(ws.sent.filter((e) => e.type === "response.create").length, 0);
+  // The call's lines are in the ledger (they went to the archive), never in the call.
+  assert.equal(items.some((t) => /texting you|Of course/.test(t)), false);
+  // The end stops the feed: a text after the call does not reach it.
+  session.end("call hung up", { hang: false });
+  await Promise.all(writes);
+  await ledger.append(inboundRow({ who, via: "sms", text: "after the call", agentDir: dir }));
+  assert.equal(systemItems(ws).length, 3);
 });

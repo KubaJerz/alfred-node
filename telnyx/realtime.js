@@ -27,6 +27,13 @@
 // The text of a silent tool chain is never audio, so it never comes; the
 // still-working filler is left out; a line the caller talked over says how
 // much of it they heard.
+//
+// The live feed: what happens elsewhere while the call runs (a text the user
+// sends, Alfred's reply to it) comes in through the feed option and goes into
+// the conversation as a system item, with no response.create. The voice knows
+// it from the caller's next turn on, and never speaks up about it by itself.
+// It is not a session.update: that would replace the instructions, and with
+// them the cached prompt, for the rest of the call.
 
 import WebSocket from "ws";
 import { makePlayer, makeReorder } from "./pipeline.js";
@@ -241,6 +248,12 @@ export function makeRealtimeSession({
   // type start, line, cut, late or end (see callRow in ledger.js). It is not
   // awaited, and a failure is only logged: the call never waits on the ledger.
   onCallEvent = () => {},
+  // What happens elsewhere while the call is live (liveFeed in context.js).
+  // feed({ callId, caller, push }) is called as the call starts and returns
+  // the function that stops it, which is called as the call ends. push(text)
+  // adds the text as a system item and asks for no response. A push before the
+  // socket is open and set up waits for it. A failure is only logged.
+  feed = null,
   log = console.log,
   now = () => Date.now(),
   apiKey,
@@ -291,9 +304,48 @@ export function makeRealtimeSession({
   const marks = new Map(); // reply end marks sent to Telnyx and not echoed yet
   const said = new Set(); // voice items whose line went to onCallEvent
   const cuts = new Map(); // voice item → { heardMs, totalMs }: talked over before its line came
+  let ready = false; // the session.update went: a pushed item can go too
+  let held = []; // items pushed before that
+  let stopFeed = null;
 
   const send = (obj) => {
     if (ws && ws.readyState === OPEN) ws.send(JSON.stringify(obj));
+  };
+
+  // A system item in the conversation. No response.create goes with it: the
+  // voice is to know it, not to answer it.
+  const systemItem = (text) => ({
+    type: "conversation.item.create",
+    item: { type: "message", role: "system", content: [{ type: "input_text", text }] },
+  });
+
+  // The feed's push: into the call now, or once the session is set up.
+  const push = (text) => {
+    if (ended || typeof text !== "string" || !text.trim()) return;
+    log(`📞 Live update for the call${ready ? "" : " (held until the socket opens)"}: ${oneLine(text).slice(0, 100)}`);
+    if (ready) send(systemItem(text));
+    else held.push(text);
+  };
+
+  const startFeed = () => {
+    if (!feed) return;
+    try {
+      const stop = feed({ callId: callControlId, caller, push });
+      if (typeof stop === "function") stopFeed = stop;
+    } catch (err) {
+      log(`⚠️  The call's live feed did not start: ${err.message}`);
+    }
+  };
+
+  const endFeed = () => {
+    const stop = stopFeed;
+    stopFeed = null;
+    held = [];
+    try {
+      stop?.();
+    } catch (err) {
+      log(`⚠️  The call's live feed did not stop: ${err.message}`);
+    }
   };
 
   // One event for onCallEvent. Whatever the callback does, a throw or a
@@ -622,6 +674,10 @@ export function makeRealtimeSession({
       if (ended) return ws.close();
       const today = `It is ${timeNow(clock())} as the call starts.`;
       send(sessionUpdate({ instructions: `${today}\n\n${instructions || DEFAULT_INSTRUCTIONS}`, voice, eagerness, transcribeModel, reasoning, silenceMs, noise, tools: directTools?.defs }));
+      // What the feed pushed while the socket opened, after the settings.
+      ready = true;
+      for (const text of held) send(systemItem(text));
+      held = [];
       for (const p of openQueue) send({ type: "input_audio_buffer.append", audio: p });
       openQueue = [];
       if (greeting) {
@@ -665,6 +721,7 @@ export function makeRealtimeSession({
   const end = (reason, { hang = true } = {}) => {
     if (ended) return;
     ended = true;
+    endFeed();
     clearTimeout(updateTimer);
     dropMarks();
     player.close();
@@ -692,6 +749,9 @@ export function makeRealtimeSession({
     start() {
       emit({ type: "start" });
       connect();
+      // After connect, so a socket that fails to start leaves no feed behind.
+      // A push from now on waits for the open socket.
+      startFeed();
     },
     onFrame(msg) {
       if (ended || !msg || typeof msg !== "object") return;

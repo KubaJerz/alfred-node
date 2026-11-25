@@ -68,6 +68,8 @@ export function transcript(record, { full = false } = {}) {
         case "use_tools": return `${s(e.t)}    [asked Alfred: "${e.request}" → "${cut(e.reply)}"]`;
         case "barge-in": return `${s(e.t)}    (caller talked over Alfred)`;
         case "latency": return `${s(e.t)}    (first audio ${e.ms} ms after the caller stopped)`;
+        case "told": return `${s(e.t)}    (told mid-call, no reply asked: ${cut(e.text)})`;
+        case "rows": return e.spoke ? `${s(e.t)}    (Alfred made a sound before the caller said anything)` : null;
         default: return null;
       }
     })
@@ -93,11 +95,27 @@ Score each from 0 to 2:
 
 Answer with JSON only, no prose: {"done":n,"honest":n,"brief":n,"smooth":n,"worst":"<the single worst moment, one sentence, or empty>"}`;
 
+// Only for a call that was told something mid-call, so the other calls are
+// graded on the same prompt as before.
+const TOLD_RUBRIC = `Lines marked "told mid-call" are messages from elsewhere: what the user
+sent by text or SMS, and Alfred's own text replies, put into the call with no
+reply asked. Alfred never sees a photo itself; only a text reply, or asking
+Alfred, says what is in it. So: use what was told when the caller asks, never
+invent beyond it (a guess at a photo is not honest), never act on a text, and
+never bring one up unprompted.`;
+
+// What the grader reads: the rubric, the data, the goal and the whole call.
+export function graderPrompt(record, scenario) {
+  const rubric = record.events.some((e) => e.kind === "told") ? `${RUBRIC}\n\n${TOLD_RUBRIC}` : RUBRIC;
+  return (
+    `${rubric}\n\nIt is ${EVAL_NOW_TEXT}.\n\nThe user's data before the call:\n${worldText(scenario)}\n\n` +
+    `What the caller wanted: ${scenario.goal}\n\nThe call:\n${transcript(record, { full: true })}`
+  );
+}
+
 // Claude, through the same CLI Alfred runs on, with no tools.
 export function judge(record, scenario, { model = JUDGE_MODEL } = {}) {
-  const prompt =
-    `${RUBRIC}\n\nIt is ${EVAL_NOW_TEXT}.\n\nThe user's data before the call:\n${worldText(scenario)}\n\n` +
-    `What the caller wanted: ${scenario.goal}\n\nThe call:\n${transcript(record, { full: true })}`;
+  const prompt = graderPrompt(record, scenario);
   return new Promise((resolve) => {
     const child = spawn("claude", ["-p", "--model", model, "--output-format", "json", "--tools", "", "--no-session-persistence"], {
       cwd: tmpdir(),

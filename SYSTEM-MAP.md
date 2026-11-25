@@ -239,11 +239,13 @@ flowchart TD
     Q -->|"the use_tools turn · src chat<br/>with the call's id"| LED
     LED -.->|"call + tool rows since his last turn<br/>in front of his next message · context.js"| SPAWN
     LED -.- CUR["ledger-cursor.json<br/>moves after a turn that worked"]
+    TXT["Kuba · Discord or SMS<br/>during the call"] -->|"a turn, as any other"| LED
+    LED -.->|"live: each text + reply as it lands<br/>a system item, no reply asked · liveFeed"| RT
     classDef external fill:#d6e2f2,stroke:#1f5fb8,color:#123f7d
     classDef gateway fill:#d8ebe2,stroke:#1b6b52,color:#12503c
     classDef stack fill:#f5e8d5,stroke:#b07a2a,color:#6e4a12
     classDef store fill:#e7e7e7,stroke:#888,color:#333
-    class CALL,CC,OA,N,G external
+    class CALL,CC,OA,N,G,TXT external
     class VP,BR gateway
     class SPAWN stack
     class LED,CUR,NOTE store
@@ -267,8 +269,22 @@ only after a turn worked, and only past the rows that turn read. So a restart
 or a failed turn loses nothing, and `/clear` sets it back to the start. A
 `use_tools` turn is a turn too, so it carries the call so far: Alfred reads the
 caller's own words next to the request. Each direct-tool change also goes in
-today's daily note. The other way does not work yet: the voice gets no briefing
-of recent chat. That is part 2 in `TODO.md`.
+today's daily note.
+
+The other way, **while a call is live**: each message Kuba sends by Discord or
+SMS, and Alfred's reply to it, goes into the call as it is written (the live
+feed, `liveFeed` in `context.js`). The ledger is also an in-process emitter;
+the call subscribes as it starts and stops as it ends. Each row becomes one
+`conversation.item.create` system item ("Meanwhile, by text, the user said:
+…", "You replied by text: …"), with no `response.create`, so the voice knows it
+from the caller's next turn and never speaks up about it. It is not a
+`session.update`, which would replace the instructions and their cached prefix.
+The call never gets its own rows (`via: "call"`). A file is named by its kind,
+never sent: until Alfred's reply says what a photo shows, the item tells the
+voice not to guess and to ask `use_tools`, which waits for that reply. `/clear`
+tells the call to forget earlier context. Items pushed before the OpenAI
+socket opens wait for it. `VOICE_OPENAI_LIVE=0` turns the feed off. A call
+still starts blank: no briefing of recent chat yet (part 2 in `TODO.md`).
 
 **The call in the ledger.** The call writes itself into `messages.jsonl` as it
 happens, not at the end: each caller line as transcribed, each voice line as
@@ -294,8 +310,10 @@ Everything about how the voice talks is the prompt, so it is guidance.
 with the same session code: `voice-eval/openai-call.js` stands in for Telnyx's
 media stream, `voice-eval/fakes.js` for Notion, the calendar and Alfred (the
 real `voice-tools.js` runs on top), `voice-eval/scenarios.js` holds the callers
-and their checks, and `voice-eval/score.js` scores each call. Dev-only: nothing
-in the running bot imports it. See `docs/voice-eval.md`.
+and their checks, and `voice-eval/score.js` scores each call. Each test call
+has its own ledger in a temp dir, fed into the call by the bot's `liveFeed`, so
+a scenario can send a text mid-call by the same code. Dev-only: nothing in the
+running bot imports it. See `docs/voice-eval.md`.
 
 ## Inbound mail (Pub/Sub)
 
@@ -648,7 +666,9 @@ with a ts later than the one before, archives the file on `/clear`, and reads
 it back (only the last bytes, one Eastern day, or the rows after a byte
 offset). Append and archive take one lock, so a row that arrives during an
 archive lands in the new file. The offset reader takes the lock too, so it
-never misses a row that an append started before it. An inbound
+never misses a row that an append started before it. It is also an emitter:
+`subscribe()` hears each row as it is written, in file order, and each archive
+(the live feed into a 2B call). An inbound
 row names the files saved with it (`files`, paths from `agent/`), so a fold can
 open a photo that the words do not describe. Every row names its channel
 (`via`), and a row's `src` says what wrote it: a chat turn, or a 2B call's own

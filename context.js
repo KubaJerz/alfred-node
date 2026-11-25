@@ -1,6 +1,6 @@
 // context.js — what Alfred is told about the phone and the recent past.
 //
-// Two readers of the ledger (ledger.js), and one way to show its rows:
+// Three readers of the ledger (ledger.js), and one way to show its rows:
 //
 //   - The catch-up. Alfred's session holds his own turns, but not what was
 //     said and done on a 2B call. So each turn starts with the rows that the
@@ -13,6 +13,9 @@
 //   - A new session's context: SOUL, USER, MEMORY, the daily notes of
 //     yesterday and today, and the messages of the last hours on every
 //     channel, word for word. A new session holds none of them.
+//   - The live feed. While a 2B call runs, each message the user sends by
+//     text or SMS, and Alfred's reply to it, goes into the call as it is
+//     written, so the voice knows what was just sent without a hang-up.
 //
 // On a 2B call, the voice is Alfred too. So each line says "you" for both:
 // "you said (on the call)", "you said (by text)". No line names a model, a
@@ -353,4 +356,91 @@ export async function sessionContext({
   text += "\n=== SYSTEM CONTEXT END ===\n";
   text += "\nUser Message: ";
   return { text, shown };
+}
+
+// ── The call, live ──────────────────────────────────────────────────────────
+
+// The item a /clear puts into a live call.
+export const CLEARED_UPDATE = "[The user cleared the conversation; forget earlier context.]";
+
+// What a file is, from its name. The call is told the kind, never sent the
+// file: the voice cannot see a photo.
+const FILE_KINDS = [
+  [/\.(jpe?g|png|gif|webp|heic|heif|bmp|tiff?|avif)$/i, "photo"],
+  [/\.(mp4|mov|m4v|webm|avi|mkv|3gp)$/i, "video"],
+  [/\.(mp3|m4a|ogg|oga|opus|wav|aac|amr|flac)$/i, "audio file"],
+  [/\.pdf$/i, "PDF"],
+  [/\.(docx?|odt|rtf|txt|md|pages)$/i, "document"],
+  [/\.(xlsx?|csv|ods|numbers)$/i, "spreadsheet"],
+];
+const fileKind = (name) => FILE_KINDS.find(([re]) => re.test(name))?.[1] || "file";
+const some = (n, kind) => (n > 1 ? `${n} ${kind}s` : /^[aeiou]/i.test(kind) ? `an ${kind}` : `a ${kind}`);
+const andList = (parts) => (parts.length > 1 ? `${parts.slice(0, -1).join(", ")} and ${parts.at(-1)}` : parts[0] || "");
+// A full stop after a quote, unless the quote ends a sentence already.
+const stop = (s) => (/[.!?…]"$/.test(s) ? s : `${s}.`);
+
+// The files of an in row: n, what ("a photo", "2 photos and a PDF") and the
+// ("the photo", "the photos", "the files"). An older row has only the count.
+function filesOf(row) {
+  const names = Array.isArray(row.files) ? row.files.map(String) : [];
+  const n = names.length || (Number.isInteger(row.attachments) && row.attachments > 0 ? row.attachments : 0);
+  if (!n) return { n: 0, what: "", the: "" };
+  const kinds = new Map();
+  for (const kind of names.length ? names.map(fileKind) : Array(n).fill("file")) kinds.set(kind, (kinds.get(kind) || 0) + 1);
+  const one = kinds.size === 1 ? [...kinds.keys()][0] : "file";
+  return { n, what: andList([...kinds].map(([kind, k]) => some(k, kind))), the: `the ${one}${n > 1 ? "s" : ""}` };
+}
+
+// The item a live 2B call gets for a row written elsewhere while it runs: a
+// message the user sent by text or SMS, or Alfred's reply to it. The voice is
+// Alfred, so his reply is "you replied". null for a row the call must not get:
+// every call's own (via "call": the lines it said and heard, its tool changes,
+// its use_tools turns, which it got as tool output), and a turn that said
+// nothing (silent, cancelled).
+//
+// The words also say what to do with it, since nothing else does. It is not
+// the caller talking, and it gets its own answer by text: so no answer, no
+// action, and no mention unless the caller asks. A file is named by its kind,
+// never sent. Until the reply says what is in it, the voice must not guess;
+// use_tools waits for that reply, since Alfred runs one turn at a time.
+export function liveUpdate(row, { lineChars = LINE_MAX_CHARS } = {}) {
+  if (!row || srcOf(row) !== "chat" || row.via === "call") return null;
+  const where = row.via === "sms" ? CHANNELS.sms : CHANNELS.discord;
+  const text = typeof row.text === "string" ? row.text.trim() : "";
+  const words = text && `"${cut(text, lineChars)}"`;
+  if (row.dir === "in") {
+    const files = filesOf(row);
+    if (!words && !files.n) return null;
+    const what = !words
+      ? `the user sent ${files.what}, with no words.`
+      : files.n ? `the user said: ${words}, and sent ${files.what}.` : `the user said: ${stop(words)}`;
+    // "Not seen yet", not "cannot see": the voice says what it is told, and
+    // use_tools can get what is in the file.
+    const unseen = files.n
+      ? ` You have not seen ${files.the} yet: your reply ${where} will say what is in ${files.n > 1 ? "them" : "it"}. ` +
+        "If the caller asks before that reply comes, do not guess: ask use_tools, which waits for it."
+      : "";
+    return `[Meanwhile, ${where}, ${what} You answer it ${where}, not on the call: do not act on it or bring it up unless the caller asks.${unseen}]`;
+  }
+  if (row.dir !== "out" || row.kind === "silent" || row.kind === "cancelled") return null;
+  if (FAILED.has(row.kind)) return `[Your reply ${where} to that failed: the user got an error, not an answer.]`;
+  const sent = row.files > 0 ? some(row.files, "file") : "";
+  if (!words) return sent ? `[You replied ${where} with ${sent} and no words.]` : null;
+  return `[You replied ${where}${sent ? `, with ${sent}` : ""}: ${stop(words)} Do not repeat it unless the caller asks.]`;
+}
+
+// While a 2B call is live: each row written elsewhere goes into the call as
+// it is written (liveUpdate), and an archive, which only /clear does, tells it
+// to forget. push(text) is the call's own: makeRealtimeSession's feed option
+// hands it over. Returns the function that stops it. A failure is logged and
+// dropped: the call, and the turn that wrote the row, go on.
+export function liveFeed({ ledger, push, lineChars, log = console }) {
+  return ledger.subscribe((ev) => {
+    try {
+      const text = ev.type === "archive" ? CLEARED_UPDATE : ev.type === "row" ? liveUpdate(ev.row, { lineChars }) : null;
+      if (text) push(text);
+    } catch (err) {
+      log.error(`⚠️  A live update for the call failed: ${err.message}`);
+    }
+  });
 }

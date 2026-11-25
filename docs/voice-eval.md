@@ -27,6 +27,14 @@ node scripts/voice-eval.mjs --compare agent/var/voice-eval/runs/<a> agent/var/vo
   and calendar (`voice-eval/fakes.js`). `use_tools` goes to a stand-in Alfred
   with canned answers per kind of request (his to-do file, email, new pages).
   The clock is Wednesday 2 December 2026, 10:00 AM Eastern.
+- **Messages from elsewhere.** A turn can carry ledger rows (`{ rows, say }`):
+  a text the user sent and Alfred's reply, built as `bot.js` builds them. Each
+  call has its own ledger in a temp dir, written as the bot writes the real
+  one, and the bot's live feed (`liveFeed` in `context.js`) puts the rows into
+  the call as system items with no reply asked. Then the caller waits 2 s, in
+  which the voice must stay quiet, and speaks. The `live-*` scenarios use it:
+  a photo and the reply that names it, a texted "out of eggs", and a photo
+  whose reply has not come, so the voice must not guess.
 
 ## How it is scored
 
@@ -38,7 +46,9 @@ node scripts/voice-eval.mjs --compare agent/var/voice-eval/runs/<a> agent/var/vo
   wait for a `use_tools` answer, tool errors, cost.
 - **A Claude grader** (`claude -p`, Sonnet 5.5) scores done, honest, brief and
   smooth, 0–2 each, from the transcript, the starting data and the goal, and
-  names the worst moment.
+  names the worst moment. The transcript shows what the call was told mid-call,
+  and only for those calls the rubric says how to judge it (a guess at a photo
+  is not honest), so the other calls are graded as before.
 
 Each run saves `summary.md`, and per call a transcript (`.txt`), the full
 record (`.json`) and a stereo recording (`.wav`, caller left, Alfred right) in

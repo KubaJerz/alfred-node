@@ -736,6 +736,33 @@ test("pipeline (openai): realtime.onCallEvent gets the call's events, with its i
   }
 });
 
+test("pipeline (openai): realtime.feed starts with the call, with its id and caller, and stops at the hangup", async () => {
+  const fed = [];
+  let stops = 0;
+  const feed = (f) => {
+    fed.push(f);
+    return () => stops++;
+  };
+  const realtime = { apiKey: "sk-test", WebSocketImpl: FakeRealtimeWs, greeting: "", feed };
+  const s = await setup({ pipelineOpts: { engine: "openai", realtime } });
+  try {
+    assert.equal(await s.incoming("v3:call8"), 200);
+    await waitFor(() => s.commands.length === 1);
+    const peer = s.connectMedia();
+    await peer.open();
+    peer.start("v3:call8");
+    await waitFor(() => fed.length === 1);
+    assert.equal(fed[0].callId, "v3:call8");
+    assert.equal(fed[0].caller, OWNER);
+    assert.equal(stops, 0);
+    await s.postEvent("call.hangup", { call_control_id: "v3:call8", hangup_cause: "normal_clearing", hangup_source: "caller" });
+    await waitFor(() => stops === 1 && peer.closed !== null);
+    assert.equal(stops, 1, "the socket closing after the hangup stops nothing twice");
+  } finally {
+    await s.close();
+  }
+});
+
 test("makeVoicePipeline needs a public URL and a token", () => {
   assert.throws(() => makeVoicePipeline({ publicUrl: "", token: "t", onTurn: () => "" }), /public URL and a token/);
   assert.throws(() => makeVoicePipeline({ publicUrl: PUBLIC, token: "", onTurn: () => "" }), /public URL and a token/);

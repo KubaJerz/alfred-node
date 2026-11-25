@@ -39,6 +39,11 @@
 // so a row that arrives while /clear archives waits and lands in the new file.
 // Without the lock, a row written between the copy and the truncate is lost.
 //
+// The ledger is also an emitter, for a reader in this process that must know
+// at once: subscribe() hears each row as it is written, and each archive. A
+// live 2B call is that reader (liveFeed in context.js): a text sent during
+// the call goes into it as it lands.
+//
 // Paths come in through makeLedger, so the tests run on a temp dir.
 
 import * as fsp from "node:fs/promises";
@@ -217,42 +222,81 @@ export function makeLedger({ file, logsDir, now = () => Date.now(), fs = fsp, lo
     return new Date(lastMs).toISOString();
   };
 
+  // The subscribers. Each is its own entry, so one function can subscribe twice.
+  const listeners = new Set();
+
+  // Tell each subscriber. One that throws or rejects is logged, and the rest
+  // still hear it: a reader must never break the write, or the turn behind it.
+  function emit(ev) {
+    const failed = (err) => log.error(`⚠️  A ledger subscriber failed on ${ev.type}: ${err?.message || err}`);
+    for (const { fn } of [...listeners]) {
+      try {
+        const done = fn(ev);
+        if (typeof done?.then === "function") done.then(null, failed);
+      } catch (err) {
+        failed(err);
+      }
+    }
+  }
+
+  // fn({ type: "row", row }) after each row is written, in file order, src
+  // filled in; fn({ type: "archive", path }) after each archive (path is null
+  // when there was nothing to save): the ledger started again. A row that the
+  // disk refused is not told. Returns the function that stops it.
+  function subscribe(fn) {
+    const entry = { fn };
+    listeners.add(entry);
+    return () => {
+      listeners.delete(entry);
+    };
+  }
+
   // Write one row. The ts is always this ledger's own. Resolves to the row as
   // written, or null when the write failed (logged, never thrown: a lost log
-  // line must not break a turn).
+  // line must not break a turn). The subscribers hear it inside the lock, so
+  // they hear the rows in the order of the file.
   function append(entry) {
     return locked(async () => {
       const { ts: _ignored, ...rest } = entry;
       const row = { ts: stamp(), ...rest };
       try {
         await fs.appendFile(file, JSON.stringify(row) + "\n");
-        return row;
       } catch (err) {
         log.error(`⚠️  Failed to write ${file}: ${err.message}`);
         return null;
       }
+      emit({ type: "row", row: withSrc(row) });
+      return row;
     });
   }
 
   // On /clear: copy the conversation into logs/<first>_to_<last>.jsonl, then
   // empty the live file for the next one. Resolves to the archive path, or
-  // null when there was nothing to save. The rows go over as they were read.
+  // null when there was nothing to save. The subscribers are told either way:
+  // /clear ran.
   function archive() {
     return locked(async () => {
-      let raw;
-      try {
-        raw = await fs.readFile(file, "utf-8");
-      } catch {
-        return null; // no transcript yet
-      }
-      const rows = parseRows(raw);
-      if (!rows.length) return null;
-      await fs.mkdir(logsDir, { recursive: true });
-      const archivePath = path.join(logsDir, archiveName(rows));
-      await fs.writeFile(archivePath, rows.map((r) => JSON.stringify(r)).join("\n") + "\n");
-      await fs.writeFile(file, "");
+      const archivePath = await moveToLogs();
+      emit({ type: "archive", path: archivePath });
       return archivePath;
     });
+  }
+
+  // The archive itself. The rows go over as they were read.
+  async function moveToLogs() {
+    let raw;
+    try {
+      raw = await fs.readFile(file, "utf-8");
+    } catch {
+      return null; // no transcript yet
+    }
+    const rows = parseRows(raw);
+    if (!rows.length) return null;
+    await fs.mkdir(logsDir, { recursive: true });
+    const archivePath = path.join(logsDir, archiveName(rows));
+    await fs.writeFile(archivePath, rows.map((r) => JSON.stringify(r)).join("\n") + "\n");
+    await fs.writeFile(file, "");
+    return archivePath;
   }
 
   // The bytes of an open file from pos to its end.
@@ -361,5 +405,5 @@ export function makeLedger({ file, logsDir, now = () => Date.now(), fs = fsp, lo
     });
   }
 
-  return { file, logsDir, append, archive, tail, readDay, readAll, readFrom };
+  return { file, logsDir, append, archive, tail, readDay, readAll, readFrom, subscribe };
 }

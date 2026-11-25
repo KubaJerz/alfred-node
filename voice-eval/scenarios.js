@@ -6,8 +6,17 @@
 // is doing (a caller who keeps talking) — or { say, bargeInMs } — spoken that
 // long after Alfred's next reply starts (talking over him).
 //
+// A turn with rows ({ rows, say }) first writes those ledger rows, as bot.js
+// would during the call (a text from the user, Alfred's reply to it); the live
+// feed tells the call, as on a real call. The caller waits ROWS_QUIET_MS, then
+// says the line. Give rows only to a turn that waits for Alfred to finish.
+//
 // The clock in every call is Wednesday 2 December 2026, 10:00 AM Eastern
 // (openai-call.js), so "tomorrow" is Thursday the 3rd and "Friday" the 4th.
+
+import path from "node:path";
+import { attachmentName } from "../dailies.js";
+import { inboundRow } from "../ledger.js";
 
 // ── The world ────────────────────────────────────────────────────────────────
 
@@ -43,6 +52,23 @@ const COMPUTER = {
 
 const world = () => ({ pages: PAGES, events: EVENTS, computer: COMPUTER });
 
+// ── Messages from elsewhere, during the call ─────────────────────────────────
+// Rows as bot.js writes them: the user's message through the same inboundRow,
+// with its files saved in the day's folder, and Alfred's reply.
+
+const AGENT_DIR = "/eval/agent";
+const DAY_DIR = path.join(AGENT_DIR, "var", "memories", "dailies", "2026-12-02");
+const WHO = { discord: { tag: "kuba", id: "1", channel: "c1" }, sms: { tag: "sms:+10000000000", id: "+10000000000", channel: "sms" } };
+
+const texted = (text, { via = "discord", files = [] } = {}) =>
+  inboundRow({ who: WHO[via], via, text, agentDir: AGENT_DIR, attachments: files.map((f, i) => path.join(DAY_DIR, attachmentName("1", i, f))) });
+const replied = (text, { via = "discord" } = {}) => ({ dir: "out", via, kind: "reply", text, files: 0 });
+
+// The photo in the live-photo calls. Only Alfred's reply says what it shows.
+const SHOES = "Those are Hoka Clifton 9 running shoes, in blue. Light and well cushioned: a good pick for daily road runs.";
+// Any word that says what is in the photo.
+const SHOE_WORDS = /\b(shoes?|sneakers?|trainers?|runners|boots?|hoka|clifton|nike|adidas|asics|brooks|saucony|blue|black|white|red|green|gr[ae]y|pink|orange|yellow|purple|brown)\b/i;
+
 // ── The stand-in Alfred (use_tools) ──────────────────────────────────────────
 // He does what a plain request asks; a request he can't place gets a question
 // back, as the real one would.
@@ -77,9 +103,13 @@ const ALFRED = [
   { match: /\bweather\b/i, reply: "Sunny and 54 now; rain from about 6 PM." },
 ];
 
+// What Alfred knows once he has looked at the photo (use_tools waits for him).
+const PHOTO = { match: /\b(photo|picture|image|pic|sent|these|ones|shoes?)\b/i, reply: `The photo the user just sent: ${SHOES}` };
+
 // ── Checks ───────────────────────────────────────────────────────────────────
 
-const voice = (r) => r.events.filter((e) => e.kind === "voice").map((e) => e.text);
+const voiceEvents = (r) => r.events.filter((e) => e.kind === "voice");
+const voice = (r) => voiceEvents(r).map((e) => e.text);
 const allVoice = (r) => voice(r).join(" ");
 const page = (r, title) => r.notion.lines(title) || [];
 const findLine = (r, title, word) => page(r, title).find((l) => new RegExp(`\\b${word}\\b`, "i").test(l.text));
@@ -120,6 +150,25 @@ const check = {
   fewWords: (n) => ({
     name: `last reply at most ${n} words`,
     test: (r) => (voice(r).at(-1) || "").split(/\s+/).filter(Boolean).length <= n,
+  }),
+  // Messages from elsewhere ask nothing: no sound until the caller talks.
+  quietOnRows: () => ({
+    name: "said nothing when the messages came in",
+    test: (r) => r.events.filter((e) => e.kind === "rows").every((e) => !e.spoke),
+  }),
+  // Nothing said before Alfred's first answer came back (or at all, if he was
+  // never asked) matches re: what only he could know.
+  noGuess: (label, re) => ({
+    name: `did not guess ${label}`,
+    test: (r) => {
+      const answered = Math.min(...useTools(r).map((u) => u.done ?? Infinity));
+      return !voiceEvents(r).some((e) => e.t < answered && re.test(e.text));
+    },
+  }),
+  // Reads and the time only: a text gets its own answer, so the call acts on nothing.
+  changedNothing: () => ({
+    name: "changed nothing",
+    test: (r) => toolCalls(r).every((e) => e.name === "get_time" || ["read", "search"].includes(e.args?.action)),
   }),
 };
 
@@ -259,6 +308,43 @@ export const SCENARIOS = [
     goal: "Say a short goodbye and hang up.",
     turns: [{ say: "Okay, that's everything. Thanks, bye." }],
     checks: [check.hungUp(), check.fewWords(8)],
+  },
+  // ── Messages from elsewhere, during the call (the live feed) ──
+  {
+    // A photo and Alfred's text reply land mid-call; the reply names the shoes.
+    id: "live-photo",
+    goal: "Mid-call, the user sends a photo by text and Alfred replies by text naming the shoes in it. Asked about them, say what the reply said, with no need to ask Alfred.",
+    turns: [
+      {
+        rows: [texted("Thoughts on these?", { files: ["shoes.jpg"] }), replied(SHOES)],
+        say: "What do you think of the ones I just sent you?",
+      },
+    ],
+    checks: [check.said("the shoes by name", /clifton|hoka/i), check.notAskedAlfred(), check.quietOnRows()],
+  },
+  {
+    id: "live-text",
+    goal: "Mid-call, the user texts (SMS) that they are out of eggs and want a reminder later, and Alfred replies by text that he will remind them. Asked what they just texted, say it was about eggs. Do nothing about it: the text got its own answer.",
+    turns: [
+      {
+        rows: [texted("I'm out of eggs, remind me later", { via: "sms" }), replied("Noted. I'll remind you about eggs this evening.", { via: "sms" })],
+        say: "What did I just text you?",
+      },
+    ],
+    checks: [check.said("eggs", /\beggs?\b/i), check.notAskedAlfred(), check.changedNothing(), check.quietOnRows()],
+  },
+  {
+    // The photo lands, but Alfred has not replied yet: only he can say what it shows.
+    id: "live-photo-pending",
+    goal: "Mid-call, the user sends a photo by text; Alfred has not replied yet. Asked about it, never guess what it shows: ask Alfred (use_tools waits for his look at it), then say what he said.",
+    turns: [{ rows: [texted("Thoughts on these?", { files: ["shoes.jpg"] })], say: "What do you think of the ones I just sent you?" }],
+    alfred: [PHOTO, ...ALFRED],
+    checks: [
+      check.noGuess("what the photo shows", SHOE_WORDS),
+      check.askedAlfred("about the photo", /\b(photo|picture|image|pic|sent|these|ones|shoes?)\b/i),
+      check.said("the shoes, once Alfred said", /clifton|hoka/i),
+      check.quietOnRows(),
+    ],
   },
 ];
 

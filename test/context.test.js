@@ -9,8 +9,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { makeLedger, inboundRow, callRow, toolRow } from "../ledger.js";
 import {
-  CURSOR_FILE, CATCH_UP_MAX_CHARS, RECENT_WINDOW_MS,
-  makeCatchUp, catchUpBlock, sessionContext, recentMessages, turnWorked,
+  CURSOR_FILE, CATCH_UP_MAX_CHARS, RECENT_WINDOW_MS, CLEARED_UPDATE,
+  makeCatchUp, catchUpBlock, sessionContext, recentMessages, turnWorked, liveUpdate, liveFeed,
 } from "../context.js";
 
 const OK = { result: "Done.", session_id: "s1", is_error: false };
@@ -461,4 +461,118 @@ test("a new session with no recent messages and no notes gets the files there ar
   const broken = await newSession(w, { ledger: { tail: async () => { throw new Error("tail failed"); } } });
   assert.match(broken.text, /the soul file/);
   assert.match(w.errors[0], /tail failed/);
+});
+
+// ── The call, live ──────────────────────────────────────────────────────────
+
+test("a live update tells the call what was texted, and the reply, as Alfred's own", () => {
+  const sms = inboundRow({ who: WHO, via: "sms", text: "I'm out of eggs, remind me later", agentDir: "/a" });
+  const reply = { dir: "out", via: "sms", kind: "reply", text: "Noted. I'll remind you this evening.", files: 0 };
+  assert.equal(
+    liveUpdate(sms),
+    '[Meanwhile, by SMS, the user said: "I\'m out of eggs, remind me later". You answer it by SMS, not on the call: do not act on it or bring it up unless the caller asks.]',
+  );
+  assert.equal(liveUpdate(reply), '[You replied by SMS: "Noted. I\'ll remind you this evening." Do not repeat it unless the caller asks.]');
+  // Discord is "by text", and so is an older row with no via.
+  assert.match(liveUpdate({ dir: "in", via: "discord", text: "hi" }), /^\[Meanwhile, by text, the user said: "hi"\. You answer it by text, not on the call/);
+  assert.match(liveUpdate({ dir: "out", kind: "reply", text: "Hello!" }), /^\[You replied by text: "Hello!" Do not repeat it/);
+  // One persona: no other assistant, model or service.
+  for (const text of [liveUpdate(sms), liveUpdate(reply), CLEARED_UPDATE]) {
+    for (const word of ["voice", "OpenAI", "Claude", "model", "assistant", "Alfred"]) {
+      assert.equal(text.includes(word), false, `"${word}" in ${text}`);
+    }
+  }
+});
+
+test("a file is named by its kind, never sent, and the call is told not to guess what is in it", () => {
+  const photo = inboundRow({
+    who: WHO, via: "discord", text: "Thoughts on these?", agentDir: "/a",
+    attachments: ["/a/var/memories/dailies/2026-11-24/9-0-shoes.jpg"],
+  });
+  assert.equal(
+    liveUpdate(photo),
+    '[Meanwhile, by text, the user said: "Thoughts on these?", and sent a photo. You answer it by text, not on the call: ' +
+      "do not act on it or bring it up unless the caller asks. You have not seen the photo yet: your reply by text will say " +
+      "what is in it. If the caller asks before that reply comes, do not guess: ask use_tools, which waits for it.]",
+  );
+  assert.equal(liveUpdate(photo).includes("var/memories"), false, "the path stays out");
+  const mixed = { dir: "in", via: "sms", text: "", attachments: 3, files: ["x/1-0-a.png", "x/1-1-b.HEIC", "x/1-2-lease.pdf"] };
+  assert.match(liveUpdate(mixed), /^\[Meanwhile, by SMS, the user sent 2 photos and a PDF, with no words\. .* You have not seen the files yet: your reply by SMS will say what is in them\./);
+  assert.match(liveUpdate({ dir: "in", text: "", files: ["x/1-0-memo.docx"] }), /the user sent a document, with no words\. .*You have not seen the document yet: .* what is in it\./);
+  assert.match(liveUpdate({ dir: "in", text: "", files: ["x/1-0-a.jpg", "x/1-1-b.jpg"] }), /sent 2 photos, .*You have not seen the photos yet/);
+  // An older row has only the count.
+  assert.match(liveUpdate({ dir: "in", text: "see attached", attachments: 2 }), /"see attached", and sent 2 files\. .*You have not seen the files yet/);
+  // Alfred's reply says how many files went with it.
+  assert.equal(liveUpdate({ dir: "out", via: "discord", kind: "reply", text: "Here you go.", files: 2 }), '[You replied by text, with 2 files: "Here you go." Do not repeat it unless the caller asks.]');
+  assert.equal(liveUpdate({ dir: "out", via: "discord", kind: "reply", text: "", files: 1 }), "[You replied by text with a file and no words.]");
+});
+
+test("no live update for a call's own rows, its use_tools turns, or a turn that said nothing", () => {
+  const none = [
+    callRow({ type: "start", ...CALL }),
+    callRow({ type: "line", dir: "in", text: "Add kale.", ...CALL }),
+    callRow({ type: "line", dir: "out", text: "Done.", ...CALL }),
+    callRow({ type: "late", request: "mail?", text: "Two emails.", ...CALL }),
+    toolRow({ text: "added kale", ...CALL }),
+    inboundRow({ who: WHO, via: "call", text: "Check my email", agentDir: "/a", callId: CALL.callId }),
+    { dir: "out", via: "call", kind: "reply", text: "Two emails.", callId: CALL.callId },
+    { dir: "out", via: "discord", kind: "silent", text: "" },
+    { dir: "out", via: "sms", kind: "cancelled", text: "" },
+    { dir: "in", via: "discord", text: "  ", attachments: 0 },
+    { dir: "out", via: "discord", kind: "reply", text: "", files: 0 },
+    null,
+  ];
+  assert.deepEqual(none.map((r) => liveUpdate(r)), none.map(() => null));
+  // A failed turn says so, and leaves out its error text, which can name a service.
+  for (const kind of ["error", "timeout", "auth_error"]) {
+    assert.equal(
+      liveUpdate({ dir: "out", via: "discord", kind, text: "Something went wrong: claude exited 1" }),
+      "[Your reply by text to that failed: the user got an error, not an answer.]",
+    );
+  }
+});
+
+test("one long message is cut, so it cannot flood the call", () => {
+  assert.match(liveUpdate({ dir: "in", via: "discord", text: "x".repeat(5000) }, { lineChars: 100 }), /"x{100} … \[4900 more characters cut\]"\. /);
+});
+
+test("the live feed: texts and replies go in as they are written; the call's own rows never do; /clear tells it to forget", async () => {
+  const w = world();
+  const told = [];
+  const stop = liveFeed({ ledger: w.ledger, push: (text) => told.push(text), log: w.log });
+  await call(w, { type: "start" });
+  await said(w, "in", "Hang on, I'm texting you.");
+  await w.ledger.append(inboundRow({
+    who: WHO, via: "discord", text: "Thoughts on these?", agentDir: w.agentDir,
+    attachments: [path.join(w.stateDir, "memories", "dailies", "2026-11-24", "9-0-shoes.jpg")],
+  }));
+  assert.equal(told.length, 1, "in as it is written, not later");
+  // The call's use_tools turn and its tool change: it has them already.
+  await w.ledger.append(inboundRow({ who: WHO, via: "call", text: "What is in the photo?", agentDir: w.agentDir, callId: CALL.callId }));
+  await tool(w, 'added "Eggs" (Notion page "Shopping list")');
+  await w.ledger.append({ dir: "out", via: "call", kind: "reply", text: "Blue running shoes.", callId: CALL.callId });
+  await w.ledger.append({ dir: "out", via: "discord", kind: "reply", text: "Hoka Clifton 9s, in blue.", files: 0 });
+  await said(w, "out", "They are Hoka Clifton 9s.");
+  assert.equal(told.length, 2);
+  assert.match(told[0], /^\[Meanwhile, by text, the user said: "Thoughts on these\?", and sent a photo\./);
+  assert.match(told[1], /^\[You replied by text: "Hoka Clifton 9s, in blue\."/);
+  // /clear archives the ledger, and the call forgets what came before.
+  await w.ledger.archive();
+  assert.deepEqual(told.slice(2), [CLEARED_UPDATE]);
+  await w.ledger.append(inboundRow({ who: WHO, via: "sms", text: "a new start", agentDir: w.agentDir }));
+  assert.match(told[3], /by SMS, the user said: "a new start"/);
+  // The call ended: the stop ends the feed.
+  stop();
+  await w.ledger.append(inboundRow({ who: WHO, via: "sms", text: "after the call", agentDir: w.agentDir }));
+  assert.equal(told.length, 4);
+  assert.deepEqual(w.errors, []);
+});
+
+test("the live feed: a push that throws is logged, and the turn's row is written all the same", async () => {
+  const w = world();
+  liveFeed({ ledger: w.ledger, push: () => { throw new Error("socket gone"); }, log: w.log });
+  const row = await w.ledger.append(inboundRow({ who: WHO, via: "discord", text: "hi", agentDir: w.agentDir }));
+  assert.equal(row.text, "hi");
+  assert.deepEqual((await w.ledger.readAll()).map((r) => r.text), ["hi"]);
+  assert.match(w.errors[0], /A live update for the call failed: socket gone/);
 });

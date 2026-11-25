@@ -9,10 +9,20 @@
 //
 // The direct tools are the real ones (telnyx/voice-tools.js) on the fake world
 // (fakes.js); use_tools goes to the fake Alfred.
+//
+// Each call has its own ledger in a temp dir, written as bot.js writes the
+// real one, and the bot's own live feed (context.js) tells the call what lands
+// in it. A scenario turn's rows (a text, Alfred's reply) go in there, so they
+// reach the voice by the same code as on a real call.
 
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { makeRealtimeSession } from "../telnyx/realtime.js";
 import { makeVoiceTools } from "../telnyx/voice-tools.js";
 import { MULAW_SILENCE, PHONE_RATE } from "../telnyx/audio.js";
+import { makeLedger, callRow, inboundRow } from "../ledger.js";
+import { liveFeed } from "../context.js";
 import { callerAudio, makeRecording } from "./audio.js";
 import { fakeAlfred, fakeCalendar, fakeNotion } from "./fakes.js";
 
@@ -21,11 +31,49 @@ const FRAME_MS = 20;
 const QUIET_MS = 2500; // Alfred silent this long, with nothing running: his turn is over
 const REPLY_WAIT_MS = 20000; // the longest we wait for any reply to a line
 const TURN_MAX_MS = 60000; // the longest one exchange may take
+// After messages from elsewhere land, the caller waits this long before the
+// line: the voice must stay quiet through it, since no one asked it anything.
+export const ROWS_QUIET_MS = 2000;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // The clock the scenario's tools see: a fixed Wednesday morning, so dates in
 // scenarios ("tomorrow", "Friday") always mean the same day.
 export const EVAL_NOW = new Date("2026-12-02T15:00:00Z"); // 10:00 AM Eastern
+
+// The ledger of one test call, in a temp dir, and its hooks for
+// makeRealtimeSession as bot.js makes them: feed is the bot's liveFeed
+// (told(text) hears each item the call gets), onCallEvent writes the call's
+// own lines as logCallEvent does, and asked/answered write a use_tools turn's
+// rows as handleTurn does. So the voice hears a scenario's rows, and never its
+// own, by the bot's code. inject(rows) writes rows in order.
+export function makeCallLedger({ told = () => {}, log = () => {} } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), "voice-eval-ledger-"));
+  const errors = { error: log };
+  const ledger = makeLedger({ file: join(dir, "messages.jsonl"), logsDir: join(dir, "logs"), log: errors });
+  return {
+    ledger,
+    feed: ({ push }) =>
+      liveFeed({
+        ledger,
+        push: (text) => {
+          told(text);
+          push(text);
+        },
+        log: errors,
+      }),
+    onCallEvent: (ev) => {
+      const row = callRow(ev);
+      return row ? ledger.append(row) : null;
+    },
+    asked: ({ text, caller, callId }) =>
+      ledger.append(inboundRow({ who: { tag: `call:${caller}`, id: caller, channel: "call" }, via: "call", text, agentDir: dir, callId })),
+    answered: ({ callId }, reply) => ledger.append({ dir: "out", via: "call", kind: "reply", text: reply, callId }),
+    inject: async (rows = []) => {
+      for (const row of rows) await ledger.append(row);
+    },
+    close: () => rmSync(dir, { recursive: true, force: true }),
+  };
+}
 
 export async function runOpenAICall(scenario, {
   apiKey,
@@ -102,12 +150,16 @@ export async function runOpenAICall(scenario, {
       }
     },
   };
+  const call = makeCallLedger({ told: (text) => events.push({ t: at(), kind: "told", text }), log });
   const onTurn = async (a) => {
     pending++;
     const t = at();
     try {
+      await call.asked(a);
       const reply = await alfred.onTurn(a);
-      events.push({ t, kind: "use_tools", request: a.text, reply });
+      // done: when the answer came back, so a check can tell what was said before it.
+      events.push({ t, done: at(), kind: "use_tools", request: a.text, reply });
+      await call.answered(a, reply);
       return reply;
     } finally {
       pending--;
@@ -151,6 +203,8 @@ export async function runOpenAICall(scenario, {
     quietChains,
     directTools,
     clock: () => new Date(EVAL_NOW.getTime() + at()),
+    feed: call.feed,
+    onCallEvent: call.onCallEvent,
   });
 
   // The phone line: a frame every 20 ms, the caller's words when there are
@@ -179,6 +233,16 @@ export async function runOpenAICall(scenario, {
       events.push({ t: at(), kind: "caller", text });
       speech = { bytes, off: 0, done: resolve };
     });
+
+  // Messages from elsewhere land in the ledger, and the feed tells the call.
+  // Then the caller waits a moment, as after sending a text. spoke: the voice
+  // made a sound in that time, with no one talking to it.
+  const deliver = async (rows) => {
+    const t = at();
+    await call.inject(rows);
+    await sleep(ROWS_QUIET_MS);
+    events.push({ t, kind: "rows", rows: rows.length, spoke: lastOut > t });
+  };
 
   const speaking = () => playEnd > at();
   // Alfred's turn is over: he has said something since `since`, nothing is
@@ -209,6 +273,7 @@ export async function runOpenAICall(scenario, {
         while (!ended && !(lastOut > from && speaking()) && at() - from < REPLY_WAIT_MS) await sleep(50);
         await sleep(turn.bargeInMs);
       } else if (turn.pauseMs) await sleep(turn.pauseMs);
+      if (turn.rows?.length) await deliver(turn.rows);
       await say(lines[i], turn.say);
       // A next line that cuts in, or follows after a set pause, does not wait.
       const next = scenario.turns[i + 1];
@@ -219,6 +284,7 @@ export async function runOpenAICall(scenario, {
     clearInterval(line);
     endReason = endedByAlfred ? "Alfred hung up" : "test hung up";
     await sleep(300);
+    call.close();
   }
 
   if (apiError) throw Object.assign(new Error(apiError.replace(/^⚠️\s+/, "")), { fatal: true });
