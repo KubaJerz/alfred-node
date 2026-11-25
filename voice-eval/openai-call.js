@@ -121,6 +121,10 @@ export function makeCallLedger({ told = () => {}, log = () => {}, now = () => Da
   };
 }
 
+// briefing, feed: false for a control run (--no-briefing, --no-feed): the call
+// starts with the prompt alone, or is told nothing mid-call, as with
+// VOICE_OPENAI_BRIEFING=0 or VOICE_OPENAI_LIVE=0 on the box. The scenario's
+// world and rows are written all the same; only the call does not get them.
 export async function runOpenAICall(scenario, {
   apiKey,
   instructions,
@@ -130,6 +134,8 @@ export async function runOpenAICall(scenario, {
   voice,
   noise,
   quietChains = false,
+  briefing: withBriefing = true,
+  feed: withFeed = true,
   callerVoice = "ash",
   ttsCache,
   alfredDelayMs = 4000,
@@ -256,11 +262,11 @@ export async function runOpenAICall(scenario, {
     instructions,
     // The bot's builder on the scenario's briefing world. With none, it is
     // the prompt alone, so the other scenarios run as before.
-    buildInstructions: call.buildInstructions,
+    buildInstructions: withBriefing ? call.buildInstructions : undefined,
     quietChains,
     directTools,
     clock,
-    feed: call.feed,
+    feed: withFeed ? call.feed : undefined,
     onCallEvent: call.onCallEvent,
   });
 

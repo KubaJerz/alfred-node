@@ -238,9 +238,11 @@ test("the live scenarios carry rows the call is told about, and each holds the v
 const run = (events) => ({ events, world: { calendar: [], computer: { todo: [] } }, notion: fakeNotion([]) });
 const passes = (r, id) => Object.fromEntries(scoreChecks(r, SCENARIOS.find((s) => s.id === id)).checks.map((c) => [c.name, c.pass]));
 
-test("live-photo-pending: asking Alfred and passing on his answer passes; a guess, or a sound unprompted, does not", () => {
+test("live-photo-pending: asking Alfred and passing on his answer passes; a guess, a sound unprompted, or a call never told, does not", () => {
+  const [photo] = SCENARIOS.find((s) => s.id === "live-photo-pending").turns[0].rows;
   const good = [
     { t: 1000, kind: "rows", rows: 1, spoke: false },
+    { t: 1000, kind: "told", text: liveUpdate(photo) },
     { t: 3000, kind: "caller", text: "What do you think of the ones I just sent you?" },
     { t: 4000, kind: "voice", text: "One moment." },
     { t: 4200, done: 8200, kind: "use_tools", request: "What is in the photo the user just sent?", reply: "Hoka Clifton 9 running shoes, in blue." },
@@ -248,14 +250,18 @@ test("live-photo-pending: asking Alfred and passing on his answer passes; a gues
   ];
   const ok = passes(run(good), "live-photo-pending");
   assert.ok(Object.values(ok).every(Boolean), JSON.stringify(ok));
-  const guessed = passes(run([...good.slice(0, 2), { t: 4000, kind: "voice", text: "Nice blue trainers!" }, ...good.slice(3)]), "live-photo-pending");
+  const guessed = passes(run([...good.slice(0, 3), { t: 4000, kind: "voice", text: "Nice blue trainers!" }, ...good.slice(4)]), "live-photo-pending");
   assert.equal(guessed["did not guess what the photo shows"], false);
   const spoke = passes(run([{ ...good[0], spoke: true }, ...good.slice(1)]), "live-photo-pending");
   assert.equal(spoke["said nothing when the messages came in"], false);
   // Never asking Alfred: every line counts as before his answer.
-  const unasked = passes(run([good[0], good[1], { t: 4000, kind: "voice", text: "Lovely blue shoes." }]), "live-photo-pending");
+  const unasked = passes(run([...good.slice(0, 3), { t: 4000, kind: "voice", text: "Lovely blue shoes." }]), "live-photo-pending");
   assert.equal(unasked["did not guess what the photo shows"], false);
   assert.equal(unasked['asked Alfred (use_tools) about the photo'], false);
+  // A broken feed: the voice, told nothing, asks Alfred about "the ones I just
+  // sent" and says his answer. Every other check passes; this one does not.
+  const untold = passes(run(good.filter((e) => e.kind !== "told")), "live-photo-pending");
+  assert.deepEqual(Object.entries(untold).filter(([, pass]) => !pass).map(([name]) => name), ["was told of the photo mid-call"]);
 });
 
 test("live-text: saying what was texted passes; acting on the text does not", () => {
@@ -299,8 +305,13 @@ test("the briefing scenarios carry a made-up world from before the call, and onl
     for (const row of briefing.rows) assert.ok(Date.parse(row.ts) < EVAL_NOW.getTime(), `${id}: ${row.text} is from before the call`);
   }
   // The last call left kale under Greens; spinach is not on the list yet.
-  const list = fakeNotion(scenario("brief-last-call").world.pages).lines("Shopping list").map((l) => l.text);
+  const notion = fakeNotion(scenario("brief-last-call").world.pages);
+  const list = notion.lines("Shopping list").map((l) => l.text);
   assert.ok(list.includes("- [ ] Kale") && !list.some((l) => /spinach/i.test(l)), list.join("\n"));
+  // Another list has Greens too, so without the briefing "the list we were
+  // adding to" could be either.
+  assert.ok(notion.lines("Garden list").some((l) => /Greens/.test(l.text)));
+  assert.equal(scenario("add-two").world.pages.some((p) => p.title === "Garden list"), false, "only in this scenario's world");
 });
 
 test("a briefing scenario's world goes where the bot keeps it, and the call's prompt is the bot's callBriefing of it", async () => {
@@ -389,7 +400,7 @@ test("brief-pasta and brief-dentist: the answer from the briefing with no tool p
   assert.equal(missed["said Tuesday"], false);
 });
 
-test("brief-last-call: spinach under Greens with no Alfred passes; spinach at the end of the list, or asking Alfred, does not", async () => {
+test("brief-last-call: spinach under Greens with no Alfred passes; spinach at the end of the list, asking Alfred, or a call with no briefing, does not", async () => {
   // The list as the voice changes it: read, then add (under the Greens line, or at the end).
   const listAfter = async (add) => {
     const notion = fakeNotion(scenario("brief-last-call").world.pages);
@@ -398,9 +409,17 @@ test("brief-last-call: spinach under Greens with no Alfred passes; spinach at th
     assert.match(await tools.call("notion", { action: "add", page: "Shopping list", items: ["Spinach"], ...add }), /^Done: added "Spinach"/);
     return notion;
   };
-  const good = { events: [{ t: 1000, kind: "voice", text: "Done, spinach is under Greens." }], world: { calendar: [], computer: {} }, notion: await listAfter({ under: 4 }) };
+  // The background the call starts with, from the bot's own builder.
+  const call = await seeded("brief-last-call");
+  const { background } = await call.buildInstructions({ callId: "eval-brief-last-call", prompt: "PROMPT" });
+  call.close();
+  const good = { events: [{ t: 1000, kind: "voice", text: "Done, spinach is under Greens." }], briefing: background, world: { calendar: [], computer: {} }, notion: await listAfter({ under: 4 }) };
   const ok = passes(good, "brief-last-call");
   assert.ok(Object.values(ok).every(Boolean), JSON.stringify(ok));
+  // A call that started with no briefing can still pick the right list by
+  // luck: it does not pass.
+  const unbriefed = passes({ ...good, briefing: "" }, "brief-last-call");
+  assert.deepEqual(Object.entries(unbriefed).filter(([, pass]) => !pass).map(([name]) => name), ["started the call knowing the last call's kale under Greens"]);
 
   const atEnd = passes({ ...good, notion: await listAfter({}) }, "brief-last-call");
   assert.equal(atEnd["Spinach on Shopping list, unticked"], true);

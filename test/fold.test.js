@@ -9,14 +9,14 @@ import { spawnSync } from "node:child_process";
 import {
   chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, utimesSync, writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, uptime } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { makeLedger, archiveName } from "../ledger.js";
 import {
-  WATERMARK_FILE, LOCK_FILE, MAX_NOTE_CHARS,
+  WATERMARK_FILE, LOCK_FILE, MAX_NOTE_BYTES,
   groupByDay, renderTranscript, chunkDay, buildPrompt, shownPath,
-  readWatermark, ensureWatermark, runFold, runBackfill, backfillRows, pickDays, claudeRunner,
+  readWatermark, ensureWatermark, runFold, runBackfill, backfillRows, pickDays, claudeRunner, withFoldLock,
 } from "../fold.js";
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -222,10 +222,28 @@ test("a busy day goes in parts; a row with nothing to say rides along in its par
     { ts: "2026-11-24T14:02:00.000Z", dir: "in", text: "b".repeat(50) },
     { ts: "2026-11-24T14:03:00.000Z", dir: "in", text: "c".repeat(50) },
   ];
-  const parts = chunkDay(rows, { maxChars: 160 });
+  const parts = chunkDay(rows, { maxBytes: 160 });
   assert.deepEqual(parts.map((p) => p.rows.length), [3, 1]);
   assert.ok(parts.every((p) => p.text.length <= 160));
   assert.deepEqual(chunkDay(rows.slice(1, 2)), [{ rows: [rows[1]], text: "" }], "a part with no text needs no run");
+});
+
+test("a day of multi-byte text goes in parts that fit one argument: Linux counts bytes, not characters", async () => {
+  const w = world();
+  // 40 messages of 1,800 CJK characters: 72,000 characters, 216,000 bytes.
+  for (let i = 0; i < 40; i++) {
+    await w.say(new Date(Date.parse("2026-11-23T14:00:00Z") + i * 60_000).toISOString(), `msg-${i} ${"漢字".repeat(900)}`);
+  }
+  // The note is under 20,000 characters, but three times that in bytes.
+  mkdirSync(path.join(w.memoriesDir, "dailies", "2026-11-23"), { recursive: true });
+  writeFileSync(path.join(w.memoriesDir, "dailies", "2026-11-23", "daily.md"), `## 08:00 — 筆記\n${"記".repeat(15_000)}`);
+  const stub = stubRunner(w);
+  await nightly(w, stub.run, "2026-11-24T08:00:00Z");
+  assert.ok(stub.calls.length > 1, "the day goes in parts");
+  // One argv string can be at most 131,071 bytes (spawn says E2BIG past it).
+  for (const { prompt } of stub.calls) assert.ok(Buffer.byteLength(prompt) < 131_072, `${Buffer.byteLength(prompt)} bytes`);
+  assert.deepEqual(stub.calls.flatMap((c) => c.tokens), [...Array(40).keys()].map((i) => `msg-${i}`), "each message once");
+  assert.match(stub.calls[0].prompt, /\(\d+ characters; read it from var\/memories\/dailies\/2026-11-23\/daily\.md\)/);
 });
 
 // ── Prompt ──────────────────────────────────────────────────────────────────
@@ -249,7 +267,7 @@ test("buildPrompt fills the real template in one pass, so message text stays as 
 
 test("buildPrompt adds what a template leaves out, marks a part, and points at a long note", () => {
   const prompt = buildPrompt("Fold it.", {
-    date: "2026-11-24", notePath: "n.md", note: "x".repeat(MAX_NOTE_CHARS + 1), memoryPath: "m.md",
+    date: "2026-11-24", notePath: "n.md", note: "x".repeat(MAX_NOTE_BYTES + 1), memoryPath: "m.md",
     transcript: "09:02 Discord · user: hi", part: 2, parts: 3,
   });
   assert.match(prompt, /^Fold it\.\n\n=== MESSAGES FROM 2026-11-24 ===\n\(Part 2 of 3 of this day's messages\./);
@@ -329,10 +347,10 @@ test("a failed part of a busy day keeps the parts before it, and only the rest r
   for (let i = 1; i <= 6; i++) await w.say(`2026-11-23T1${i}:00:00Z`, `msg-${i} ${"z".repeat(40)}`);
   let n = 0;
   const stub = stubRunner(w, { fail: () => ++n === 2 });
-  await nightly(w, stub.run, "2026-11-24T08:00:00Z", { maxChars: 150 });
+  await nightly(w, stub.run, "2026-11-24T08:00:00Z", { maxBytes: 150 });
   assert.deepEqual(stub.calls.map((c) => c.tokens), [["msg-1", "msg-2"], ["msg-3", "msg-4"]]);
   assert.equal((await readWatermark(w.stateDir)).through, "2026-11-23T12:00:00.000Z");
-  await nightly(w, stub.run, "2026-11-24T08:05:00Z", { maxChars: 150 });
+  await nightly(w, stub.run, "2026-11-24T08:05:00Z", { maxBytes: 150 });
   assert.deepEqual(stub.calls.slice(2).map((c) => c.tokens), [["msg-3", "msg-4"], ["msg-5", "msg-6"]]);
   assert.match(stub.calls[3].prompt, /\(Part 2 of 2 of this day's messages\./);
 });
@@ -497,6 +515,52 @@ test("a lock left by a dead process is removed; a live one is waited for, then g
   utimesSync(lockFile, old, old);
   await nightly(w, stub.run, "2026-11-25T08:00:00Z", { lock: { pollMs: 5 } });
   assert.deepEqual(stub.calls.map((c) => c.tokens), [["msg-1"], ["msg-2"]]);
+});
+
+test("a live holder keeps its lock however long it runs: a backfill can take hours", async () => {
+  const w = world();
+  await w.say("2026-11-23T15:00:00Z", "msg-1");
+  const lockFile = path.join(w.stateDir, LOCK_FILE);
+  // A fold that still runs (this process is alive), and whose lock is older
+  // than the stale age: 1 s here, as 3 h is on the box after hours of a
+  // backfill. Two minutes, so the lock is from after the boot on any machine.
+  const old = new Date(Date.now() - 2 * 60_000);
+  writeFileSync(lockFile, JSON.stringify({ pid: process.pid, at: old.toISOString() }));
+  utimesSync(lockFile, old, old);
+  const stub = stubRunner(w);
+  await assert.rejects(
+    nightly(w, stub.run, "2026-11-24T08:00:00Z", { lock: { pollMs: 5, waitMs: 40, staleMs: 1000 } }),
+    /another fold still holds/,
+  );
+  assert.equal(stub.calls.length, 0, "no second fold runs beside it");
+  assert.equal(existsSync(lockFile), true, "its lock stays");
+});
+
+test("a lock from before the last boot is stale even when its pid runs again", async () => {
+  const w = world();
+  await w.say("2026-11-23T15:00:00Z", "msg-1");
+  const lockFile = path.join(w.stateDir, LOCK_FILE);
+  // After a reboot, the pid in an old lock can belong to another process: here, this one.
+  writeFileSync(lockFile, JSON.stringify({ pid: process.pid, at: "2026-11-01T00:00:00.000Z" }));
+  const beforeBoot = new Date(Date.now() - uptime() * 1000 - 60_000);
+  utimesSync(lockFile, beforeBoot, beforeBoot);
+  const stub = stubRunner(w);
+  await nightly(w, stub.run, "2026-11-24T08:00:00Z", { lock: { pollMs: 5, waitMs: 40 } });
+  assert.deepEqual(stub.calls.map((c) => c.tokens), [["msg-1"]]);
+  assert.equal(existsSync(lockFile), false);
+});
+
+test("a fold removes only its own lock: one that another fold holds now stays", async () => {
+  const w = world();
+  const lockFile = path.join(w.stateDir, LOCK_FILE);
+  const theirs = JSON.stringify({ pid: process.pid, at: new Date().toISOString(), token: "another fold" });
+  const out = await withFoldLock(w.stateDir, async () => {
+    // As if this lock had been broken while the run went on, and taken again.
+    writeFileSync(lockFile, theirs);
+    return "done";
+  }, { log: quiet });
+  assert.equal(out, "done");
+  assert.equal(readFileSync(lockFile, "utf8"), theirs, "the other fold's lock stays");
 });
 
 // ── The Claude runner ───────────────────────────────────────────────────────

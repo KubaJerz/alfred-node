@@ -10,6 +10,11 @@
 // Options: --model --reasoning --eagerness --voice --noise --silent-chains 0|1
 //          --only <ids> --repeat <n> --concurrency <n> --no-judge --label <name>
 //          --alfred-ms <n> (how long the stand-in Alfred takes; default 4000)
+//          --no-briefing  a control run: each call starts with the prompt
+//                         alone (as VOICE_OPENAI_BRIEFING=0), so the brief-*
+//                         scenarios show what the briefing adds
+//          --no-feed      a control run: nothing reaches a call mid-call (as
+//                         VOICE_OPENAI_LIVE=0), for the live-* scenarios
 //
 // Each run writes agent/var/voice-eval/runs/<time>-<label>/: per call a .txt
 // transcript, a .json record and a .wav recording (caller left, Alfred right),
@@ -60,7 +65,11 @@ const settings = {
   voice: opt("voice", process.env.VOICE_OPENAI_VOICE || undefined),
   noise: opt("noise", process.env.VOICE_OPENAI_NOISE || undefined),
   quietChains: opt("silent-chains", process.env.VOICE_OPENAI_SILENT_CHAINS ?? "1") !== "0",
+  briefing: !flag("no-briefing"),
+  feed: !flag("no-feed"),
 };
+// What a control run leaves out, for the header and the summary.
+const off = [!settings.briefing && "briefing off", !settings.feed && "live feed off"].filter(Boolean).map((s) => `, ${s}`).join("");
 const only = opt("only", "").split(",").filter(Boolean);
 const scenarios = only.length ? SCENARIOS.filter((s) => only.includes(s.id)) : SCENARIOS;
 if (only.length && scenarios.length !== only.length) {
@@ -79,7 +88,7 @@ mkdirSync(outDir, { recursive: true });
 const jobs = scenarios.flatMap((s) => Array.from({ length: repeat }, (_, n) => ({ s, n: n + 1 })));
 console.log(
   `▶ ${jobs.length} test call(s): ${settings.model}, reasoning ${settings.reasoning || "default"}, ` +
-    `silent chains ${settings.quietChains ? "on" : "off"}, ${concurrency} at a time → ${outDir}`
+    `silent chains ${settings.quietChains ? "on" : "off"}${off}, ${concurrency} at a time → ${outDir}`
 );
 
 const results = [];
@@ -159,7 +168,7 @@ const f1 = (x) => (x == null ? "–" : x.toFixed(1));
 const md = [
   `# Voice eval: ${label}`,
   "",
-  `${settings.model}, reasoning ${settings.reasoning || "default"}, silent chains ${settings.quietChains ? "on" : "off"}, ${stamp}`,
+  `${settings.model}, reasoning ${settings.reasoning || "default"}, silent chains ${settings.quietChains ? "on" : "off"}${off}, ${stamp}`,
   "",
   `**${totals.callsAllPassed}/${totals.calls} calls passed every check** · checks ${pct(totals.checksPassed, totals.checksTotal)} · grader ${f1(totals.grader)}/8 · ${f1(totals.words)} words a call · first audio ${num(totals.firstAudioMs && Math.round(totals.firstAudioMs), " ms")} · $${totals.usd.toFixed(2)}`,
   "",

@@ -72,7 +72,15 @@ got. It moves only after a run worked, so a failed day is tried again by the
 next run. Every run also reads the archives that hold rows after the
 watermark, so a failed `/clear` fold is not lost. A missing watermark is set
 to the last row of the newest archive: the old archives count as folded,
-nothing in the live file does. `fold.lock` keeps two folds apart.
+nothing in the live file does. `fold.lock` keeps two folds apart. A fold that
+still runs keeps it, however long it takes (a backfill of months runs for
+hours); a lock whose process is gone, or that is older than the last boot, is
+removed. Each lock holds a token, and a fold removes only its own.
+
+The prompt rides on one `-p` argument, which Linux caps at 128 KB, counted in
+bytes. So a busy day goes in parts of at most 60,000 bytes of transcript, and a
+note over 20,000 bytes is read from its file instead of shown: a day of CJK
+text or emoji fits as well as one of English.
 
 **Past days.** `scripts/backfill-dailies.mjs` folds the archived days from
 before the fold into their own notes (`--days`, `--from`, `--to`,
@@ -105,7 +113,14 @@ next one. A restart loses nothing. `/clear` sets it to 0; a missing, broken or
 past-the-end cursor reads from 0. Over 12,000 characters the block keeps the
 tool changes first, then the newest lines. A `use_tools` turn is a turn too, so
 it carries the call so far, and Alfred reads the caller's own words next to the
-request.
+request. The caller's line can ask for more than that request ("Did Sarah
+email me? And put kale on the list."), and the call does the rest itself, at
+the same time. So a `use_tools` turn's block ends with one more line
+(`CALL_TURN_NOTE`):
+
+```
+For context only: do just the request after this block, not the rest of what was asked on the call.
+```
 
 ## A new Alfred session
 
@@ -113,9 +128,15 @@ A new session (after `/clear`, or the first turn after a dream pass) holds
 nothing of the recent past, so `loadContext` (`sessionContext` in `context.js`)
 gives it `SOUL.md`, `USER.md`, `MEMORY.md`, yesterday's and today's daily notes,
 and the messages of the last 6 hours on every channel, word for word, as
-`[RECENT MESSAGES]`. The turn's own message is left out (it follows), a call
-shows once, and over 24,000 characters the oldest messages go first. The
-catch-up block then leaves out the rows that the recent messages show.
+`[RECENT MESSAGES]`. When the fold watermark is older than that, the messages
+reach back to it: every row no fold has put in a note shows. The nightly fold
+stops at the end of yesterday, so a text sent at 1 AM is in no note until the
+next night; at 9:30 it is more than 6 hours old, and the session that held it
+is not resumed after the dream. So each row is in a note or in the messages.
+Before the first fold (no watermark), the 6 hours alone. The turn's own message
+is left out (it follows), a call shows once, and over 24,000 characters the
+oldest messages go first. The catch-up block then leaves out the rows that the
+recent messages show.
 
 ## The voice, while a call is live
 
@@ -150,28 +171,36 @@ It is Wednesday, December 2, 2026 at 10:00 AM (Eastern) as the call starts.
 
 === BACKGROUND: WHAT YOU KNOW FROM BEFORE THIS CALL ===
 About the user, your memory, the daily notes of yesterday and today, and what
-was said in the last 6 hours: by text, by SMS and on earlier calls. ...
-It is background only. What it already says needs no tool; for anything to
-look up or change, still use your tools. Do not recite it, or bring it up,
-unless the caller asks.
+was said in the last 6 hours, and before that when no note has it yet: by
+text, by SMS and on earlier calls. ...
+It is background only. What it says counts as already said: it needs no tool,
+even about the user's own life. For anything it does not say, and anything to
+change, still use your tools. Do not recite it, or bring it up, unless the
+caller asks.
 
 [About the user]                         USER.md
 [Your memory]                            MEMORY.md
 [Yesterday's daily note: <day>]
 [Today's daily note: <day>]
-[The last 6 hours, oldest first. ...]    the ledger, as below
+[The last 6 hours, and older messages ...]   the ledger, as below
 
 === END OF BACKGROUND ===
 ```
 
 The guidance lives in the code that builds the block, not in
-`phone-voice.md`, which stays under its 400-word cap.
+`phone-voice.md`, which stays under its 400-word cap. That prompt sends "the
+user's own life" to a tool and lets only "what was already said on this call"
+go without one; the head says the background is the second, so "when's the
+dentist?" answers from an SMS in it instead of reading the calendar.
 
-**What the messages show.** The ledger rows of the last 6 hours
+**What the messages show.** The ledger rows of the last 6 hours, and older
+ones that no fold has put in a note yet, as for a new session
 (`briefingRows`), through the same renderer as Alfred's context:
 
 - earlier calls from their own rows only (`src` `call` and `tool`), never their
-  `use_tools` turns, so a call shows once;
+  `use_tools` turns, so a call shows once (an older out row has no `via`: it
+  goes with its turn's in row, so a call's answer from before the call rows
+  goes too);
 - the chat of the other channels (`via` not `call`);
 - not a turn that said nothing or failed (`silent`, `cancelled`, `error`,
   `timeout`, `auth_error`), and never the rows of the call being briefed;
@@ -224,7 +253,8 @@ returns the `ts` of each row it shows, each live update carries its row's
 update(s) that the briefing tells already`).
 
 **Privacy.** The briefing goes to OpenAI with every call: `USER.md`,
-`MEMORY.md`, two daily notes and up to 6 hours of chat. `VOICE_OPENAI_BRIEFING=0`
+`MEMORY.md`, two daily notes and the chat that no note has yet, at least 6
+hours of it, all within the budget. `VOICE_OPENAI_BRIEFING=0`
 starts every call with the prompt alone, as before.
 
 ## Files
@@ -249,9 +279,9 @@ count. So:
 |---|---|---|---|
 | fold (`fold.js`) | nightly, and on `/clear` | every row not folded yet | each day's note |
 | catch-up (`makeCatchUp`) | each Alfred turn | `call` and `tool` rows after the cursor | a block in front of his message |
-| new session (`sessionContext`) | a new Alfred session | the last 6 hours, a call once | `[RECENT MESSAGES]` |
+| new session (`sessionContext`) | a new Alfred session | the last 6 hours and every row not folded yet, a call once | `[RECENT MESSAGES]` |
 | live feed (`liveFeed`) | while a 2B call is live | each new chat row not of a call | a system item in the call |
-| briefing (`callBriefing`) | a 2B call starts | the last 6 hours: calls from their own rows, other chat | the background in the call's prompt |
+| briefing (`callBriefing`) | a 2B call starts | the last 6 hours and every row not folded yet: calls from their own rows, other chat | the background in the call's prompt |
 
 ## Settings
 
@@ -280,7 +310,8 @@ and `brief-*` (what the call starts knowing).
 ## Not done yet
 
 - The paid voice eval has not been run on the `live-*` and `brief-*`
-  scenarios, and the "switch fast" test on a real phone
+  scenarios, nor its control runs (`--no-briefing`, `--no-feed`), and the
+  "switch fast" test on a real phone
   (`docs/phone-context-review.md`, test matrix) has not been done.
 - `scripts/backfill-dailies.mjs` has not been applied to the real data; that
   waits for the owner's go-ahead.
@@ -293,9 +324,10 @@ and `brief-*` (what the call starts knowing).
   asked. The fold and a new session keep them in that case.
 - No condenser. Add one only if the "Briefing cut to fit" line shows up often
   (`docs/phone-context-review.md`, "Condensing, if ever").
-- No "Phone call" line in the daily note at the end of a call: the nightly
-  fold writes the call into its day's note, and each direct-tool change still
-  adds a "By phone" line at once.
+- No "Phone call" line in the daily note at the end of a call, and no "By
+  phone" line for a direct-tool change: the nightly fold writes the call and
+  its changes into its day's note, once. Until then, the catch-up, a new
+  session and the briefing show the rows.
 - `agent/SOUL.md`'s startup checklist still tells Alfred to read `USER.md`,
   `MEMORY.md` and the notes himself, though a new session now gets them.
   Harmless, and a prompt change, so left alone.

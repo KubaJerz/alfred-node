@@ -8,12 +8,15 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { makeLedger, inboundRow, callRow, toolRow } from "../ledger.js";
+import { WATERMARK_FILE } from "../fold.js";
 import {
-  CURSOR_FILE, CATCH_UP_MAX_CHARS, RECENT_WINDOW_MS, CLEARED_UPDATE, BRIEFING_MAX_CHARS, BRIEFING_NOTE_MAX_CHARS,
+  CURSOR_FILE, CATCH_UP_MAX_CHARS, CALL_TURN_NOTE, RECENT_WINDOW_MS, CLEARED_UPDATE, BRIEFING_MAX_CHARS, BRIEFING_NOTE_MAX_CHARS,
   makeCatchUp, catchUpBlock, sessionContext, recentMessages, turnWorked, liveUpdate, liveFeed, callBriefing, briefingRows,
 } from "../context.js";
 
+const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const OK = { result: "Done.", session_id: "s1", is_error: false };
 const WHO = { tag: "kuba", id: "1", channel: "c1" };
 const CALL = { callId: "v3:call-1", caller: "+15551234567" };
@@ -57,7 +60,7 @@ async function turn(w, { text = "hi", via = "discord", callId, response = OK, ne
       agentDir: w.agentDir, stateDir: w.stateDir, ledger: w.ledger, now: w.now(), until: inbound.ts, log: w.log,
     }));
   }
-  const block = catchUp.block(phone, { skip: shown });
+  const block = catchUp.block(phone, { skip: shown, callTurn: !!callId });
   const moved = await catchUp.advance(phone, response);
   if (turnWorked(response)) await w.ledger.append({ dir: "out", via, kind: "reply", text: "(answer)", callId });
   return { block, context, phone, moved };
@@ -292,6 +295,10 @@ test("a use_tools turn carries the call so far, and each later turn goes on from
   ]);
   // The request is the message itself, not a line of the block.
   assert.equal(first.block.includes("Check for an email"), false);
+  // The caller asked two things, and the call adds the kale itself: the block
+  // is context, and the turn does only its own request.
+  assert.ok(first.block.endsWith(`\n${CALL_TURN_NOTE}\n]\n\n`), first.block);
+  for (const word of ["voice", "model", "assistant", "Alfred"]) assert.equal(CALL_TURN_NOTE.includes(word), false, word);
 
   await said(w, "out", "Sarah wrote about the lease.");
   await tool(w, 'added "Kale" (Notion page "Shopping list")');
@@ -310,6 +317,7 @@ test("a use_tools turn carries the call so far, and each later turn goes on from
     "you said (on the call): Two meetings.",
     "(the call ended after 2 min)",
   ]);
+  assert.equal(third.block.includes(CALL_TURN_NOTE), false, "a turn by text is not on the call");
   // Each of the call's 8 rows (7 call rows and 1 tool row) shows in one
   // block, one time. The turns' own rows (requests and answers) show in none.
   const all = [first, second, third].flatMap((t) => rowLines(t.block));
@@ -449,6 +457,44 @@ test("the recent messages name each day when they cross midnight, and show the f
     "On Wednesday 25 November:",
     "00:30 the user said (by text): thanks",
   ].join("\n"));
+});
+
+// The nightly fold at 03:00 put every row up to the end of yesterday in its
+// note. A late-night exchange after midnight waits for the next night.
+async function lateNight(w) {
+  seedFiles(w);
+  w.at("2026-11-24T02:00:00.000Z"); // 21:00 EST on the 23rd: in yesterday's note now
+  const folded = await w.ledger.append(inboundRow({ who: WHO, via: "discord", text: "folded last night", agentDir: w.agentDir }));
+  writeFileSync(path.join(w.stateDir, WATERMARK_FILE), JSON.stringify({ start: null, through: folded.ts }));
+  w.at("2026-11-24T06:10:00.000Z"); // 01:10 on the 24th: in no note yet
+  await w.ledger.append(inboundRow({ who: WHO, via: "discord", text: "remind me to email Prof X in the morning", agentDir: w.agentDir }));
+  await w.ledger.append({ dir: "out", via: "discord", kind: "reply", text: "I will." });
+  w.at("2026-11-24T14:30:00.000Z"); // 09:30: 8 h 20 min later
+}
+
+test("a new session gets the rows that no fold has reached, older than the window too: each row is in a note or in the messages", async () => {
+  const w = world();
+  await lateNight(w);
+  const { context } = await turn(w, { text: "what did I want to email about?", newSession: true });
+  const recent = context.split("[RECENT MESSAGES]")[1].split("[/RECENT MESSAGES]")[0];
+  assert.deepEqual(recent.trim().split("\n").slice(1), [
+    "On Tuesday 24 November:",
+    "01:10 the user said (by text): remind me to email Prof X in the morning",
+    "01:10 you said (by text): I will.",
+  ]);
+  assert.equal(context.includes("folded last night"), false, "a folded row older than the window is in its note");
+  // With no watermark yet (before the first fold), the window alone, as before.
+  rmSync(path.join(w.stateDir, WATERMARK_FILE));
+  assert.equal((await newSession(w)).text.includes("Prof X"), false);
+});
+
+test("a watermark that cannot be read leaves the window alone, and is logged", async () => {
+  const w = world();
+  await lateNight(w);
+  writeFileSync(path.join(w.stateDir, WATERMARK_FILE), "{ not json");
+  const { text } = await newSession(w);
+  assert.equal(text.includes("Prof X"), false);
+  assert.ok(w.errors.some((e) => /watermark/i.test(e)), w.errors.join("\n"));
 });
 
 test("a new session with no recent messages and no notes gets the files there are, and a failed read is logged", async () => {
@@ -627,13 +673,18 @@ test("the call's briefing: the prompt, then one headed background block: USER, M
     "[Your memory]\nthe memory file",
     "[Yesterday's daily note: Monday 23 November]\nthe note of yesterday",
     "[Today's daily note: Tuesday 24 November]\nthe note of today",
-    "[The last 6 hours, oldest first. Times are Eastern. A call here is an earlier call, not this one.]",
+    "[The last 6 hours, and older messages that no daily note has yet, oldest first. Times are Eastern. A call here is an earlier call, not this one.]",
   ].map((s) => b.text.indexOf(s));
   assert.ok(order[0] === 0 && order.every((at, i) => i === 0 || at > order[i - 1]), JSON.stringify(order));
   assert.ok(b.text.endsWith("\n\n=== END OF BACKGROUND ==="));
   assert.equal(b.text, `${PROMPT}\n\n${b.background}`);
-  // The head says what the background is for, since the prompt does not.
-  assert.match(b.background, /It is background only\. What it already says needs no tool; for anything to look up or change, still use your tools\. Do not recite it, or bring it up, unless the caller asks\./);
+  // The head says what the background is for, since the prompt does not. The
+  // prompt sends "the user's own life" to a tool and lets only "what was
+  // already said on this call" go without one: the head puts the background
+  // with the second, by name, so the two never pull apart (brief-dentist).
+  assert.match(b.background, /It is background only\. What it says counts as already said: it needs no tool, even about the user's own life\. For anything it does not say, and anything to change, still use your tools\. Do not recite it, or bring it up, unless the caller asks\./);
+  const voicePrompt = readFileSync(path.join(REPO, "agent", "phone-voice.md"), "utf8").replace(/\s+/g, " ");
+  assert.match(voicePrompt, /The user's own life, anything to do, and anything current go to a tool\. What was already said on this call needs no tool\./, "the rule the head answers");
   assert.match(b.background, /"You" in it is you, on every channel\./);
   assert.equal(b.text.includes("the soul file"), false, "SOUL.md is Alfred's prompt, not the voice's");
   assert.equal(b.text.includes("two days ago"), false);
@@ -699,6 +750,30 @@ test("briefingRows: earlier calls' own rows and the other channels' chat; no use
     { ts: "8", src: "call", via: "call", kind: "start", callId: "b" },
   ];
   assert.deepEqual(briefingRows(rows, { callId: "b" }).map((r) => r.ts), ["1", "2", "5", "7"]);
+});
+
+test("briefingRows: an older out row with no via is of its turn, so a call's answer from before the deploy goes with its request", async () => {
+  // Rows as the old logTurn wrote them: the in row names its channel, the out row does not.
+  const old = [
+    { dir: "in", via: "discord", text: "Plan the week?", attachments: 0 },
+    { dir: "out", kind: "reply", text: "Gym Monday.", files: 0 },
+    { dir: "in", via: "call", text: "Did Sarah email?", attachments: 0 },
+    { dir: "out", kind: "reply", text: "OLD-CALL-ANSWER: Sarah wrote about the lease.", files: 0 },
+    { dir: "in", via: "sms", text: "Milk?", attachments: 0 },
+    { dir: "out", kind: "reply", text: "On the list.", files: 0 },
+  ];
+  assert.deepEqual(briefingRows(old.map((r, i) => ({ ts: String(i), ...r }))).map((r) => r.text), [
+    "Plan the week?", "Gym Monday.", "Milk?", "On the list.",
+  ]);
+  const w = world();
+  for (const row of old) await w.ledger.append(row);
+  const b = await brief(w);
+  assert.deepEqual(untimed(recentOf(b.text)).slice(1), [
+    "the user said (by text): Plan the week?",
+    "you said (by text): Gym Monday.",
+    "the user said (by SMS): Milk?",
+    "you said (by SMS): On the list.",
+  ]);
 });
 
 test("in the briefing, each side is you: your replies by text and SMS, your lines and changes on a call; no model, service or other assistant is named", async () => {
@@ -828,6 +903,18 @@ test("the last call shows whole even when it began before the window; other rows
     "you said (on the call): said inside the window",
     "(the call ended after 20 min)",
   ]);
+});
+
+test("the briefing gets the rows that no fold has reached, older than the window too", async () => {
+  const w = world();
+  await lateNight(w);
+  const b = await brief(w);
+  assert.deepEqual(recentOf(b.text), [
+    "On Tuesday 24 November:",
+    "01:10 the user said (by text): remind me to email Prof X in the morning",
+    "01:10 you said (by text): I will.",
+  ]);
+  assert.equal(b.text.includes("folded last night"), false);
 });
 
 test("nothing to tell: the briefing is the prompt alone", async () => {

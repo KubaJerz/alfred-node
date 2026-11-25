@@ -29,6 +29,7 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { link, mkdir, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { uptime } from "node:os";
 import path from "node:path";
 import { TIMEZONE, dailyDir, dailyNotePath, easternDate } from "./dailies.js";
 import { dayOf, parseArchiveName, parseRows, retoldByCall, srcOf } from "./ledger.js";
@@ -42,11 +43,12 @@ export const PROMPT_FILE = "memory-prompt.md";
 export const MAX_MESSAGE_CHARS = 2000;
 // One Claude run. A busier day goes in parts. The prompt rides on -p, and
 // Linux refuses one argument over 128 KB, so this leaves room for the note
-// and the instructions.
-export const MAX_TRANSCRIPT_CHARS = 60_000;
+// and the instructions. Linux counts bytes, and a character of CJK text or an
+// emoji is 3 or 4 of them, so both sizes here are UTF-8 bytes, not characters.
+export const MAX_TRANSCRIPT_BYTES = 60_000;
 // The prompt shows the current note up to this size. Over it, the run reads
 // the note from the file (it reads the file before an edit anyway).
-export const MAX_NOTE_CHARS = 20_000;
+export const MAX_NOTE_BYTES = 20_000;
 export const FOLD_TIMEOUT_MS = 10 * 60 * 1000;
 
 const CHANNELS = { discord: "Discord", sms: "SMS", call: "phone call" };
@@ -131,17 +133,32 @@ async function writeWatermark(stateDir, wm) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// A lock is stale when its process is gone, or when it is very old (a hung
-// run, or a pid used again after a reboot). A lock with no pid in it is being
-// written now, or is broken. It is broken when it is older than a minute.
-async function lockIsStale(file, staleMs) {
-  const s = await stat(file).catch(() => null);
-  if (!s) return false; // gone: try again
-  const age = Date.now() - s.mtimeMs;
-  if (age > staleMs) return true;
+// The lock file's text, then its time, or null when there is none. The text
+// comes first: if the file is replaced in between, the newer time can only
+// make an old lock look newer, never a new one older.
+async function readLock(file) {
+  try {
+    const text = await readFile(file, "utf8");
+    return { text, mtimeMs: (await stat(file)).mtimeMs };
+  } catch {
+    return null; // gone: try again
+  }
+}
+
+// A lock is stale when its holder is gone. A holder that still runs keeps its
+// lock, however long it takes: a backfill of months runs for hours, and
+// nothing refreshes the file meanwhile. Gone means: its pid runs no process,
+// or the lock is older than the last boot, after which that pid can belong to
+// another process. A lock with no pid in it is being written now, or is
+// broken: it is broken when it is older than a minute. When the pid cannot be
+// checked (EPERM: another user's process has it), only an age over staleMs
+// makes the lock stale.
+function lockIsStale({ text, mtimeMs }, staleMs) {
+  if (mtimeMs < Date.now() - uptime() * 1000) return true;
+  const age = Date.now() - mtimeMs;
   let pid;
   try {
-    pid = JSON.parse(await readFile(file, "utf8")).pid;
+    pid = JSON.parse(text).pid;
   } catch {
     /* no pid */
   }
@@ -150,27 +167,36 @@ async function lockIsStale(file, staleMs) {
     process.kill(pid, 0);
     return false;
   } catch (err) {
-    return err.code === "ESRCH";
+    return err.code === "ESRCH" || age > staleMs;
   }
 }
 
 // Run fn while this process holds the fold lock (a file in the state dir).
 // Another fold waits for it. After waitMs, it gives up with an error.
+// Each lock holds a token of its own, so a fold removes only the lock it
+// took: one that another fold broke as stale and took is that fold's now.
 export async function withFoldLock(stateDir, fn, { waitMs = 30 * 60 * 1000, pollMs = 2000, staleMs = 3 * 60 * 60 * 1000, log = console.log } = {}) {
   const file = path.join(stateDir, LOCK_FILE);
   await mkdir(stateDir, { recursive: true });
   const giveUpAt = Date.now() + waitMs;
   let told = false;
+  let mine;
   for (;;) {
+    mine = JSON.stringify({ pid: process.pid, at: new Date().toISOString(), token: randomUUID() }) + "\n";
     try {
-      await writeFile(file, JSON.stringify({ pid: process.pid, at: new Date().toISOString() }) + "\n", { flag: "wx" });
+      await writeFile(file, mine, { flag: "wx" });
       break;
     } catch (err) {
       if (err.code !== "EEXIST") throw err;
     }
-    if (await lockIsStale(file, staleMs)) {
-      log(`🧠 Removing a stale fold lock (${file})`);
-      await unlink(file).catch(() => {});
+    const lock = await readLock(file);
+    if (lock && lockIsStale(lock, staleMs)) {
+      // Only the lock that was found stale: another fold that waited too can
+      // have removed it and taken the lock since.
+      if ((await readFile(file, "utf8").catch(() => null)) === lock.text) {
+        log(`🧠 Removing a stale fold lock (${file})`);
+        await unlink(file).catch(() => {});
+      }
       continue;
     }
     if (Date.now() >= giveUpAt) throw new Error(`another fold still holds ${file}`);
@@ -181,7 +207,7 @@ export async function withFoldLock(stateDir, fn, { waitMs = 30 * 60 * 1000, poll
   try {
     return await fn();
   } finally {
-    await unlink(file).catch(() => {});
+    if ((await readFile(file, "utf8").catch(() => null)) === mine) await unlink(file).catch(() => {});
   }
 }
 
@@ -312,21 +338,28 @@ export function renderTranscript(rows, opts) {
   return renderRows(rows, opts).filter(Boolean).join("\n");
 }
 
-// One day's rows in parts of at most maxChars of transcript: [{ rows, text }].
-// A row with nothing to say rides in the part it falls in, so the watermark
-// still passes it. A part with no text needs no Claude run.
-export function chunkDay(rows, { maxChars = MAX_TRANSCRIPT_CHARS, ...opts } = {}) {
+// One day's rows in parts of at most maxBytes of transcript (UTF-8, as the
+// argument counts them): [{ rows, text }]. A row with nothing to say rides in
+// the part it falls in, so the watermark still passes it. A part with no text
+// needs no Claude run.
+export function chunkDay(rows, { maxBytes = MAX_TRANSCRIPT_BYTES, ...opts } = {}) {
   const texts = renderRows(rows, opts);
   const parts = [];
   let part = null;
+  let bytes = 0; // of part.text
   rows.forEach((row, i) => {
     const text = texts[i];
-    if (!part || (text && part.text && part.text.length + 1 + text.length > maxChars)) {
+    const size = text ? Buffer.byteLength(text) : 0;
+    if (!part || (text && part.text && bytes + 1 + size > maxBytes)) {
       part = { rows: [], text: "" };
       parts.push(part);
+      bytes = 0;
     }
     part.rows.push(row);
-    if (text) part.text = part.text ? `${part.text}\n${text}` : text;
+    if (text) {
+      bytes += (part.text ? 1 : 0) + size;
+      part.text = part.text ? `${part.text}\n${text}` : text;
+    }
   });
   return parts;
 }
@@ -341,7 +374,7 @@ export function buildPrompt(template, { date, notePath, note = "", memoryPath, t
   const trimmed = note.trim();
   const shownNote = !trimmed
     ? "(empty)"
-    : trimmed.length > MAX_NOTE_CHARS
+    : Buffer.byteLength(trimmed) > MAX_NOTE_BYTES
       ? `(${trimmed.length} characters; read it from ${notePath})`
       : trimmed;
   const body = parts > 1
@@ -424,7 +457,7 @@ export function claudeRunner({ cwd, timeoutMs = FOLD_TIMEOUT_MS, spawnImpl = spa
 // and the next day goes on.
 // Dry run: print each prompt instead of running it, and write nothing.
 export async function foldDays({
-  rows, agentDir, memoriesDir, template, run, onDone, maxChars = MAX_TRANSCRIPT_CHARS,
+  rows, agentDir, memoriesDir, template, run, onDone, maxBytes = MAX_TRANSCRIPT_BYTES,
   stopOnFailure = true, dryRun = false, print = console.log, log = console.log,
 }) {
   const days = [];
@@ -432,7 +465,7 @@ export async function foldDays({
   for (const { date, rows: dayRows } of groupByDay(rows)) {
     const noteFile = dailyNotePath(memoriesDir, date);
     const notePath = shownPath(agentDir, noteFile);
-    const parts = chunkDay(dayRows, { maxChars, dayDir: shownPath(agentDir, dailyDir(memoriesDir, date)) });
+    const parts = chunkDay(dayRows, { maxBytes, dayDir: shownPath(agentDir, dailyDir(memoriesDir, date)) });
     const day = { date, rows: dayRows.length, parts: parts.length, runs: 0, ok: true };
     days.push(day);
     for (const [i, part] of parts.entries()) {
@@ -482,7 +515,7 @@ async function lastTs(archivePath) {
 // Holds the fold lock, except in a dry run, which writes nothing (not even the
 // first watermark).
 export async function runFold({
-  agentDir, stateDir, mode, archive, now = new Date(), run, maxChars,
+  agentDir, stateDir, mode, archive, now = new Date(), run, maxBytes,
   dryRun = false, print = console.log, log = console.log, lock = {},
 }) {
   const memoriesDir = path.join(stateDir, "memories");
@@ -509,7 +542,7 @@ export async function runFold({
       rows = rows.filter((r) => Date.parse(r.ts) <= upTo);
     }
     const result = await foldDays({
-      rows, agentDir, memoriesDir, template, run, maxChars, dryRun, print, log,
+      rows, agentDir, memoriesDir, template, run, maxBytes, dryRun, print, log,
       onDone: async (row) => {
         wm.through = row.ts;
         await writeWatermark(stateDir, wm);

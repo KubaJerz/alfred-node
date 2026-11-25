@@ -118,8 +118,15 @@ const AFTER_EARLIER_CALL = `- [ ] Milk
 - [ ] Greens
   - [ ] Kale
 - [ ] Eggs`;
-// The usual world, with one page's text changed.
-const worldWith = (title, markdown) => ({ ...world(), pages: PAGES.map((p) => (p.title === title ? { ...p, markdown } : p)) });
+// Another list with a Greens section, where spinach could go just as well.
+// Without the briefing, "the list we were adding to" could be either; only the
+// last call says which.
+const GARDEN = { title: "Garden list", markdown: "- [ ] Tomatoes\n- [ ] Greens\n  - [ ] Lettuce\n- [ ] Basil", parent: "Teamspace Home" };
+// The usual world, with one page's text changed, and more pages after it.
+const worldWith = (title, markdown, more = []) => ({
+  ...world(),
+  pages: [...PAGES.map((p) => (p.title === title ? { ...p, markdown } : p)), ...more],
+});
 
 // The photo in the live-photo calls. Only Alfred's reply says what it shows.
 const SHOES = "Those are Hoka Clifton 9 running shoes, in blue. Light and well cushioned: a good pick for daily road runs.";
@@ -241,6 +248,14 @@ const check = {
     name: "changed nothing",
     test: (r) => toolCalls(r).every((e) => e.name === "get_time" || ["read", "search"].includes(e.args?.action)),
   }),
+  // What a scenario is about reached the call. A scenario whose other checks
+  // can pass without it (a lucky guess, an obvious list) needs one of these,
+  // or a broken feed or briefing still passes.
+  told: (label, re) => ({
+    name: `was told ${label} mid-call`,
+    test: (r) => r.events.some((e) => e.kind === "told" && re.test(e.text)),
+  }),
+  briefed: (label, text) => ({ name: `started the call knowing ${label}`, test: (r) => (r.briefing || "").includes(text) }),
 };
 
 // Every call is held to these as well.
@@ -411,6 +426,8 @@ export const SCENARIOS = [
     turns: [{ rows: [texted("Thoughts on these?", { files: ["shoes.jpg"] })], say: "What do you think of the ones I just sent you?" }],
     alfred: [PHOTO, ...ALFRED],
     checks: [
+      // A voice told nothing also asks Alfred about "the ones I just sent".
+      check.told("of the photo", /\bsent a photo\b/),
       check.noGuess("what the photo shows", SHOE_WORDS),
       check.askedAlfred("about the photo", /\b(photo|picture|image|pic|sent|these|ones|shoes?)\b/i),
       check.said("the shoes, once Alfred said", /clifton|hoka/i),
@@ -432,11 +449,17 @@ export const SCENARIOS = [
   {
     // Call A added kale under Greens; call B goes on with the same list.
     id: "brief-last-call",
-    goal: "A call 20 minutes ago added a Greens section with kale to the shopping list. Now 'add spinach to the list we were adding to': add spinach to the shopping list, under Greens with the kale, directly in Notion, without asking Alfred or the caller which list.",
+    goal: "A call 20 minutes ago added a Greens section with kale to the shopping list. Now 'add spinach to the list we were adding to': add spinach to the shopping list (not the Garden list, which has Greens too), under Greens with the kale, directly in Notion, without asking Alfred or the caller which list.",
     briefing: { ...BACKGROUND, rows: [...MORNING, ...EARLIER_CALL] },
-    world: worldWith("Shopping list", AFTER_EARLIER_CALL),
+    world: worldWith("Shopping list", AFTER_EARLIER_CALL, [GARDEN]),
     turns: [{ say: "Add spinach to the list we were adding to." }],
-    checks: [check.added("Shopping list", "Spinach"), check.under("Shopping list", "Greens", "Spinach"), check.notAskedAlfred()],
+    checks: [
+      // The Garden list has Greens too: only the briefing says which list.
+      check.briefed("the last call's kale under Greens", 'you did (on the call): added "Kale" under "Greens" (Notion page "Shopping list")'),
+      check.added("Shopping list", "Spinach"),
+      check.under("Shopping list", "Greens", "Spinach"),
+      check.notAskedAlfred(),
+    ],
   },
   {
     // An SMS this morning; the calendar does not have it.

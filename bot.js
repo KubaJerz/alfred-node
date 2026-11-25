@@ -17,7 +17,7 @@ import { RONNIE_ROUTES } from "./ronnie/broker-routes.js";
 import { makeRonnie } from "./ronnie/runner.js";
 import { resolveRonnieLabels } from "./ronnie/labels.js";
 import { ensureLabels } from "./google/gmail-labels.js";
-import { dailyDir, dailyNotePath, attachmentName, buildAttachmentBlock } from "./dailies.js";
+import { dailyDir, attachmentName, buildAttachmentBlock } from "./dailies.js";
 import { makeLedger, inboundRow, callRow, toolRow } from "./ledger.js";
 import { makeCatchUp, sessionContext, liveFeed, callBriefing } from "./context.js";
 import { ensureWatermark } from "./fold.js";
@@ -130,8 +130,9 @@ const VOICE_OPENAI = {
   feed: process.env.VOICE_OPENAI_LIVE === "0" ? null : ({ push }) => liveFeed({ ledger, push }),
   // Each call's prompt is phone-voice.md plus a briefing of what the voice
   // should know already: USER.md, MEMORY.md, yesterday's and today's daily
-  // notes, and the last 6 hours of messages on every channel (callBriefing in
-  // context.js). It is built while the OpenAI socket opens. "0" starts every
+  // notes, and the last 6 hours of messages on every channel, with any older
+  // ones no fold has put in a note yet (callBriefing in context.js). It is
+  // built while the OpenAI socket opens. "0" starts every
   // call with the prompt alone, as before.
   buildInstructions: process.env.VOICE_OPENAI_BRIEFING === "0" ? null : ({ callId, prompt }) =>
     callBriefing({ stateDir: STATE_DIR, ledger, prompt, callId }),
@@ -919,8 +920,10 @@ async function handleTurn(target, userMessage, attachments = [], { signal, onTex
     // The phone block and the tag ride on this message only, like the
     // attachment block, so a resumed session still sees them. A new session's
     // recent messages show the newest calls already, so the block leaves those
-    // rows out. A /clear above already took its prefix off.
-    messageBody = catchUp.block(phone, { skip: shown }) + messageBody;
+    // rows out. A /clear above already took its prefix off. On a use_tools
+    // turn (callId), the block says it is context: the turn does its own
+    // request, and the call does the rest.
+    messageBody = catchUp.block(phone, { skip: shown, callTurn: !!target.callId }) + messageBody;
     if (VIA_TAGS[target.via]) messageBody = `${VIA_TAGS[target.via]} ${messageBody}`;
     const finalMessage = context + messageBody;
 
@@ -1083,8 +1086,9 @@ async function strengthFollowupTurn(target, { ok, out, err }) {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 // A new session's context (context.js): SOUL, USER, MEMORY, the daily notes of
-// yesterday and today, and the last hours of messages on every channel, word
-// for word. Resolves to { text, shown }: shown is the rows the messages show.
+// yesterday and today, and the last hours of messages on every channel (with
+// any older ones no fold has put in a note yet), word for word. Resolves to
+// { text, shown }: shown is the rows the messages show.
 // until: the row of this turn's message, which the message itself carries.
 function loadContext({ until } = {}) {
   return sessionContext({ agentDir: AGENT_DIR, stateDir: STATE_DIR, ledger, until });
@@ -1367,16 +1371,14 @@ function logCallEvent(ev) {
 }
 
 // What the 2B voice did with its own tools, without Alfred. Each action is a
-// ledger row (src "tool") and a line in today's daily note. Alfred's next turn,
-// on any channel, starts with the row (the catch-up in context.js), so he
-// knows the same day. The row is on disk, so a restart does not lose it.
+// ledger row (src "tool"). Alfred's next turn, on any channel, starts with the
+// row (the catch-up in context.js), so he knows the same day; a new session
+// and a call's briefing show it as "you did (on the call)" until the nightly
+// fold writes it into its day's note, once. The row is on disk, so a restart
+// does not lose it. No "By phone" line goes into the note as well: the
+// briefing read both, one action twice, in two wordings.
 function notePhoneAction(text, { caller, callId } = {}) {
   logTurn(toolRow({ text, caller, callId }));
-  const time = new Intl.DateTimeFormat("en-GB", { timeZone: "America/New_York", hour: "2-digit", minute: "2-digit" }).format(new Date());
-  const file = dailyNotePath(MEMORIES_DIR);
-  mkdir(path.dirname(file), { recursive: true })
-    .then(() => appendFile(file, `\n## ${time} — By phone\nThe phone voice ${text}.\n`))
-    .catch((err) => console.error(`⚠️  Could not note a phone action: ${err.message}`));
 }
 
 // A use_tools answer that came back after the call ended (2B). It goes by SMS

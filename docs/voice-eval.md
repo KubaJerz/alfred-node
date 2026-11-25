@@ -8,6 +8,7 @@ judged from one live call.
 node --env-file=.env scripts/voice-eval.mjs                         # every scenario, the .env settings
 node --env-file=.env scripts/voice-eval.mjs --only tick-two --repeat 5
 node --env-file=.env scripts/voice-eval.mjs --model gpt-realtime-2.1 --repeat 3 --label full
+node --env-file=.env scripts/voice-eval.mjs --only brief-pasta,brief-last-call,brief-dentist --repeat 3 --no-briefing --label no-briefing
 node scripts/voice-eval.mjs --compare agent/var/voice-eval/runs/<a> agent/var/voice-eval/runs/<b>
 ```
 
@@ -58,8 +59,18 @@ node scripts/voice-eval.mjs --compare agent/var/voice-eval/runs/<a> agent/var/vo
   `brief-*` scenarios use it: pasta texted an hour before ("what am I making
   tonight?", no tool), a call 20 minutes before that put kale under Greens
   ("add spinach to the list we were adding to": spinach under Greens, no
-  Alfred), and the dentist by SMS ("when's the dentist?": Tuesday at 3, no
-  tool, though the calendar does not have it).
+  Alfred; a Garden list has Greens too, so only the briefing says which), and
+  the dentist by SMS ("when's the dentist?": Tuesday at 3, no tool, though the
+  calendar does not have it).
+- **Control runs.** `--no-briefing` starts each call with the prompt alone (as
+  `VOICE_OPENAI_BRIEFING=0`), and `--no-feed` tells a call nothing mid-call (as
+  `VOICE_OPENAI_LIVE=0`); the scenario's world and rows are written all the
+  same. Compared with a normal run, they show what the briefing and the feed
+  add. A scenario whose other checks could pass without them by luck has a
+  check that they arrived: `live-photo-pending` "was told of the photo
+  mid-call", `brief-last-call` "started the call knowing the last call's kale
+  under Greens". Those fail in a control run by design; the summary's checks
+  column still shows how the rest did.
 
 ## How it is scored
 

@@ -272,7 +272,8 @@ allow list stops strangers, not a determined attacker. These close the gaps.
     opens, about 24,000 characters at most, with the oldest messages dropped
     first and a log line when anything is.
   - [ ] **Run the voice eval** on the new `live-*` and `brief-*` scenarios
-    (paid; not run yet), and compare a few runs with the briefing off.
+    (paid; not run yet), and compare a few runs with the briefing off
+    (`--no-briefing`) and the live feed off (`--no-feed`).
   - [ ] **Test it live:** a fast back-and-forth between call, Discord and
     SMS, checking each side knows what the other just did (the test matrix
     in `docs/phone-context-review.md`).

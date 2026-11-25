@@ -74,7 +74,7 @@ flowchart TD
     VP <-->|"v2: STT + TTS"| TS["Telnyx speech<br/>telnyx/speech.js"]
     VP <-->|"v3: JSON lines on stdin/stdout"| LS["local speech sidecar<br/>Silero · Parakeet · Kokoro<br/>voice/local-speech.js → local_speech.py"]
     VP <-->|"2B: PCMU both ways + use_tools → Alfred"| OA["OpenAI Realtime<br/>telnyx/realtime.js"]
-    CTX["loadContext · context.js (new session)<br/>SOUL.md + USER.md + MEMORY.md<br/>yesterday's + today's daily + the last 6 h of messages"] --> Q
+    CTX["loadContext · context.js (new session)<br/>SOUL.md + USER.md + MEMORY.md<br/>yesterday's + today's daily + the last 6 h of messages<br/>and all not folded yet"] --> Q
     CU["catch-up · context.js (every turn)<br/>the phone's ledger rows since the last turn"] --> Q
     Q --> SPAWN["spawn: claude -p<br/>cwd = agent/"]
     SPAWN -.->|"skill matches"| SK["skills<br/>gmail · gcal · notion · intervals · strength · browser"]
@@ -243,7 +243,7 @@ flowchart TD
     LED -.- CUR["ledger-cursor.json<br/>moves after a turn that worked"]
     TXT["Kuba · Discord or SMS<br/>during the call"] -->|"a turn, as any other"| LED
     LED -.->|"live: each text + reply as it lands<br/>a system item, no reply asked · liveFeed"| RT
-    LED -.->|"at call start: the last 6 h<br/>calls from their own rows · callBriefing"| RT
+    LED -.->|"at call start: the last 6 h + all not folded yet<br/>calls from their own rows · callBriefing"| RT
     MEMF["USER.md · MEMORY.md<br/>yesterday's + today's notes"] -.->|"at call start: the briefing"| RT
     classDef external fill:#d6e2f2,stroke:#1f5fb8,color:#123f7d
     classDef gateway fill:#d8ebe2,stroke:#1b6b52,color:#12503c
@@ -272,8 +272,10 @@ file, `agent/var/ledger-cursor.json`, keeps his place in the ledger. It moves
 only after a turn worked, and only past the rows that turn read. So a restart
 or a failed turn loses nothing, and `/clear` sets it back to the start. A
 `use_tools` turn is a turn too, so it carries the call so far: Alfred reads the
-caller's own words next to the request. Each direct-tool change also goes in
-today's daily note.
+caller's own words next to the request. Its block ends by saying it is context
+only, so he does just that request: the caller's line can ask for more, and
+the call does the rest itself. A direct-tool change reaches the daily note
+through the nightly fold, once, like every other row.
 
 The other way, **while a call is live**: each message Kuba sends by Discord or
 SMS, and Alfred's reply to it, goes into the call as it is written (the live
@@ -292,11 +294,13 @@ set up wait for it. `VOICE_OPENAI_LIVE=0` turns the feed off.
 **As a call starts**, its prompt is `phone-voice.md` and then a headed
 background block (`callBriefing` in `context.js`, the `buildInstructions`
 option of `realtime.js`): `USER.md`, `MEMORY.md`, yesterday's and today's daily
-notes, and the last 6 hours of the ledger on every channel. Earlier calls come
+notes, and the last 6 hours of the ledger on every channel, or more: back to
+the last row a fold put in a note. Earlier calls come
 from their own rows, never their `use_tools` turns, so a call shows once, and
 Alfred's text replies are "you said (by text)": one persona again. A file is
-named by its kind. The block says it is background: what it says needs no
-tool, anything to look up or change still does. It is built while the OpenAI
+named by its kind. The block says it is background: what it says counts as
+already said and needs no tool, even about the user's own life; anything else
+to look up, and anything to change, still does. It is built while the OpenAI
 socket connects and awaited before the `session.update`, at most 1 s; a
 failure or a late one is logged, and the call starts with the plain prompt.
 The budget is about 24,000 characters: the prompt, USER, MEMORY and the last
@@ -734,7 +738,7 @@ flowchart TD
     DAILY -.->|"nightly · dream.sh, after the fold"| MEM["MEMORY.md"]
     DAILY -->|"yesterday's + today's"| PLUS(("+"))
     MEM --> PLUS
-    LIVE -.->|"the last 6 h, word for word"| PLUS
+    LIVE -.->|"the last 6 h and all not folded yet,<br/>word for word"| PLUS
     PLUS -->|"seeds a new session"| CTX
     PLUS -.->|"with USER.md: briefs each 2B call<br/>callBriefing, at call start"| CALLV
     classDef agent fill:#f5e8d5,stroke:#b07a2a,color:#6e4a12
@@ -745,14 +749,17 @@ flowchart TD
 
 The `+` is `loadContext` (`sessionContext` in `context.js`). A new session is
 seeded with `MEMORY.md`, the daily notes of yesterday and today, and the
-messages of the last 6 hours on every channel, word for word. A new session
+messages of the last 6 hours on every channel, word for word, or more: back to
+the last row a fold put in a note (`agent/var/fold-watermark.json`). A new session
 holds none of them: it starts after `/clear`, or after a dream pass, when
 yesterday's evening chat is in no session. The notes cover the days, and the
-messages cover the hours that no fold has reached yet. Over 24,000 characters,
+messages cover the hours that no fold has reached yet: the nightly fold stops
+at the end of yesterday, so a message at 1 AM is in no note until the next
+night, however late the morning's first turn comes. Over 24,000 characters,
 the oldest messages go first. A call shows once, from its own lines. The
 dotted arrow is the resumed session — it carries the prior turns as context
 but re-injects nothing. A 2B call starts from the same sources: its briefing
-(`callBriefing`) is `USER.md`, `MEMORY.md`, the two notes and the last 6 hours,
+(`callBriefing`) is `USER.md`, `MEMORY.md`, the two notes and the same messages,
 built for the voice and kept to about 24,000 characters (see "A phone call
 (2B)" above). `docs/shared-context.md` covers the ledger, the fold, the
 catch-up, the live feed and the briefing in one place.

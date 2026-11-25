@@ -12,14 +12,16 @@
 //     turn too, so it carries the call so far, with the caller's own words.
 //   - A new session's context: SOUL, USER, MEMORY, the daily notes of
 //     yesterday and today, and the messages of the last hours on every
-//     channel, word for word. A new session holds none of them.
+//     channel, word for word, back to the last row a fold put in a note when
+//     that is earlier. A new session holds none of them.
 //   - The live feed. While a 2B call runs, each message the user sends by
 //     text or SMS, and Alfred's reply to it, goes into the call as it is
 //     written, so the voice knows what was just sent without a hang-up.
 //   - The call's briefing. A 2B call starts with the voice's prompt, then
 //     what it should know already: USER, MEMORY, the daily notes of
-//     yesterday and today, and the last hours on every channel, with earlier
-//     calls told from their own lines. It has a size budget.
+//     yesterday and today, and the last hours on every channel (further back
+//     too, as for a new session), with earlier calls told from their own
+//     lines. It has a size budget.
 //
 // On a 2B call, the voice is Alfred too. So each line says "you" for both:
 // "you said (on the call)", "you said (by text)". No line names a model, a
@@ -32,12 +34,14 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { TIMEZONE, dailyNotePath, dayBefore, easternDate } from "./dailies.js";
+import { readWatermark } from "./fold.js";
 import { TAIL_BYTES, dayOf, retoldByCall, srcOf } from "./ledger.js";
 
 // The catch-up cursor in the state dir: { "offset": <bytes> }. It is a file
 // of its own, because writeState in bot.js replaces state.json whole.
 export const CURSOR_FILE = "ledger-cursor.json";
-// A new session gets the messages of this last stretch of time, word for word.
+// A new session, and a call's briefing, get the messages of at least this last
+// stretch of time, word for word (recentStart says how much further back).
 export const RECENT_WINDOW_MS = 6 * 60 * 60 * 1000;
 // It gets this much text of them at most. Over it, the oldest go first.
 export const RECENT_MAX_CHARS = 24_000;
@@ -49,6 +53,11 @@ export const LINE_MAX_CHARS = 2_000;
 
 const LEFT_OUT = "(Earlier lines are left out.)";
 const CATCH_UP_HEAD = "[What was said and done on the phone since your last message:";
+// The last line of a use_tools turn's block. The caller's lines can hold more
+// than the request that reached Alfred ("Did Sarah email? And put kale on the
+// list."), and the call does the rest itself, at the same time: without this
+// line, a turn can do it again (kale on the list twice).
+export const CALL_TURN_NOTE = "For context only: do just the request after this block, not the rest of what was asked on the call.";
 
 // ── Lines ───────────────────────────────────────────────────────────────────
 
@@ -198,8 +207,10 @@ export function showRows(rows, { maxChars = Infinity, lineChars, files, first, l
 // turn. "" when there is nothing. Over maxChars, the tool changes stay first,
 // then the newest lines. skip: the ts of rows that the message shows already
 // (a new session's recent messages). cut: the read left out older rows.
-export function catchUpBlock(rows, { skip, cut = false, maxChars = CATCH_UP_MAX_CHARS, lineChars } = {}) {
-  const wrap = (body) => `${CATCH_UP_HEAD}\n${body}\n]\n\n`;
+// callTurn: the message is a use_tools request from a live call, so the block
+// ends with CALL_TURN_NOTE.
+export function catchUpBlock(rows, { skip, cut = false, maxChars = CATCH_UP_MAX_CHARS, lineChars, callTurn = false } = {}) {
+  const wrap = (body) => `${CATCH_UP_HEAD}\n${body}\n${callTurn ? `${CALL_TURN_NOTE}\n` : ""}]\n\n`;
   const shown = showRows(skip ? rows.filter((r) => !skip.has(r.ts)) : rows, {
     maxChars: maxChars - wrap("").length,
     lineChars,
@@ -304,15 +315,38 @@ export function makeCatchUp({ ledger, stateDir, maxBytes = TAIL_BYTES, log = con
 
 // ── A new session ───────────────────────────────────────────────────────────
 
+// Where the recent messages start: windowMs before now, or earlier, right
+// after the last row that a fold put in its daily note (the watermark in
+// fold.js), when that is earlier. The nightly fold stops at the end of
+// yesterday, so a row after midnight is in no note until the next night: a
+// morning 8 hours later must still see it. So each row is in a note or in the
+// messages. With no watermark in stateDir yet (before the first fold), or
+// with no stateDir, the window alone. A watermark that cannot be read is
+// logged, and the window goes on alone.
+async function recentStart({ stateDir, now, windowMs, log }) {
+  const since = new Date(now).getTime() - windowMs;
+  if (!stateDir) return since;
+  try {
+    const through = Date.parse((await readWatermark(stateDir))?.through);
+    return Number.isNaN(through) ? since : Math.min(since, through + 1);
+  } catch (err) {
+    log.error(`⚠️  Recent messages: the fold watermark cannot be read (${err.message}), so only the last hours show`);
+    return since;
+  }
+}
+
 // The messages of the last windowMs before `now`, on every channel, as text:
-// the newest that fit in maxChars. until (optional, exclusive) is the ts of
-// the row of the message that starts the turn: that message follows, so it is
-// not shown twice. Without it, every row up to the newest shows.
+// the newest that fit in maxChars. With stateDir, the messages that no fold
+// has put in a note show too, however old (recentStart). until (optional,
+// exclusive) is the ts of the row of the message that starts the turn: that
+// message follows, so it is not shown twice. Without it, every row up to the
+// newest shows.
 // Returns showRows' { text, rows, dropped }.
 export async function recentMessages({
-  ledger, now = new Date(), until, windowMs = RECENT_WINDOW_MS, maxChars = RECENT_MAX_CHARS, lineChars,
+  ledger, stateDir, now = new Date(), until, windowMs = RECENT_WINDOW_MS, maxChars = RECENT_MAX_CHARS, lineChars, log = console,
 }) {
-  const rows = await ledger.tail({ since: new Date(now).getTime() - windowMs, until });
+  const since = await recentStart({ stateDir, now, windowMs, log });
+  const rows = await ledger.tail({ since, until });
   return showRows(rows, { maxChars, lineChars });
 }
 
@@ -349,12 +383,12 @@ export async function sessionContext({
 
   let shown = new Set();
   try {
-    const recent = await recentMessages({ ledger, now, until, windowMs, maxChars });
+    const recent = await recentMessages({ ledger, stateDir, now, until, windowMs, maxChars, log });
     if (recent.text) {
       const hours = Math.round(windowMs / 3_600_000);
       text +=
-        `\n[RECENT MESSAGES] The last ${plural(hours, "hour")} on every channel, word for word, oldest first. ` +
-        `"You" is you, on the phone too. Times are Eastern.\n${recent.text}\n[/RECENT MESSAGES]\n`;
+        `\n[RECENT MESSAGES] The last ${plural(hours, "hour")} on every channel, and any older messages that no daily note has yet, ` +
+        `word for word, oldest first. "You" is you, on the phone too. Times are Eastern.\n${recent.text}\n[/RECENT MESSAGES]\n`;
       shown = new Set(recent.rows.map((r) => r.ts));
     }
   } catch (err) {
@@ -470,13 +504,18 @@ const NOTE_CUT = "(The start of this note is left out.)";
 
 // The head of the background. It says what the background is for, since
 // nothing else does: the voice's prompt (agent/phone-voice.md) knows nothing
-// of it. No line names a model, a service or another assistant.
+// of it. That prompt sends "the user's own life" to a tool, and lets only what
+// was already said on the call go without one. So the head says, in the
+// prompt's own words, which of the two the background is: otherwise "when's
+// the dentist?" reads the calendar instead of the SMS that says it. No line
+// names a model, a service or another assistant.
 const briefingHead = (hours) =>
   [
     "=== BACKGROUND: WHAT YOU KNOW FROM BEFORE THIS CALL ===",
-    `About the user, your memory, the daily notes of yesterday and today, and what was said in the last ${plural(hours, "hour")}: ` +
-      'by text, by SMS and on earlier calls. "You" in it is you, on every channel.',
-    "It is background only. What it already says needs no tool; for anything to look up or change, still use your tools. " +
+    `About the user, your memory, the daily notes of yesterday and today, and what was said in the last ${plural(hours, "hour")}, ` +
+      'and before that when no note has it yet: by text, by SMS and on earlier calls. "You" in it is you, on every channel.',
+    "It is background only. What it says counts as already said: it needs no tool, even about the user's own life. " +
+      "For anything it does not say, and anything to change, still use your tools. " +
       "Do not recite it, or bring it up, unless the caller asks.",
   ].join("\n");
 
@@ -487,21 +526,27 @@ const UNSAID = new Set(["silent", "cancelled", ...FAILED]);
 // (src "call" and "tool"), never from their use_tools turns (chat rows with
 // via "call"), which retell the same requests and answers: so a call shows
 // once. The chat of the other channels comes whole, but for a turn that said
-// nothing or failed. This call's own rows (its callId) never come.
+// nothing or failed. This call's own rows (its callId) never come. An older
+// out row has no via: it is of its turn, the chat in row before it, so the
+// answer to a use_tools request from before the call rows goes with it.
 export function briefingRows(rows, { callId } = {}) {
+  let turnVia; // the via of the last chat in row
   return rows.filter((row) => {
-    if (callId && row.callId === callId) return false;
     const src = srcOf(row);
+    if (src === "chat" && row.dir === "in") turnVia = row.via;
+    if (callId && row.callId === callId) return false;
     if (src === "call" || src === "tool") return true;
-    return src === "chat" && row.via !== "call" && !UNSAID.has(row.kind);
+    const via = row.via ?? (row.dir === "out" ? turnVia : undefined);
+    return src === "chat" && via !== "call" && !UNSAID.has(row.kind);
   });
 }
 
-// The rows of the last windowMs before `now`, and every row of the newest
-// call among them, even one from before the window: the last call shows
-// whole. last is that call's id, or null.
-async function briefingTail({ ledger, now, windowMs, callId }) {
-  const since = new Date(now).getTime() - windowMs;
+// The rows of the last windowMs before `now` (and older ones that no fold has
+// put in a note: recentStart), and every row of the newest call among them,
+// even one from before the window: the last call shows whole. last is that
+// call's id, or null.
+async function briefingTail({ ledger, stateDir, now, windowMs, callId, log }) {
+  const since = await recentStart({ stateDir, now, windowMs, log });
   const rows = briefingRows(await ledger.tail(), { callId });
   const inWindow = (row) => Date.parse(row.ts) >= since;
   const last = rows.findLast((row) => inWindow(row) && srcOf(row) !== "chat" && row.callId)?.callId ?? null;
@@ -528,7 +573,8 @@ function noteEnd(text, max) {
 // The prompt of a 2B call: the voice's own prompt, then a clearly headed
 // background block of what it should know already. USER.md, MEMORY.md, the
 // daily notes of yesterday and today, and the last windowMs of the ledger on
-// every channel (briefingRows), through the same renderer as Alfred's
+// every channel, with the rows no fold has put in a note yet (briefingRows,
+// recentStart), through the same renderer as Alfred's
 // context, so his text replies are "you said (by text)". A file is named by
 // its kind: the voice cannot open it. With nothing to tell, the prompt alone.
 //
@@ -570,7 +616,7 @@ export async function callBriefing({
   let rows = [];
   let last = null;
   try {
-    ({ rows, last } = await briefingTail({ ledger, now, windowMs, callId }));
+    ({ rows, last } = await briefingTail({ ledger, stateDir, now, windowMs, callId, log }));
   } catch (err) {
     log.error(`⚠️  Briefing: the recent messages failed: ${err.message}`);
   }
@@ -587,7 +633,9 @@ export async function callBriefing({
   const titled = (title, body) => (body ? `${title}\n${body}` : "");
   const userBlock = titled("[About the user]", user);
   const memoryBlock = titled("[Your memory]", memory);
-  const rowsTitle = `[The last ${plural(hours, "hour")}, oldest first. Times are Eastern. A call here is an earlier call, not this one.]`;
+  const rowsTitle =
+    `[The last ${plural(hours, "hour")}, and older messages that no daily note has yet, oldest first. ` +
+    "Times are Eastern. A call here is an earlier call, not this one.]";
   // Each block after the first takes two line breaks before it.
   const size = (block) => (block ? block.length + 2 : 0);
 
