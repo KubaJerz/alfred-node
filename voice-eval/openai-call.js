@@ -14,15 +14,21 @@
 // real one, and the bot's own live feed (context.js) tells the call what lands
 // in it. A scenario turn's rows (a text, Alfred's reply) go in there, so they
 // reach the voice by the same code as on a real call.
+//
+// That temp dir is the call's state dir too. A scenario's briefing world
+// (USER.md, MEMORY.md, the daily notes, the messages of the last hours) is
+// written there before the call, and the call's prompt is built from it by
+// the bot's own builder (callBriefing in context.js), as on a real call.
 
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { makeRealtimeSession } from "../telnyx/realtime.js";
 import { makeVoiceTools } from "../telnyx/voice-tools.js";
 import { MULAW_SILENCE, PHONE_RATE } from "../telnyx/audio.js";
 import { makeLedger, callRow, inboundRow } from "../ledger.js";
-import { liveFeed } from "../context.js";
+import { callBriefing, liveFeed } from "../context.js";
+import { dailyNotePath, dayBefore, easternDate } from "../dailies.js";
 import { callerAudio, makeRecording } from "./audio.js";
 import { fakeAlfred, fakeCalendar, fakeNotion } from "./fakes.js";
 
@@ -46,18 +52,58 @@ export const EVAL_NOW = new Date("2026-12-02T15:00:00Z"); // 10:00 AM Eastern
 // own lines as logCallEvent does, and asked/answered write a use_tools turn's
 // rows as handleTurn does. So the voice hears a scenario's rows, and never its
 // own, by the bot's code. inject(rows) writes rows in order.
-export function makeCallLedger({ told = () => {}, log = () => {} } = {}) {
+//
+// The dir is the call's state dir too: seed(world) writes a scenario's
+// briefing world into it, and buildInstructions is the bot's, on that dir.
+// briefing() is what it built last. now is the call's clock, for the
+// ledger's ts and the briefing's "now".
+export function makeCallLedger({ told = () => {}, log = () => {}, now = () => Date.now() } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "voice-eval-ledger-"));
-  const errors = { error: log };
-  const ledger = makeLedger({ file: join(dir, "messages.jsonl"), logsDir: join(dir, "logs"), log: errors });
+  const errors = { error: log, log };
+  const file = join(dir, "messages.jsonl");
+  const logsDir = join(dir, "logs");
+  const ledger = makeLedger({ file, logsDir, now, log: errors });
+  let built = null;
   return {
     ledger,
+    stateDir: dir,
+    // The briefing world: { user, memory, yesterday, today, rows }, each part
+    // optional. The files go where the bot keeps them; the rows go into the
+    // ledger in order, each at its own ts (a row needs one), through the
+    // ledger's own append.
+    async seed({ user, memory, yesterday, today, rows = [] } = {}) {
+      const memories = join(dir, "memories");
+      const day = easternDate(new Date(now()));
+      const files = [
+        [join(dir, "USER.md"), user],
+        [join(memories, "MEMORY.md"), memory],
+        [dailyNotePath(memories, dayBefore(day)), yesterday],
+        [dailyNotePath(memories, day), today],
+      ];
+      for (const [where, text] of files) {
+        if (!text) continue;
+        mkdirSync(dirname(where), { recursive: true });
+        writeFileSync(where, text);
+      }
+      let at = 0;
+      const past = makeLedger({ file, logsDir, now: () => at, log: errors });
+      for (const row of rows) {
+        at = Date.parse(row.ts);
+        if (Number.isNaN(at)) throw new Error(`A briefing row needs its ts: ${JSON.stringify(row)}`);
+        await past.append(row);
+      }
+    },
+    buildInstructions: async ({ callId, prompt }) => {
+      built = await callBriefing({ stateDir: dir, ledger, prompt, callId, now: new Date(now()), log: errors });
+      return built;
+    },
+    briefing: () => built,
     feed: ({ push }) =>
       liveFeed({
         ledger,
-        push: (text) => {
+        push: (text, key) => {
           told(text);
-          push(text);
+          push(text, key);
         },
         log: errors,
       }),
@@ -150,7 +196,15 @@ export async function runOpenAICall(scenario, {
       }
     },
   };
-  const call = makeCallLedger({ told: (text) => events.push({ t: at(), kind: "told", text }), log });
+  // The call's clock: the scenario's fixed morning, running from the start.
+  const clock = () => new Date(EVAL_NOW.getTime() + at());
+  const call = makeCallLedger({ told: (text) => events.push({ t: at(), kind: "told", text }), log, now: () => clock().getTime() });
+  try {
+    await call.seed(scenario.briefing);
+  } catch (err) {
+    call.close();
+    throw err;
+  }
   const onTurn = async (a) => {
     pending++;
     const t = at();
@@ -200,9 +254,12 @@ export async function runOpenAICall(scenario, {
     reasoning,
     noise,
     instructions,
+    // The bot's builder on the scenario's briefing world. With none, it is
+    // the prompt alone, so the other scenarios run as before.
+    buildInstructions: call.buildInstructions,
     quietChains,
     directTools,
-    clock: () => new Date(EVAL_NOW.getTime() + at()),
+    clock,
     feed: call.feed,
     onCallEvent: call.onCallEvent,
   });
@@ -298,6 +355,8 @@ export async function runOpenAICall(scenario, {
     endedByAlfred,
     events: events.sort((a, b) => a.t - b.t),
     log: logLines,
+    // The background the call started with ("" without one), for the grader.
+    briefing: call.briefing()?.background || "",
     world: { notion: notion.dump(), calendar: calendar.events(), alfred: alfred.requests, computer: alfred.world.computer },
     notion,
     calendar,

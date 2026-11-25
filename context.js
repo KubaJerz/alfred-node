@@ -1,6 +1,6 @@
 // context.js — what Alfred is told about the phone and the recent past.
 //
-// Three readers of the ledger (ledger.js), and one way to show its rows:
+// Four readers of the ledger (ledger.js), and one way to show its rows:
 //
 //   - The catch-up. Alfred's session holds his own turns, but not what was
 //     said and done on a 2B call. So each turn starts with the rows that the
@@ -16,6 +16,10 @@
 //   - The live feed. While a 2B call runs, each message the user sends by
 //     text or SMS, and Alfred's reply to it, goes into the call as it is
 //     written, so the voice knows what was just sent without a hang-up.
+//   - The call's briefing. A 2B call starts with the voice's prompt, then
+//     what it should know already: USER, MEMORY, the daily notes of
+//     yesterday and today, and the last hours on every channel, with earlier
+//     calls told from their own lines. It has a size budget.
 //
 // On a 2B call, the voice is Alfred too. So each line says "you" for both:
 // "you said (on the call)", "you said (by text)". No line names a model, a
@@ -94,7 +98,9 @@ function callLine(row, words, line) {
 // cancelled turn). A line starts with the Eastern time. More lines of a
 // message, and its files, are indented under it. An older out row has no
 // via: it takes the channel of the last chat in row.
-export function renderLines(rows, { lineChars = LINE_MAX_CHARS } = {}) {
+// files: "paths" names each file a message brought, so Alfred can open it;
+// "kinds" says only what they are ("a photo"), for the voice, which cannot.
+export function renderLines(rows, { lineChars = LINE_MAX_CHARS, files = "paths" } = {}) {
   let channel = "discord";
   return rows.map((row) => {
     const src = srcOf(row);
@@ -108,8 +114,9 @@ export function renderLines(rows, { lineChars = LINE_MAX_CHARS } = {}) {
     const tag = src === "chat" ? "" : ` [${src}]`;
     if (row.dir === "in") {
       let entry = line(`the user said (${where})${tag}: ${words || "(no words)"}`);
-      if (Array.isArray(row.files) && row.files.length) entry += `\n    (files: ${row.files.join(", ")})`;
-      else if (row.attachments > 0) entry += `\n    (${plural(row.attachments, "file")} sent with it)`;
+      if (Array.isArray(row.files) && row.files.length) {
+        entry += files === "kinds" ? `\n    (${filesOf(row).what} sent with it)` : `\n    (files: ${row.files.join(", ")})`;
+      } else if (row.attachments > 0) entry += `\n    (${plural(row.attachments, "file")} sent with it)`;
       return entry;
     }
     if (row.kind === "silent" || row.kind === "cancelled") return null;
@@ -169,9 +176,10 @@ function withDays(entries) {
 // Rows as text for a model, in at most maxChars: the one way this file shows
 // rows. first(e) marks the entries to keep first when the text is too long
 // (see fit). leftOut: rows were left out before these (a note says so).
+// files: how a message's files show (renderLines).
 // Returns { text, rows, dropped }: rows are the rows that the text shows.
-export function showRows(rows, { maxChars = Infinity, lineChars, first, leftOut = false } = {}) {
-  const entries = entriesOf(rows, { lineChars });
+export function showRows(rows, { maxChars = Infinity, lineChars, files, first, leftOut = false } = {}) {
+  const entries = entriesOf(rows, { lineChars, files });
   if (!entries.length) return { text: "", rows: [], dropped: 0 };
   // Room for the day lines, and for the note when one comes, so the text
   // never goes over maxChars.
@@ -431,16 +439,195 @@ export function liveUpdate(row, { lineChars = LINE_MAX_CHARS } = {}) {
 
 // While a 2B call is live: each row written elsewhere goes into the call as
 // it is written (liveUpdate), and an archive, which only /clear does, tells it
-// to forget. push(text) is the call's own: makeRealtimeSession's feed option
-// hands it over. Returns the function that stops it. A failure is logged and
-// dropped: the call, and the turn that wrote the row, go on.
+// to forget. push(text, key) is the call's own: makeRealtimeSession's feed
+// option hands it over. key is the row's ts, so the call can drop an update
+// for a row that its briefing tells already (callBriefing's shown). Returns
+// the function that stops it. A failure is logged and dropped: the call, and
+// the turn that wrote the row, go on.
 export function liveFeed({ ledger, push, lineChars, log = console }) {
   return ledger.subscribe((ev) => {
     try {
       const text = ev.type === "archive" ? CLEARED_UPDATE : ev.type === "row" ? liveUpdate(ev.row, { lineChars }) : null;
-      if (text) push(text);
+      if (text) push(text, ev.type === "row" ? ev.row.ts : undefined);
     } catch (err) {
       log.error(`⚠️  A live update for the call failed: ${err.message}`);
     }
   });
+}
+
+// ── The call's briefing ─────────────────────────────────────────────────────
+
+// A 2B call's whole prompt at most (about 6,000 tokens). OpenAI never cuts
+// the instructions, but a longer prompt leaves less room for the call itself:
+// the oldest turns of the call go instead.
+export const BRIEFING_MAX_CHARS = 24_000;
+// One daily note at most. A longer one keeps its end, the newest entries, so
+// a busy day's note cannot push out the messages.
+export const BRIEFING_NOTE_MAX_CHARS = 4_000;
+
+const BRIEFING_END = "=== END OF BACKGROUND ===";
+const NOTE_CUT = "(The start of this note is left out.)";
+
+// The head of the background. It says what the background is for, since
+// nothing else does: the voice's prompt (agent/phone-voice.md) knows nothing
+// of it. No line names a model, a service or another assistant.
+const briefingHead = (hours) =>
+  [
+    "=== BACKGROUND: WHAT YOU KNOW FROM BEFORE THIS CALL ===",
+    `About the user, your memory, the daily notes of yesterday and today, and what was said in the last ${plural(hours, "hour")}: ` +
+      'by text, by SMS and on earlier calls. "You" in it is you, on every channel.',
+    "It is background only. What it already says needs no tool; for anything to look up or change, still use your tools. " +
+      "Do not recite it, or bring it up, unless the caller asks.",
+  ].join("\n");
+
+// Chat out rows the briefing leaves out: a turn that said nothing, or failed.
+const UNSAID = new Set(["silent", "cancelled", ...FAILED]);
+
+// The rows a call's briefing shows. Earlier calls come from their own rows
+// (src "call" and "tool"), never from their use_tools turns (chat rows with
+// via "call"), which retell the same requests and answers: so a call shows
+// once. The chat of the other channels comes whole, but for a turn that said
+// nothing or failed. This call's own rows (its callId) never come.
+export function briefingRows(rows, { callId } = {}) {
+  return rows.filter((row) => {
+    if (callId && row.callId === callId) return false;
+    const src = srcOf(row);
+    if (src === "call" || src === "tool") return true;
+    return src === "chat" && row.via !== "call" && !UNSAID.has(row.kind);
+  });
+}
+
+// The rows of the last windowMs before `now`, and every row of the newest
+// call among them, even one from before the window: the last call shows
+// whole. last is that call's id, or null.
+async function briefingTail({ ledger, now, windowMs, callId }) {
+  const since = new Date(now).getTime() - windowMs;
+  const rows = briefingRows(await ledger.tail(), { callId });
+  const inWindow = (row) => Date.parse(row.ts) >= since;
+  const last = rows.findLast((row) => inWindow(row) && srcOf(row) !== "chat" && row.callId)?.callId ?? null;
+  return { rows: rows.filter((row) => inWindow(row) || (last && row.callId === last)), last };
+}
+
+// A note in at most max characters: its end, the newest entries, after a
+// line that says the start is left out. It starts at an entry's heading
+// ("## HH:MM — Topic") when one is in reach, else at a line start. "" when
+// max leaves no room for it.
+function noteEnd(text, max) {
+  if (text.length <= max) return text;
+  const room = max - NOTE_CUT.length - 1;
+  if (room <= 0) return "";
+  // One character more, then up to a line break: a cut line goes, a whole
+  // one stays.
+  const end = text.slice(text.length - room - 1);
+  const entry = end.indexOf("\n#");
+  const nl = end.indexOf("\n");
+  const from = entry !== -1 ? entry + 1 : nl !== -1 ? nl + 1 : 1;
+  return `${NOTE_CUT}\n${end.slice(from)}`;
+}
+
+// The prompt of a 2B call: the voice's own prompt, then a clearly headed
+// background block of what it should know already. USER.md, MEMORY.md, the
+// daily notes of yesterday and today, and the last windowMs of the ledger on
+// every channel (briefingRows), through the same renderer as Alfred's
+// context, so his text replies are "you said (by text)". A file is named by
+// its kind: the voice cannot open it. With nothing to tell, the prompt alone.
+//
+// The budget is maxChars for the whole text. The prompt, USER, MEMORY and the
+// last call stay whole. Then today's note and yesterday's, each at most
+// noteChars, then the other messages, newest first: the oldest go first. Only
+// the parts kept whole can take it past maxChars. Whatever is left out for
+// the budget gets one log line.
+//
+// It never throws: a file or the ledger that cannot be read is logged, and
+// the rest goes on. It reads a few small files and the ledger's tail, so it
+// is ready long before the OpenAI socket opens (makeRealtimeSession's
+// buildInstructions).
+// Returns { text, background, shown, dropped }: background is the block after
+// the prompt ("" without one), shown the ts of each row it tells (the live
+// feed drops an update for one of those), dropped what the budget left out.
+export async function callBriefing({
+  stateDir, ledger, prompt = "", callId, now = new Date(), windowMs = RECENT_WINDOW_MS,
+  maxChars = BRIEFING_MAX_CHARS, noteChars = BRIEFING_NOTE_MAX_CHARS, lineChars, log = console,
+}) {
+  prompt = String(prompt ?? "").trim();
+  const memoriesDir = path.join(stateDir, "memories");
+  const today = easternDate(new Date(now));
+  const yesterday = dayBefore(today);
+  const read = async (file) => {
+    try {
+      return (await readFile(file, "utf8")).trim();
+    } catch (err) {
+      if (err.code !== "ENOENT") log.error(`⚠️  Briefing: could not read ${path.relative(stateDir, file)}: ${err.message}`);
+      return "";
+    }
+  };
+  const [user, memory, noteBefore, noteToday] = await Promise.all([
+    read(path.join(stateDir, "USER.md")),
+    read(path.join(memoriesDir, "MEMORY.md")),
+    read(dailyNotePath(memoriesDir, yesterday)),
+    read(dailyNotePath(memoriesDir, today)),
+  ]);
+  let rows = [];
+  let last = null;
+  try {
+    ({ rows, last } = await briefingTail({ ledger, now, windowMs, callId }));
+  } catch (err) {
+    log.error(`⚠️  Briefing: the recent messages failed: ${err.message}`);
+  }
+
+  const isLast = (row) => last != null && srcOf(row) !== "chat" && row.callId === last;
+  const show = (maxChars) => showRows(rows, { maxChars, lineChars, files: "kinds", first: (e) => isLast(e.row) });
+  const everything = show(Infinity);
+  if (!user && !memory && !noteBefore && !noteToday && !everything.text) {
+    return { text: prompt, background: "", shown: new Set(), dropped: [] };
+  }
+
+  const hours = Math.round(windowMs / 3_600_000);
+  const head = briefingHead(hours);
+  const titled = (title, body) => (body ? `${title}\n${body}` : "");
+  const userBlock = titled("[About the user]", user);
+  const memoryBlock = titled("[Your memory]", memory);
+  const rowsTitle = `[The last ${plural(hours, "hour")}, oldest first. Times are Eastern. A call here is an earlier call, not this one.]`;
+  // Each block after the first takes two line breaks before it.
+  const size = (block) => (block ? block.length + 2 : 0);
+
+  // What the briefing keeps whole, and the room the last call needs among
+  // the messages: its lines, and a day line for each day and the note that
+  // lines are left out (see showRows).
+  const fixed = prompt.length + 2 + head.length + size(userBlock) + size(memoryBlock) + size(BRIEFING_END);
+  const rowsOverhead = everything.text ? rowsTitle.length + 1 + 2 : 0;
+  const lastCall = showRows(rows.filter(isLast), { lineChars, files: "kinds", leftOut: everything.rows.some((r) => !isLast(r)) });
+  const lastRoom = lastCall.text ? lastCall.text.length + new Set(rows.map(dayOf)).size * DAY_LINE_CHARS + LEFT_OUT.length + 2 : 0;
+
+  // The notes: today's, then yesterday's, each at most noteChars, in what is
+  // left after the parts kept whole.
+  const dropped = [];
+  let left = maxChars - fixed - rowsOverhead - lastRoom;
+  const noteBlock = (which, date, note) => {
+    if (!note) return "";
+    const title = `[${which}'s daily note: ${dayName.format(Date.parse(`${date}T12:00:00Z`))}]`;
+    const body = noteEnd(note, Math.min(noteChars, left - title.length - 1 - 2));
+    const name = which.toLowerCase();
+    if (!body) dropped.push(`left out ${name}'s note (${note.length} characters)`);
+    else if (body !== note) dropped.push(`cut ${name}'s note to its last ${body.length} of ${note.length} characters`);
+    const block = titled(title, body);
+    left -= size(block);
+    return block;
+  };
+  const todayBlock = noteBlock("Today", today, noteToday);
+  const yesterdayBlock = noteBlock("Yesterday", yesterday, noteBefore);
+
+  // The messages, newest first, in the rest: the last call goes in first.
+  // With no room past it, the last call alone, whole.
+  const room = maxChars - fixed - size(todayBlock) - size(yesterdayBlock) - rowsOverhead;
+  const recent = !everything.text ? everything : room > lastRoom ? show(room) : lastCall;
+  const unshown = everything.rows.length - recent.rows.length;
+  if (unshown) dropped.push(`left out the ${plural(unshown, "oldest line")} of the messages`);
+
+  const blocks = [head, userBlock, memoryBlock, yesterdayBlock, todayBlock, titled(rowsTitle, recent.text), BRIEFING_END];
+  const background = blocks.filter(Boolean).join("\n\n");
+  const text = prompt ? `${prompt}\n\n${background}` : background;
+  if (text.length > maxChars) dropped.push(`the parts kept whole come to ${text.length} characters`);
+  if (dropped.length) log.log(`📞 Briefing cut to fit ${maxChars} characters: ${dropped.join("; ")}`);
+  return { text, background, shown: new Set(recent.rows.map((row) => row.ts)), dropped };
 }

@@ -34,6 +34,13 @@
 // it from the caller's next turn on, and never speaks up about it by itself.
 // It is not a session.update: that would replace the instructions, and with
 // them the cached prompt, for the rest of the call.
+//
+// The briefing: a call's prompt can be its own (the buildInstructions
+// option; callBriefing in context.js): the voice's prompt, then what it
+// should know already. It is built while the OpenAI socket opens and awaited
+// when it is open, before the session.update. Nothing slow is on the call's
+// path: a briefing that fails, or is not ready soon after the socket opens,
+// is logged, and the call starts with the plain prompt.
 
 import WebSocket from "ws";
 import { makePlayer, makeReorder } from "./pipeline.js";
@@ -60,6 +67,10 @@ const OPEN_QUEUE_CAP = 100; // caller frames (20 ms) held while the OpenAI socke
 // past the estimated end means the caller heard the reply late, or not at all.
 const MARK_LATE_MS = 3000;
 const MARK_LOG_MS = 1000; // an echo later than this gets a log line
+// How long the open socket waits for a briefing that is not ready yet. It
+// starts with the call and reads a few small files, so it is ready first;
+// past this, the call starts with the plain prompt rather than in silence.
+export const BRIEFING_WAIT_MS = 1000;
 
 // USD per 1M tokens, from openai.com pricing (read 2026-11-11).
 const PRICES = {
@@ -250,10 +261,21 @@ export function makeRealtimeSession({
   onCallEvent = () => {},
   // What happens elsewhere while the call is live (liveFeed in context.js).
   // feed({ callId, caller, push }) is called as the call starts and returns
-  // the function that stops it, which is called as the call ends. push(text)
-  // adds the text as a system item and asks for no response. A push before the
-  // socket is open and set up waits for it. A failure is only logged.
+  // the function that stops it, which is called as the call ends.
+  // push(text, key) adds the text as a system item and asks for no response.
+  // A push before the socket is open and set up waits for it; one whose key
+  // the briefing shows is then dropped. A failure is only logged.
   feed = null,
+  // This call's prompt (callBriefing in context.js):
+  // buildInstructions({ callId, caller, prompt }) resolves to the whole
+  // prompt, or to { text, shown }. prompt is the plain one (instructions).
+  // shown: the keys of the rows it tells, so a held push of one is dropped.
+  // It starts with the call, after the feed, so a row written meanwhile
+  // reaches the call one way or the other. The open socket waits for it at
+  // most briefingWaitMs; a failure, an empty answer or a later one is
+  // logged, and the call starts with the plain prompt.
+  buildInstructions = null,
+  briefingWaitMs = BRIEFING_WAIT_MS,
   log = console.log,
   now = () => Date.now(),
   apiKey,
@@ -304,9 +326,12 @@ export function makeRealtimeSession({
   const marks = new Map(); // reply end marks sent to Telnyx and not echoed yet
   const said = new Set(); // voice items whose line went to onCallEvent
   const cuts = new Map(); // voice item → { heardMs, totalMs }: talked over before its line came
-  let ready = false; // the session.update went: a pushed item can go too
-  let held = []; // items pushed before that
+  let ready = false; // the session.update went: a pushed item, and caller audio, can go too
+  let held = []; // items pushed before that: { text, key }
   let stopFeed = null;
+  const plain = instructions || DEFAULT_INSTRUCTIONS; // the prompt without a briefing
+  let briefing = null; // buildInstructions' promise, from the start of the call
+  let briefedMs = null; // how long it took
 
   const send = (obj) => {
     if (ws && ws.readyState === OPEN) ws.send(JSON.stringify(obj));
@@ -319,12 +344,67 @@ export function makeRealtimeSession({
     item: { type: "message", role: "system", content: [{ type: "input_text", text }] },
   });
 
-  // The feed's push: into the call now, or once the session is set up.
-  const push = (text) => {
+  // The feed's push: into the call now, or once the session is set up. key
+  // names the row it tells, so the briefing can drop it (dropShown).
+  const push = (text, key) => {
     if (ended || typeof text !== "string" || !text.trim()) return;
     log(`📞 Live update for the call${ready ? "" : " (held until the socket opens)"}: ${oneLine(text).slice(0, 100)}`);
     if (ready) send(systemItem(text));
-    else held.push(text);
+    else held.push({ text, key });
+  };
+
+  // Held updates for rows that the briefing tells already: once is enough.
+  const dropShown = (shown) => {
+    if (!shown || !held.length) return;
+    const told = shown instanceof Set ? shown : new Set(shown);
+    const keep = held.filter((h) => h.key == null || !told.has(h.key));
+    if (keep.length < held.length) log(`📞 Dropped ${held.length - keep.length} live update(s) that the briefing tells already`);
+    held = keep;
+  };
+
+  // The briefing starts now, so it is ready by the time the socket opens.
+  // A throw or a rejection waits for the open handler, which logs it.
+  const startBriefing = () => {
+    if (!buildInstructions) return;
+    const t0 = now();
+    briefing = Promise.resolve()
+      .then(() => buildInstructions({ callId: callControlId, caller, prompt: plain }))
+      .then((built) => {
+        briefedMs = now() - t0;
+        return built;
+      });
+    briefing.catch(() => {});
+  };
+
+  // The prompt for this call: the briefing when it is ready in time, else the
+  // plain prompt. It never throws, and it waits at most briefingWaitMs.
+  const LATE = Symbol("late");
+  const callPrompt = async () => {
+    let timer;
+    const late = new Promise((resolve) => {
+      timer = setTimeout(() => resolve(LATE), briefingWaitMs);
+      timer.unref?.();
+    });
+    try {
+      const built = await Promise.race([briefing, late]);
+      if (built === LATE) {
+        log(`⚠️  The briefing was not ready ${briefingWaitMs} ms after the socket opened: the call starts with the plain prompt`);
+        return plain;
+      }
+      const text = typeof built === "string" ? built : built?.text;
+      if (typeof text !== "string" || !text.trim()) {
+        log("⚠️  The briefing came back empty: the call starts with the plain prompt");
+        return plain;
+      }
+      dropShown(built?.shown);
+      log(`📞 Briefing: ${text.length} characters, built in ${briefedMs} ms`);
+      return text;
+    } catch (err) {
+      log(`⚠️  The briefing failed: ${err?.message || err}. The call starts with the plain prompt`);
+      return plain;
+    } finally {
+      clearTimeout(timer);
+    }
   };
 
   const startFeed = () => {
@@ -376,9 +456,11 @@ export function makeRealtimeSession({
     else cuts.set(itemId, { heardMs, totalMs });
   };
 
+  // Audio waits for the session.update, not just the open socket: until it,
+  // OpenAI does not know the audio is PCMU, and a briefing can hold it back.
   const appendAudio = (payload) => {
     if (frameRms(payload) > VOICE_RMS) lastVoiceAt = now();
-    if (ws && ws.readyState === OPEN) return send({ type: "input_audio_buffer.append", audio: payload });
+    if (ready) return send({ type: "input_audio_buffer.append", audio: payload });
     openQueue.push(payload);
     if (openQueue.length > OPEN_QUEUE_CAP) openQueue.shift();
   };
@@ -670,19 +752,29 @@ export function makeRealtimeSession({
     ws = new WebSocketImpl(`${url}${sep}model=${encodeURIComponent(model)}`, {
       headers: { Authorization: `Bearer ${apiKey}` },
     });
-    ws.on("open", () => {
-      if (ended) return ws.close();
+    // The settings with this call's prompt, the date line first, then what
+    // waited for them: the feed's held items, the caller's audio, the greeting.
+    const setUp = (prompt) => {
       const today = `It is ${timeNow(clock())} as the call starts.`;
-      send(sessionUpdate({ instructions: `${today}\n\n${instructions || DEFAULT_INSTRUCTIONS}`, voice, eagerness, transcribeModel, reasoning, silenceMs, noise, tools: directTools?.defs }));
-      // What the feed pushed while the socket opened, after the settings.
+      send(sessionUpdate({ instructions: `${today}\n\n${prompt}`, voice, eagerness, transcribeModel, reasoning, silenceMs, noise, tools: directTools?.defs }));
       ready = true;
-      for (const text of held) send(systemItem(text));
+      for (const { text } of held) send(systemItem(text));
       held = [];
       for (const p of openQueue) send({ type: "input_audio_buffer.append", audio: p });
       openQueue = [];
       if (greeting) {
         createResponse({ instructions: `Say exactly this and nothing else: "${greeting}"`, tool_choice: "none" });
       }
+    };
+    ws.on("open", () => {
+      if (ended) return ws.close();
+      if (!briefing) return setUp(plain);
+      // A call that ended while it waited sends nothing: end() closed the socket.
+      callPrompt()
+        .then((prompt) => {
+          if (!ended) setUp(prompt);
+        })
+        .catch((err) => log(`⚠️  OpenAI Realtime setup failed: ${err.message}`));
     });
     ws.on("message", (data, isBinary) => {
       if (isBinary) return;
@@ -752,6 +844,10 @@ export function makeRealtimeSession({
       // After connect, so a socket that fails to start leaves no feed behind.
       // A push from now on waits for the open socket.
       startFeed();
+      // After the feed: a row written from now on reaches the call by the
+      // feed, so the briefing can miss none, and one that both tell is
+      // dropped from the feed (dropShown).
+      startBriefing();
     },
     onFrame(msg) {
       if (ended || !msg || typeof msg !== "object") return;

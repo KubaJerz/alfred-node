@@ -35,6 +35,31 @@ node scripts/voice-eval.mjs --compare agent/var/voice-eval/runs/<a> agent/var/vo
   which the voice must stay quiet, and speaks. The `live-*` scenarios use it:
   a photo and the reply that names it, a texted "out of eggs", and a photo
   whose reply has not come, so the voice must not guess.
+- **What the call starts knowing.** A scenario can carry a briefing world,
+  all of it made up:
+
+  ```js
+  briefing: {
+    user: "...",       // USER.md
+    memory: "...",     // MEMORY.md
+    yesterday: "...",  // yesterday's daily note (Tuesday 1 December)
+    today: "...",      // today's daily note
+    rows: [at("09:00", texted("I'm cooking pasta tonight")), at("09:00", replied("Sounds good."))],
+  }
+  ```
+
+  Before the call, `seed()` writes the files where the bot keeps them, in the
+  call's temp state dir, and the rows into its ledger at their times
+  (`at("HH:MM", row)`, Eastern, on the day of the call; `texted`, `replied`,
+  `callRow` and `toolRow` build them as the bot does). The call's prompt is
+  then built by the bot's own builder (`callBriefing` in `context.js`), as on a
+  real call: `phone-voice.md`, then the background. A scenario without a
+  briefing gets the prompt alone, so the other scenarios run as before. The
+  `brief-*` scenarios use it: pasta texted an hour before ("what am I making
+  tonight?", no tool), a call 20 minutes before that put kale under Greens
+  ("add spinach to the list we were adding to": spinach under Greens, no
+  Alfred), and the dentist by SMS ("when's the dentist?": Tuesday at 3, no
+  tool, though the calendar does not have it).
 
 ## How it is scored
 
@@ -48,7 +73,10 @@ node scripts/voice-eval.mjs --compare agent/var/voice-eval/runs/<a> agent/var/vo
   smooth, 0–2 each, from the transcript, the starting data and the goal, and
   names the worst moment. The transcript shows what the call was told mid-call,
   and only for those calls the rubric says how to judge it (a guess at a photo
-  is not honest), so the other calls are graded as before.
+  is not honest), so the other calls are graded as before. In the same way, a
+  call that started with a briefing shows the grader the background whole,
+  with a rubric line that says answering from it with no tool is right; the
+  saved `.txt` shows it before the call.
 
 Each run saves `summary.md`, and per call a transcript (`.txt`), the full
 record (`.json`) and a stereo recording (`.wav`, caller left, Alfred right) in
@@ -62,6 +90,8 @@ record (`.json`) and a stereo recording (`.wav`, caller left, Alfred right) in
   request the scenarios need; a vague request gets "say what you need".
 - One run of a scenario is noisy. Compare with `--repeat 3` or more.
 - The grader is a model too: read the transcripts behind a surprising score.
+- A briefing world is small (about 1.5 KB of background); a real one is
+  several times that, with more facts to pick from.
 
 ## Results so far
 
@@ -85,3 +115,6 @@ tick with no page finding the page.
   wrong; the full model handles the same audio.
 - So the phone runs `gpt-realtime-2.1` (`VOICE_OPENAI_MODEL`), about 3¢ a call
   against 1¢. Retry mini after the next prompt or tool change, with this suite.
+
+The `live-*` and `brief-*` scenarios (#153) came after this run and have no
+results yet.

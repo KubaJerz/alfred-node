@@ -1,16 +1,17 @@
 // What Alfred is told about the phone and the recent past (context.js): the
-// catch-up block and its cursor, and a new session's context. A turn here does
-// what handleTurn in bot.js does with them, around a stand-in for Claude. All
-// data is fake and lives in temp dirs. Nothing here touches agent/var/.
+// catch-up block and its cursor, a new session's context, the live feed into a
+// call, and a call's briefing. A turn here does what handleTurn in bot.js does
+// with them, around a stand-in for Claude. All data is fake and lives in temp
+// dirs. Nothing here touches agent/var/.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { makeLedger, inboundRow, callRow, toolRow } from "../ledger.js";
 import {
-  CURSOR_FILE, CATCH_UP_MAX_CHARS, RECENT_WINDOW_MS, CLEARED_UPDATE,
-  makeCatchUp, catchUpBlock, sessionContext, recentMessages, turnWorked, liveUpdate, liveFeed,
+  CURSOR_FILE, CATCH_UP_MAX_CHARS, RECENT_WINDOW_MS, CLEARED_UPDATE, BRIEFING_MAX_CHARS, BRIEFING_NOTE_MAX_CHARS,
+  makeCatchUp, catchUpBlock, sessionContext, recentMessages, turnWorked, liveUpdate, liveFeed, callBriefing, briefingRows,
 } from "../context.js";
 
 const OK = { result: "Done.", session_id: "s1", is_error: false };
@@ -575,4 +576,283 @@ test("the live feed: a push that throws is logged, and the turn's row is written
   assert.equal(row.text, "hi");
   assert.deepEqual((await w.ledger.readAll()).map((r) => r.text), ["hi"]);
   assert.match(w.errors[0], /A live update for the call failed: socket gone/);
+});
+
+test("the live feed gives each push its row's ts, so a call can drop one that its briefing tells", async () => {
+  const w = world();
+  const pushed = [];
+  liveFeed({ ledger: w.ledger, push: (text, key) => pushed.push({ text, key }), log: w.log });
+  const row = await w.ledger.append(inboundRow({ who: WHO, via: "sms", text: "eggs", agentDir: w.agentDir }));
+  await w.ledger.archive();
+  assert.equal(pushed[0].key, row.ts);
+  assert.deepEqual(pushed[1], { text: CLEARED_UPDATE, key: undefined }, "a /clear is no row: it always goes");
+});
+
+// ── The call's briefing ─────────────────────────────────────────────────────
+
+const PROMPT = "THE PROMPT";
+const NEXT = { callId: "v3:call-2", caller: CALL.caller }; // the call being briefed
+
+// The briefing of NEXT, as bot.js builds it, with the budget log kept.
+async function brief(w, opts = {}) {
+  const lines = [];
+  const b = await callBriefing({
+    stateDir: w.stateDir, ledger: w.ledger, prompt: PROMPT, callId: NEXT.callId, now: w.now(),
+    log: { log: (m) => lines.push(m), error: w.log.error }, ...opts,
+  });
+  return { ...b, lines };
+}
+// The message lines of a briefing: between their title and the end.
+const recentOf = (text) => {
+  const at = text.indexOf("\n[The last ");
+  if (at === -1) return [];
+  return text.slice(text.indexOf("\n", at + 1) + 1, text.indexOf("\n\n=== END OF BACKGROUND ===")).split("\n");
+};
+const untimed = (lines) => lines.map((l) => l.replace(/^\d\d:\d\d /, ""));
+
+test("the call's briefing: the prompt, then one headed background block: USER, MEMORY, yesterday's and today's notes, the last 6 hours", async () => {
+  const w = world();
+  seedFiles(w);
+  w.at("2026-11-24T12:00:00.000Z"); // 07:00 EST, 8 hours before the call
+  await w.ledger.append(inboundRow({ who: WHO, via: "discord", text: "too old to show", agentDir: w.agentDir }));
+  w.at("2026-11-24T19:00:00.000Z"); // 14:00
+  await w.ledger.append(inboundRow({ who: WHO, via: "discord", text: "I'm cooking pasta tonight", agentDir: w.agentDir }));
+  await w.ledger.append({ dir: "out", via: "discord", kind: "reply", text: "Sounds good." });
+  w.at("2026-11-24T20:00:00.000Z"); // 15:00: the call
+  const b = await brief(w);
+
+  const order = [
+    `${PROMPT}\n\n=== BACKGROUND: WHAT YOU KNOW FROM BEFORE THIS CALL ===\n`,
+    "[About the user]\nthe user file",
+    "[Your memory]\nthe memory file",
+    "[Yesterday's daily note: Monday 23 November]\nthe note of yesterday",
+    "[Today's daily note: Tuesday 24 November]\nthe note of today",
+    "[The last 6 hours, oldest first. Times are Eastern. A call here is an earlier call, not this one.]",
+  ].map((s) => b.text.indexOf(s));
+  assert.ok(order[0] === 0 && order.every((at, i) => i === 0 || at > order[i - 1]), JSON.stringify(order));
+  assert.ok(b.text.endsWith("\n\n=== END OF BACKGROUND ==="));
+  assert.equal(b.text, `${PROMPT}\n\n${b.background}`);
+  // The head says what the background is for, since the prompt does not.
+  assert.match(b.background, /It is background only\. What it already says needs no tool; for anything to look up or change, still use your tools\. Do not recite it, or bring it up, unless the caller asks\./);
+  assert.match(b.background, /"You" in it is you, on every channel\./);
+  assert.equal(b.text.includes("the soul file"), false, "SOUL.md is Alfred's prompt, not the voice's");
+  assert.equal(b.text.includes("two days ago"), false);
+  assert.equal(b.text.includes("too old to show"), false);
+  assert.deepEqual(recentOf(b.text), [
+    "On Tuesday 24 November:",
+    "14:00 the user said (by text): I'm cooking pasta tonight",
+    "14:00 you said (by text): Sounds good.",
+  ]);
+  assert.deepEqual(b.dropped, []);
+  assert.deepEqual(b.lines, [], "nothing left out, nothing logged");
+  assert.ok(b.text.length < BRIEFING_MAX_CHARS);
+});
+
+test("the briefing tells an earlier call once, from its own lines: never its use_tools turns; this call, and turns that failed or said nothing, are left out", async () => {
+  const w = world({ at: "2026-11-24T19:00:00.000Z" }); // 14:00 EST
+  await call(w, { type: "start" });
+  await said(w, "in", "Add kale under greens. And did Sarah email?");
+  await tool(w, 'added "Kale" under "Greens" (Notion page "Shopping list")');
+  await w.ledger.append(inboundRow({ who: { tag: "call:+1" }, via: "call", text: "Check for an email from Sarah", agentDir: w.agentDir, callId: CALL.callId }));
+  await w.ledger.append({ dir: "out", via: "call", kind: "reply", text: "One email from Sarah: the lease is ready.", callId: CALL.callId });
+  await said(w, "out", "Done. And yes: Sarah says the lease is ready.");
+  await call(w, { type: "end", ms: 120_000, reason: "OpenAI connection closed (1000)" });
+  w.wait(60);
+  await w.ledger.append(inboundRow({ who: WHO, via: "sms", text: "eggs?", agentDir: w.agentDir }));
+  await w.ledger.append({ dir: "out", via: "sms", kind: "error", text: "Something went wrong: boom" });
+  await w.ledger.append(inboundRow({ who: WHO, via: "discord", text: "lol", agentDir: w.agentDir }));
+  await w.ledger.append({ dir: "out", via: "discord", kind: "silent", text: "" });
+  await w.ledger.append({ dir: "out", via: "discord", kind: "timeout", text: "Timed out after 10 minutes" });
+  await w.ledger.append({ dir: "out", via: "discord", kind: "cancelled", text: "" });
+  // The call being briefed has begun: its own rows are not background.
+  await w.ledger.append(callRow({ ...NEXT, type: "start" }));
+  await w.ledger.append(callRow({ ...NEXT, type: "line", dir: "in", text: "Hello again." }));
+  const b = await brief(w);
+
+  assert.deepEqual(untimed(recentOf(b.text)), [
+    "On Tuesday 24 November:",
+    "(a phone call started)",
+    "the user said (on the call): Add kale under greens. And did Sarah email?",
+    'you did (on the call): added "Kale" under "Greens" (Notion page "Shopping list")',
+    "you said (on the call): Done. And yes: Sarah says the lease is ready.",
+    "(the call ended after 2 min)",
+    "the user said (by SMS): eggs?",
+    "the user said (by text): lol",
+  ]);
+  for (const gone of ["Check for an email", "One email from Sarah", "OpenAI", "went wrong", "Timed out", "Hello again"]) {
+    assert.equal(b.text.includes(gone), false, gone);
+  }
+  // shown: the rows the text tells, for the call to drop their live updates.
+  const shownTexts = (await w.ledger.readAll()).filter((r) => b.shown.has(r.ts)).map((r) => r.text);
+  assert.deepEqual(shownTexts, ["", "Add kale under greens. And did Sarah email?", 'added "Kale" under "Greens" (Notion page "Shopping list")', "Done. And yes: Sarah says the lease is ready.", "", "eggs?", "lol"]);
+});
+
+test("briefingRows: earlier calls' own rows and the other channels' chat; no use_tools turn, no failed or silent turn, nothing of this call", () => {
+  const rows = [
+    { ts: "1", src: "call", via: "call", kind: "start", callId: "a" },
+    { ts: "2", src: "tool", via: "call", callId: "a", text: "added" },
+    { ts: "3", dir: "in", via: "call", callId: "a", text: "request" },
+    { ts: "4", dir: "out", via: "call", kind: "reply", callId: "a", text: "answer" },
+    { ts: "5", dir: "in", text: "an old row: Discord, src chat" },
+    { ts: "6", dir: "out", via: "sms", kind: "auth_error", text: "x" },
+    { ts: "7", dir: "out", via: "sms", kind: "reply", text: "ok" },
+    { ts: "8", src: "call", via: "call", kind: "start", callId: "b" },
+  ];
+  assert.deepEqual(briefingRows(rows, { callId: "b" }).map((r) => r.ts), ["1", "2", "5", "7"]);
+});
+
+test("in the briefing, each side is you: your replies by text and SMS, your lines and changes on a call; no model, service or other assistant is named", async () => {
+  const w = world({ at: "2026-11-24T18:00:00.000Z" }); // 13:00 EST
+  await w.ledger.append(inboundRow({ who: WHO, via: "discord", text: "Plan the week?", agentDir: w.agentDir }));
+  await w.ledger.append({ dir: "out", via: "discord", kind: "reply", text: "Sure: gym Monday, thesis Tuesday." });
+  await w.ledger.append(inboundRow({ who: WHO, via: "sms", text: "Milk?", agentDir: w.agentDir }));
+  await w.ledger.append({ dir: "out", via: "sms", kind: "reply", text: "On the list." });
+  await call(w, { type: "start" });
+  await said(w, "in", "What's on the list?");
+  await said(w, "out", "Milk, eggs and bread.");
+  await call(w, { type: "end", ms: 30_000, reason: "OpenAI Realtime: insufficient credit" });
+  await call(w, { type: "late", request: "Check the mail", text: "Two new emails." });
+  const b = await brief(w, { now: new Date("2026-11-24T19:00:00.000Z") });
+  assert.deepEqual(untimed(recentOf(b.text)).slice(1), [
+    "the user said (by text): Plan the week?",
+    "you said (by text): Sure: gym Monday, thesis Tuesday.",
+    "the user said (by SMS): Milk?",
+    "you said (by SMS): On the list.",
+    "(a phone call started)",
+    "the user said (on the call): What's on the list?",
+    "you said (on the call): Milk, eggs and bread.",
+    "(the call ended after 30 s)",
+    "you said (in writing, after the call ended): Two new emails.",
+  ]);
+  assert.doesNotMatch(b.background, /\b(OpenAI|Realtime|Claude|ChatGPT|GPT|Telnyx|Discord|model|assistant|Alfred)\b/i);
+});
+
+test("a file in the briefing is named by its kind, never by its path: the voice cannot open it", async () => {
+  const w = world();
+  const day = path.join(w.stateDir, "memories", "dailies", "2026-11-24");
+  await w.ledger.append(inboundRow({ who: WHO, via: "discord", text: "Thoughts on these?", agentDir: w.agentDir, attachments: [path.join(day, "9-0-shoes.jpg"), path.join(day, "9-1-list.pdf")] }));
+  await w.ledger.append(inboundRow({ who: WHO, via: "sms", text: "", agentDir: w.agentDir, attachments: [path.join(day, "9-2-x.png")] }));
+  const b = await brief(w);
+  assert.deepEqual(untimed(recentOf(b.text)).slice(1), [
+    "the user said (by text): Thoughts on these?",
+    "    (a photo and a PDF sent with it)",
+    "the user said (by SMS): (no words)",
+    "    (a photo sent with it)",
+  ]);
+  assert.equal(b.text.includes("var/memories"), false);
+  assert.equal(b.text.includes("shoes"), false, "not even the file's name, which can say what it shows");
+});
+
+test("over the budget, the prompt, USER, MEMORY and the last call stay whole; the oldest messages go first, and the log says so", async () => {
+  const w = world({ at: "2026-11-24T14:00:00.000Z" }); // 09:00 EST
+  seedFiles(w);
+  const OLD = { callId: "v3:old", caller: CALL.caller };
+  await w.ledger.append(callRow({ ...OLD, type: "start" }));
+  await w.ledger.append(callRow({ ...OLD, type: "line", dir: "in", text: "an older call" }));
+  for (let i = 0; i < 30; i++) {
+    w.wait(60);
+    await w.ledger.append(inboundRow({ who: WHO, via: "discord", text: `chat ${i} ${"words ".repeat(20)}`, agentDir: w.agentDir }));
+    if (i === 10) {
+      // The last call, in the middle: older than most of the chat.
+      await call(w, { type: "start" });
+      for (let j = 0; j < 6; j++) await said(w, j % 2 ? "out" : "in", `call line ${j} ${"talk ".repeat(20)}`);
+      await tool(w, 'added "Kale" under "Greens" (Notion page "Shopping list")');
+      await call(w, { type: "end", ms: 300_000 });
+    }
+  }
+  const maxChars = 3_000;
+  const b = await brief(w, { now: new Date("2026-11-24T15:00:00.000Z"), maxChars });
+
+  assert.ok(b.text.length <= maxChars, `${b.text.length} characters`);
+  for (const whole of [PROMPT, "the user file", "the memory file", "the note of yesterday", "the note of today", "(a phone call started)", 'added "Kale" under "Greens"']) {
+    assert.ok(b.text.includes(whole), whole);
+  }
+  for (let j = 0; j < 6; j++) assert.ok(b.text.includes(`call line ${j} `), `call line ${j}`);
+  // The newest chat stays; the oldest goes, and the older call is just chat.
+  assert.ok(b.text.includes("chat 29 "));
+  assert.equal(b.text.includes("chat 0 "), false);
+  assert.equal(b.text.includes("an older call"), false);
+  const kept = [...Array(30).keys()].filter((i) => b.text.includes(`chat ${i} `));
+  assert.deepEqual(kept, [...Array(30).keys()].slice(30 - kept.length), "the chat that stays is the newest, in one piece");
+  assert.match(b.text, /\n\(Earlier lines are left out\.\)\nOn Tuesday 24 November:\n/);
+  assert.equal(b.lines.length, 1);
+  assert.match(b.lines[0], /^📞 Briefing cut to fit 3000 characters: left out the \d+ oldest lines of the messages$/);
+  // The default budget and the note cap are the named constants.
+  assert.equal(BRIEFING_MAX_CHARS, 24_000);
+  assert.equal(BRIEFING_NOTE_MAX_CHARS, 4_000);
+});
+
+test("a daily note over its cap keeps its end, from an entry, and says its start is left out", async () => {
+  const w = world();
+  seedFiles(w);
+  const entries = Array.from({ length: 40 }, (_, i) => `## ${String(8 + Math.floor(i / 4)).padStart(2, "0")}:${String((i % 4) * 15).padStart(2, "0")} — entry ${i}\nWhat happened.`);
+  writeFileSync(path.join(w.stateDir, "memories", "dailies", "2026-11-23", "daily.md"), entries.join("\n\n"));
+  const b = await brief(w, { noteChars: 300 });
+  const note = b.text.split("[Yesterday's daily note: Monday 23 November]\n")[1].split("\n\n[Today's")[0];
+  assert.ok(note.length <= 300, `${note.length} characters`);
+  assert.match(note, /^\(The start of this note is left out\.\)\n## \d\d:\d\d — entry \d+\n/);
+  assert.ok(note.endsWith("entry 39\nWhat happened."));
+  assert.ok(b.text.includes("the note of today"), "today's note is short: whole");
+  assert.deepEqual(b.dropped, [`cut yesterday's note to its last ${note.length} of ${entries.join("\n\n").length} characters`]);
+  assert.match(b.lines[0], /^📞 Briefing cut to fit 24000 characters: cut yesterday's note to its last \d+ of \d+ characters$/);
+});
+
+test("the parts kept whole stay whole past the budget: the notes and the other messages go, and the log says so", async () => {
+  const w = world({ at: "2026-11-24T19:00:00.000Z" });
+  seedFiles(w);
+  writeFileSync(path.join(w.stateDir, "memories", "MEMORY.md"), "M".repeat(900));
+  await w.ledger.append(inboundRow({ who: WHO, via: "discord", text: "some chat", agentDir: w.agentDir }));
+  await call(w, { type: "start" });
+  await said(w, "in", "the last call's line");
+  const b = await brief(w, { maxChars: 800 });
+  assert.ok(b.text.includes("M".repeat(900)) && b.text.includes("the user file") && b.text.includes("the last call's line"));
+  assert.equal(b.text.includes("the note of"), false);
+  assert.equal(b.text.includes("some chat"), false);
+  assert.deepEqual(b.dropped.slice(0, 2), ["left out today's note (17 characters)", "left out yesterday's note (21 characters)"]);
+  assert.match(b.dropped.at(-1), /^the parts kept whole come to \d+ characters$/);
+  assert.match(b.lines[0], /left out the 1 oldest line of the messages/);
+});
+
+test("the last call shows whole even when it began before the window; other rows from before it do not", async () => {
+  const w = world({ at: "2026-11-24T13:50:00.000Z" }); // 08:50 EST: 6 h 10 min before the call
+  await w.ledger.append(inboundRow({ who: WHO, via: "discord", text: "before the window", agentDir: w.agentDir }));
+  await call(w, { type: "start" });
+  await said(w, "in", "said before the window");
+  w.at("2026-11-24T14:10:00.000Z"); // 09:10: inside it
+  await said(w, "out", "said inside the window");
+  await call(w, { type: "end", ms: 20 * 60_000 });
+  const b = await brief(w, { now: new Date("2026-11-24T20:00:00.000Z") });
+  assert.deepEqual(untimed(recentOf(b.text)).slice(1), [
+    "(a phone call started)",
+    "the user said (on the call): said before the window",
+    "you said (on the call): said inside the window",
+    "(the call ended after 20 min)",
+  ]);
+});
+
+test("nothing to tell: the briefing is the prompt alone", async () => {
+  const w = world();
+  // Only the call being briefed is in the ledger, and no file is there.
+  await w.ledger.append(callRow({ ...NEXT, type: "start" }));
+  const b = await brief(w);
+  assert.equal(b.text, PROMPT);
+  assert.equal(b.background, "");
+  assert.equal(b.shown.size, 0);
+  assert.deepEqual(b.lines, []);
+});
+
+test("a briefing whose ledger or file cannot be read logs it and gives the rest", async () => {
+  const w = world();
+  seedFiles(w);
+  // USER.md as a directory: reading it fails, and not as a missing file.
+  const user = path.join(w.stateDir, "USER.md");
+  rmSync(user);
+  mkdirSync(user);
+  const b = await brief(w, { ledger: { tail: async () => { throw new Error("tail failed"); } } });
+  assert.match(b.text, /\[Your memory\]\nthe memory file/);
+  assert.match(b.text, /the note of today/);
+  assert.equal(b.text.includes("[About the user]"), false);
+  assert.equal(b.text.includes("[The last"), false);
+  assert.ok(w.errors.some((e) => /Briefing: could not read USER\.md/.test(e)), w.errors.join("\n"));
+  assert.ok(w.errors.some((e) => /Briefing: the recent messages failed: tail failed/.test(e)), w.errors.join("\n"));
 });

@@ -1,13 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { makeVoiceTools } from "../telnyx/voice-tools.js";
 import { makeRealtimeSession } from "../telnyx/realtime.js";
-import { liveUpdate } from "../context.js";
+import { callBriefing, liveUpdate } from "../context.js";
 import { fakeAlfred, fakeCalendar, fakeNotion } from "../voice-eval/fakes.js";
-import { makeCallLedger } from "../voice-eval/openai-call.js";
+import { makeCallLedger, EVAL_NOW } from "../voice-eval/openai-call.js";
 import { SCENARIOS, COMMON_CHECKS } from "../voice-eval/scenarios.js";
 import { scoreChecks, transcript, graderPrompt } from "../voice-eval/score.js";
 
@@ -278,4 +278,145 @@ test("the transcript and the grader show what the call was told mid-call", () =>
   assert.ok(prompt.includes(told), "the grader reads the item whole");
   // A call that was told nothing is graded on the same prompt as before.
   assert.doesNotMatch(graderPrompt(record(["Done."]), SCENARIOS[0]), /told mid-call/);
+});
+
+// ── What the voice knows as the call starts (the briefing) ──────────────────
+
+const BRIEFED = ["brief-pasta", "brief-last-call", "brief-dentist"];
+const scenario = (id) => SCENARIOS.find((s) => s.id === id);
+// A test call's ledger at the eval's clock, with the scenario's world in it.
+async function seeded(id) {
+  const call = makeCallLedger({ now: () => EVAL_NOW.getTime() });
+  await call.seed(scenario(id).briefing);
+  return call;
+}
+
+test("the briefing scenarios carry a made-up world from before the call, and only they do", () => {
+  assert.deepEqual(SCENARIOS.filter((s) => s.briefing).map((s) => s.id), BRIEFED);
+  for (const id of BRIEFED) {
+    const { briefing } = scenario(id);
+    assert.ok(briefing.user && briefing.memory && briefing.yesterday && briefing.today, id);
+    for (const row of briefing.rows) assert.ok(Date.parse(row.ts) < EVAL_NOW.getTime(), `${id}: ${row.text} is from before the call`);
+  }
+  // The last call left kale under Greens; spinach is not on the list yet.
+  const list = fakeNotion(scenario("brief-last-call").world.pages).lines("Shopping list").map((l) => l.text);
+  assert.ok(list.includes("- [ ] Kale") && !list.some((l) => /spinach/i.test(l)), list.join("\n"));
+});
+
+test("a briefing scenario's world goes where the bot keeps it, and the call's prompt is the bot's callBriefing of it", async () => {
+  const facts = {
+    "brief-pasta": "the user said (by text): I'm cooking pasta tonight",
+    "brief-last-call": 'you did (on the call): added "Kale" under "Greens" (Notion page "Shopping list")',
+    "brief-dentist": "the user said (by SMS): The dentist is Tuesday at 3.",
+  };
+  for (const id of BRIEFED) {
+    const call = await seeded(id);
+    const memories = path.join(call.stateDir, "memories");
+    assert.equal(readFileSync(path.join(call.stateDir, "USER.md"), "utf8"), scenario(id).briefing.user);
+    assert.ok(existsSync(path.join(memories, "MEMORY.md")));
+    assert.ok(existsSync(path.join(memories, "dailies", "2026-12-01", "daily.md")), "yesterday's note");
+    assert.ok(existsSync(path.join(memories, "dailies", "2026-12-02", "daily.md")), "today's note");
+    const built = await call.buildInstructions({ callId: `eval-${id}`, caller: "+10000000000", prompt: "PROMPT" });
+    const bots = await callBriefing({ stateDir: call.stateDir, ledger: call.ledger, prompt: "PROMPT", callId: `eval-${id}`, now: EVAL_NOW });
+    assert.equal(built.text, bots.text, `${id}: the same builder as the bot`);
+    assert.ok(built.text.startsWith("PROMPT\n\n=== BACKGROUND"), id);
+    assert.ok(built.text.includes(facts[id]), `${id}:\n${built.text}`);
+    assert.deepEqual(built.dropped, [], `${id}: nothing left out`);
+    assert.equal(call.briefing(), built, "the record gets what was built");
+    call.close();
+  }
+});
+
+test("a scenario without a briefing world gets the prompt alone, as before", async () => {
+  const call = makeCallLedger({ now: () => EVAL_NOW.getTime() });
+  await call.seed(scenario("add-two").briefing);
+  const built = await call.buildInstructions({ callId: "eval-add-two", prompt: "PROMPT" });
+  assert.equal(built.text, "PROMPT");
+  assert.equal(built.background, "");
+  call.close();
+});
+
+test("a briefing row with no ts is a mistake in the scenario, said at once", async () => {
+  const call = makeCallLedger();
+  await assert.rejects(call.seed({ rows: [{ dir: "in", text: "when?" }] }), /A briefing row needs its ts/);
+  call.close();
+});
+
+test("through the session: the call's session.update carries the briefing, after the date line and the prompt", async () => {
+  const call = await seeded("brief-dentist");
+  const session = makeRealtimeSession({
+    callControlId: "eval-brief-dentist",
+    caller: "+10000000000",
+    sendFrame: () => {},
+    onTurn: async () => "",
+    hangup: async () => {},
+    log: () => {},
+    apiKey: "sk-test",
+    greeting: "",
+    instructions: "THE VOICE PROMPT",
+    clock: () => EVAL_NOW,
+    WebSocketImpl: FakeWs,
+    feed: call.feed,
+    onCallEvent: call.onCallEvent,
+    buildInstructions: call.buildInstructions,
+  });
+  session.start();
+  const ws = FakeWs.last;
+  await until(() => ws.sent.length >= 1);
+  const { instructions } = ws.sent[0].session;
+  assert.ok(instructions.startsWith("It is Wednesday, December 2, 2026 at 10:00 AM (Eastern) as the call starts.\n\nTHE VOICE PROMPT\n\n=== BACKGROUND"), instructions);
+  assert.ok(instructions.includes("08:30 the user said (by SMS): The dentist is Tuesday at 3.\n08:30 you said (by SMS): Noted."));
+  assert.equal(instructions.includes("(a phone call started)"), false, "the test call's own start is no background");
+  session.end("test hung up", { hang: false });
+  call.close();
+});
+
+test("brief-pasta and brief-dentist: the answer from the briefing with no tool passes; a tool, or no answer, does not", () => {
+  const voice = (t, text) => ({ t, kind: "voice", text });
+  const caller = (text) => ({ t: 1000, kind: "caller", text });
+  const pasta = passes(run([caller("What am I making tonight?"), voice(2000, "Pasta, you said.")]), "brief-pasta");
+  assert.ok(Object.values(pasta).every(Boolean), JSON.stringify(pasta));
+  const looked = { t: 1500, kind: "tool", name: "notion", args: { action: "search", page: "dinner" }, result: "Nothing shared matches that." };
+  assert.equal(passes(run([caller("x"), looked, voice(2000, "Pasta.")]), "brief-pasta")["used no tool"], false, "even a read is a tool");
+  const asked = { t: 1500, done: 5000, kind: "use_tools", request: "What is the user cooking tonight?", reply: "Pasta." };
+  assert.equal(passes(run([caller("x"), asked, voice(6000, "Pasta.")]), "brief-pasta")["used no tool"], false);
+
+  const dentist = passes(run([caller("When's the dentist?"), voice(2000, "Tuesday at three.")]), "brief-dentist");
+  assert.ok(Object.values(dentist).every(Boolean), JSON.stringify(dentist));
+  const cal = { t: 1500, kind: "tool", name: "calendar", args: { action: "read" }, result: "Nothing on those days." };
+  const missed = passes(run([caller("x"), cal, voice(2000, "I don't see a dentist appointment.")]), "brief-dentist");
+  assert.equal(missed["used no tool"], false);
+  assert.equal(missed["said Tuesday"], false);
+});
+
+test("brief-last-call: spinach under Greens with no Alfred passes; spinach at the end of the list, or asking Alfred, does not", async () => {
+  // The list as the voice changes it: read, then add (under the Greens line, or at the end).
+  const listAfter = async (add) => {
+    const notion = fakeNotion(scenario("brief-last-call").world.pages);
+    const tools = makeVoiceTools({ notionRoutes: notion.routes, calendarRoutes: {}, fetchBlockChildren: notion.fetchBlockChildren });
+    assert.match(await tools.call("notion", { action: "read", page: "Shopping list" }), /4\. - \[ \] Greens\n5\. {3}- \[ \] Kale/);
+    assert.match(await tools.call("notion", { action: "add", page: "Shopping list", items: ["Spinach"], ...add }), /^Done: added "Spinach"/);
+    return notion;
+  };
+  const good = { events: [{ t: 1000, kind: "voice", text: "Done, spinach is under Greens." }], world: { calendar: [], computer: {} }, notion: await listAfter({ under: 4 }) };
+  const ok = passes(good, "brief-last-call");
+  assert.ok(Object.values(ok).every(Boolean), JSON.stringify(ok));
+
+  const atEnd = passes({ ...good, notion: await listAfter({}) }, "brief-last-call");
+  assert.equal(atEnd["Spinach on Shopping list, unticked"], true);
+  assert.equal(atEnd["Spinach under Greens on Shopping list"], false);
+  const viaAlfred = passes({ ...good, events: [...good.events, { t: 500, done: 900, kind: "use_tools", request: "add spinach", reply: "Done." }] }, "brief-last-call");
+  assert.equal(viaAlfred["did it without Alfred"], false);
+});
+
+test("the grader reads what the call started with, and only for a call that had a briefing", () => {
+  const background = "=== BACKGROUND: WHAT YOU KNOW FROM BEFORE THIS CALL ===\n…\n09:00 the user said (by text): I'm cooking pasta tonight\n\n=== END OF BACKGROUND ===";
+  const briefed = { ...record(["Pasta."]), briefing: background };
+  const prompt = graderPrompt(briefed, scenario("brief-pasta"));
+  assert.match(prompt, /Alfred started this call with the background shown below in his\s+instructions/);
+  assert.ok(prompt.includes(`What Alfred knew as the call started (the background in his instructions):\n${background}`));
+  // Without one, the prompt is as before: no briefing rubric, no background.
+  const plain = graderPrompt({ ...record(["Done."]), briefing: "" }, SCENARIOS[0]);
+  assert.equal(plain, graderPrompt(record(["Done."]), SCENARIOS[0]));
+  assert.doesNotMatch(plain, /started this call with the background|What Alfred knew as the call started/);
 });

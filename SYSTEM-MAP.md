@@ -158,8 +158,9 @@ per call, as PCMU with no transcoding. OpenAI decides the end of a turn and
 talks. For Alfred's tools, memory or actions, it calls the `use_tools`
 function, which runs the same `onCallTurn` as v1. Its reply goes back as the
 function output, and the speech model says it. Its prompt is
-`agent/phone-voice.md`. On a barge-in, the pipeline clears the audio and
-truncates the item at the point the caller heard.
+`agent/phone-voice.md`, with a briefing of the recent past after it. On a
+barge-in, the pipeline clears the audio and truncates the item at the point
+the caller heard.
 
 **The v3 pipeline** is the same path with the speech on this machine
 (`VOICE_PIPELINE_ENGINE=local`, the default of the pipeline). bot.js starts one
@@ -212,8 +213,9 @@ claude -p "<user message>" \
 Option 2B splits a call between two minds. The **voice** is one OpenAI Realtime
 session per call: it hears, decides when the caller has finished, and talks.
 **Alfred** is the same `claude -p` turn as Discord, reached only through the
-`use_tools` function. The voice starts each call blank, with only
-`agent/phone-voice.md`; Alfred resumes his session as usual. Quick work skips
+`use_tools` function. The voice starts each call with `agent/phone-voice.md`
+and a briefing of what it should know already (below); Alfred resumes his
+session as usual. Quick work skips
 Alfred: `telnyx/voice-tools.js` gives the voice its own notion, calendar
 and get_time tools, run in process on the broker's route table — no
 HTTP hop and no token, but the same guarded routes.
@@ -222,7 +224,7 @@ HTTP hop and no token, but the same guarded routes.
 flowchart TD
     CALL["Kuba · phone (call)"] -->|speech| CC["Telnyx Call Control<br/>media stream"]
     CC -->|"signed webhook + media socket<br/>via tunnel"| VP["telnyx/pipeline.js<br/>signature + token + allow list"]
-    VP <-->|"PCMU both ways"| RT["telnyx/realtime.js<br/>one session per call<br/>prompt: phone-voice.md"]
+    VP <-->|"PCMU both ways"| RT["telnyx/realtime.js<br/>one session per call<br/>prompt: phone-voice.md + the briefing"]
     RT <-->|"audio · turns · function calls"| OA["OpenAI Realtime<br/>the voice"]
     RT -->|"notion · calendar<br/>get_time"| VT["telnyx/voice-tools.js<br/>exact titles · read before write"]
     VT ==>|"in process"| BR["broker routes<br/>NOTION_ROUTES · GOOGLE_ROUTES"]
@@ -241,6 +243,8 @@ flowchart TD
     LED -.- CUR["ledger-cursor.json<br/>moves after a turn that worked"]
     TXT["Kuba · Discord or SMS<br/>during the call"] -->|"a turn, as any other"| LED
     LED -.->|"live: each text + reply as it lands<br/>a system item, no reply asked · liveFeed"| RT
+    LED -.->|"at call start: the last 6 h<br/>calls from their own rows · callBriefing"| RT
+    MEMF["USER.md · MEMORY.md<br/>yesterday's + today's notes"] -.->|"at call start: the briefing"| RT
     classDef external fill:#d6e2f2,stroke:#1f5fb8,color:#123f7d
     classDef gateway fill:#d8ebe2,stroke:#1b6b52,color:#12503c
     classDef stack fill:#f5e8d5,stroke:#b07a2a,color:#6e4a12
@@ -248,7 +252,7 @@ flowchart TD
     class CALL,CC,OA,N,G,TXT external
     class VP,BR gateway
     class SPAWN stack
-    class LED,CUR,NOTE store
+    class LED,CUR,NOTE,MEMF store
 ```
 
 **One caller turn.** The voice decides which path: answer itself (small talk,
@@ -282,9 +286,24 @@ from the caller's next turn and never speaks up about it. It is not a
 The call never gets its own rows (`via: "call"`). A file is named by its kind,
 never sent: until Alfred's reply says what a photo shows, the item tells the
 voice not to guess and to ask `use_tools`, which waits for that reply. `/clear`
-tells the call to forget earlier context. Items pushed before the OpenAI
-socket opens wait for it. `VOICE_OPENAI_LIVE=0` turns the feed off. A call
-still starts blank: no briefing of recent chat yet (part 2 in `TODO.md`).
+tells the call to forget earlier context. Items pushed before the session is
+set up wait for it. `VOICE_OPENAI_LIVE=0` turns the feed off.
+
+**As a call starts**, its prompt is `phone-voice.md` and then a headed
+background block (`callBriefing` in `context.js`, the `buildInstructions`
+option of `realtime.js`): `USER.md`, `MEMORY.md`, yesterday's and today's daily
+notes, and the last 6 hours of the ledger on every channel. Earlier calls come
+from their own rows, never their `use_tools` turns, so a call shows once, and
+Alfred's text replies are "you said (by text)": one persona again. A file is
+named by its kind. The block says it is background: what it says needs no
+tool, anything to look up or change still does. It is built while the OpenAI
+socket connects and awaited before the `session.update`, at most 1 s; a
+failure or a late one is logged, and the call starts with the plain prompt.
+The budget is about 24,000 characters: the prompt, USER, MEMORY and the last
+call stay whole, each note keeps at most its last 4,000 characters, and the
+oldest messages go first, with a log line. A live update for a row that the
+briefing tells already is dropped. `VOICE_OPENAI_BRIEFING=0` turns it off.
+`docs/shared-context.md` has the whole picture.
 
 **The call in the ledger.** The call writes itself into `messages.jsonl` as it
 happens, not at the end: each caller line as transcribed, each voice line as
@@ -312,8 +331,11 @@ media stream, `voice-eval/fakes.js` for Notion, the calendar and Alfred (the
 real `voice-tools.js` runs on top), `voice-eval/scenarios.js` holds the callers
 and their checks, and `voice-eval/score.js` scores each call. Each test call
 has its own ledger in a temp dir, fed into the call by the bot's `liveFeed`, so
-a scenario can send a text mid-call by the same code. Dev-only: nothing in the
-running bot imports it. See `docs/voice-eval.md`.
+a scenario can send a text mid-call by the same code. That dir is the call's
+state dir too: a scenario's briefing world (USER, MEMORY, the notes, earlier
+rows) is written there, and the bot's `callBriefing` builds the call's prompt
+from it. Dev-only: nothing in the running bot imports it. See
+`docs/voice-eval.md`.
 
 ## Inbound mail (Pub/Sub)
 
@@ -714,6 +736,7 @@ flowchart TD
     MEM --> PLUS
     LIVE -.->|"the last 6 h, word for word"| PLUS
     PLUS -->|"seeds a new session"| CTX
+    PLUS -.->|"with USER.md: briefs each 2B call<br/>callBriefing, at call start"| CALLV
     classDef agent fill:#f5e8d5,stroke:#b07a2a,color:#6e4a12
     classDef store fill:#e7e7e7,stroke:#888,color:#333
     class CTX,FOLD agent
@@ -728,7 +751,11 @@ yesterday's evening chat is in no session. The notes cover the days, and the
 messages cover the hours that no fold has reached yet. Over 24,000 characters,
 the oldest messages go first. A call shows once, from its own lines. The
 dotted arrow is the resumed session — it carries the prior turns as context
-but re-injects nothing.
+but re-injects nothing. A 2B call starts from the same sources: its briefing
+(`callBriefing`) is `USER.md`, `MEMORY.md`, the two notes and the last 6 hours,
+built for the voice and kept to about 24,000 characters (see "A phone call
+(2B)" above). `docs/shared-context.md` covers the ledger, the fold, the
+catch-up, the live feed and the briefing in one place.
 
 Two stages, decoupled in time. The fold does transcript → daily note, every
 night and on `/clear`. The dream does daily note → `MEMORY.md`, every night

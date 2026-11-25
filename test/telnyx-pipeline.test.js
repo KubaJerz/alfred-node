@@ -763,6 +763,37 @@ test("pipeline (openai): realtime.feed starts with the call, with its id and cal
   }
 });
 
+test("pipeline (openai): realtime.buildInstructions is asked with the call's id and caller, and its briefing is the call's prompt", async () => {
+  const asked = [];
+  const sent = [];
+  class RecordingWs extends FakeRealtimeWs {
+    send(s) {
+      sent.push(JSON.parse(s));
+    }
+  }
+  const buildInstructions = async (a) => {
+    asked.push(a);
+    return `${a.prompt}\n\nBRIEFED`;
+  };
+  const realtime = { apiKey: "sk-test", WebSocketImpl: RecordingWs, greeting: "", instructions: "PLAIN", buildInstructions };
+  const s = await setup({ pipelineOpts: { engine: "openai", realtime } });
+  try {
+    assert.equal(await s.incoming("v3:call7"), 200);
+    await waitFor(() => s.commands.length === 1);
+    const peer = s.connectMedia();
+    await peer.open();
+    peer.start("v3:call7");
+    await waitFor(() => sent.length === 1);
+    assert.deepEqual(asked, [{ callId: "v3:call7", caller: OWNER, prompt: "PLAIN" }]);
+    assert.equal(sent[0].type, "session.update");
+    assert.match(sent[0].session.instructions, /^It is .* as the call starts\.\n\nPLAIN\n\nBRIEFED$/);
+    await s.postEvent("call.hangup", { call_control_id: "v3:call7", hangup_cause: "normal_clearing", hangup_source: "caller" });
+    await waitFor(() => peer.closed !== null);
+  } finally {
+    await s.close();
+  }
+});
+
 test("makeVoicePipeline needs a public URL and a token", () => {
   assert.throws(() => makeVoicePipeline({ publicUrl: "", token: "t", onTurn: () => "" }), /public URL and a token/);
   assert.throws(() => makeVoicePipeline({ publicUrl: PUBLIC, token: "", onTurn: () => "" }), /public URL and a token/);

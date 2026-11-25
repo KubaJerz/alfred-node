@@ -100,7 +100,9 @@ async function worker() {
       const grade = useJudge ? await judge(record, s) : null;
       const text = transcript(record);
       const { notion, wav, ...saved } = record;
-      writeFileSync(join(outDir, `${name}.txt`), `${s.goal}\n\n${text}\n\n${score.checks.map((c) => `${c.pass ? "✓" : "✗"} ${c.name}`).join("\n")}\n${grade ? `\ngrader: ${JSON.stringify(grade)}\n` : ""}`);
+      // The background the call started with, when it had one, before the call.
+      const briefing = record.briefing ? `${record.briefing}\n\n` : "";
+      writeFileSync(join(outDir, `${name}.txt`), `${s.goal}\n\n${briefing}${text}\n\n${score.checks.map((c) => `${c.pass ? "✓" : "✗"} ${c.name}`).join("\n")}\n${grade ? `\ngrader: ${JSON.stringify(grade)}\n` : ""}`);
       writeFileSync(join(outDir, `${name}.json`), JSON.stringify({ ...saved, score, grade }, null, 2));
       writeFileSync(join(outDir, `${name}.wav`), wav);
       results.push({ id: s.id, name, score, grade });

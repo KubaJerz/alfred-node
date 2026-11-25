@@ -5,7 +5,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { makeLedger, callRow, inboundRow } from "../ledger.js";
-import { liveFeed, CLEARED_UPDATE } from "../context.js";
+import { liveFeed, callBriefing, CLEARED_UPDATE } from "../context.js";
 import {
   makeRealtimeSession,
   sessionUpdate,
@@ -18,6 +18,7 @@ import {
   USE_TOOLS,
   END_CALL,
   DEFAULT_INSTRUCTIONS,
+  BRIEFING_WAIT_MS,
   toolOutput,
   oneLine,
   GREETING,
@@ -935,4 +936,145 @@ test("through a real ledger: a text during the call reaches the voice, its own l
   await Promise.all(writes);
   await ledger.append(inboundRow({ who, via: "sms", text: "after the call", agentDir: dir }));
   assert.equal(systemItems(ws).length, 3);
+});
+
+// ── The briefing (buildInstructions) ────────────────────────────────────────
+
+const DATE_LINE = "It is Wednesday, December 2, 2026 at 10:00 AM (Eastern) as the call starts.";
+const AT_TEN = () => new Date("2026-12-02T15:00:00Z");
+// A promise the test settles itself.
+const later = () => {
+  let resolve, reject;
+  const promise = new Promise((res, rej) => ((resolve = res), (reject = rej)));
+  return { promise, resolve, reject };
+};
+
+test("the briefing starts with the call and is awaited before the session.update: the date line first, then the briefing", async () => {
+  const asked = [];
+  const built = later();
+  const buildInstructions = (a) => {
+    asked.push(a);
+    return built.promise;
+  };
+  const { session, ws, logs } = setup({ opts: { buildInstructions, instructions: "PLAIN", clock: AT_TEN } });
+  await waitFor(() => asked.length === 1);
+  assert.deepEqual(asked[0], { callId: "v3:abc", caller: "+15551234567", prompt: "PLAIN" }, "the plain prompt goes to the builder");
+  await waitFor(() => ws.readyState === 1);
+  // The socket is open, the briefing is not ready: no settings, no audio yet.
+  session.onFrame({ event: "media", media: { track: "inbound", chunk: "1", payload: ulaw(20) } });
+  await sleep(20);
+  assert.deepEqual(ws.sent, [], "nothing goes before the briefing");
+  built.resolve({ text: "PLAIN\n\nBACKGROUND", shown: new Set() });
+  await waitFor(() => ws.sent.length >= 3);
+  assert.deepEqual(ws.types().slice(0, 3), ["session.update", "input_audio_buffer.append", "response.create"]);
+  assert.equal(ws.sent[0].session.instructions, `${DATE_LINE}\n\nPLAIN\n\nBACKGROUND`);
+  assert.ok(logs.some((l) => /^📞 Briefing: 17 characters, built in \d+ ms$/.test(l)), logs.join("\n"));
+  // From now on, caller audio goes straight in.
+  session.onFrame({ event: "media", media: { track: "inbound", chunk: "2", payload: "AAAA" } });
+  assert.deepEqual(ws.sent.at(-1), { type: "input_audio_buffer.append", audio: "AAAA" });
+  session.end("test", { hang: false });
+});
+
+test("a briefing as a plain string is the prompt too; with no instructions, the builder gets the default prompt", async () => {
+  let prompt = null;
+  const { session, ws } = setup({ opts: { greeting: "", clock: AT_TEN, buildInstructions: async (a) => ((prompt = a.prompt), "BRIEFED") } });
+  await waitFor(() => ws.sent.length >= 1);
+  assert.equal(prompt, DEFAULT_INSTRUCTIONS);
+  assert.equal(ws.sent[0].session.instructions, `${DATE_LINE}\n\nBRIEFED`);
+  session.end("test", { hang: false });
+});
+
+test("a briefing that fails, throws, comes back empty or is late: the call starts with the plain prompt, and the log says why", async () => {
+  const cases = [
+    ["rejects", async () => { throw new Error("disk on fire"); }, "⚠️  The briefing failed: disk on fire. The call starts with the plain prompt"],
+    ["throws", () => { throw new Error("no ledger"); }, "⚠️  The briefing failed: no ledger. The call starts with the plain prompt"],
+    ["empty", async () => ({ text: "  ", shown: [] }), "⚠️  The briefing came back empty: the call starts with the plain prompt"],
+    ["nothing", async () => undefined, "⚠️  The briefing came back empty: the call starts with the plain prompt"],
+    ["late", () => new Promise(() => {}), "⚠️  The briefing was not ready 30 ms after the socket opened: the call starts with the plain prompt"],
+  ];
+  for (const [name, buildInstructions, why] of cases) {
+    const { session, ws, logs } = setup({ opts: { buildInstructions, briefingWaitMs: 30, instructions: "PLAIN", clock: AT_TEN } });
+    await waitFor(() => ws.sent.length >= 2, 1000);
+    assert.equal(ws.sent[0].session.instructions, `${DATE_LINE}\n\nPLAIN`, name);
+    assert.equal(ws.sent[1].type, "response.create", `${name}: the greeting still comes`);
+    assert.ok(logs.includes(why), `${name}:\n${logs.join("\n")}`);
+    session.end("test", { hang: false });
+  }
+  assert.equal(BRIEFING_WAIT_MS, 1000, "the default wait is the named constant");
+});
+
+test("the feed starts before the briefing is asked for, so a row written meanwhile reaches the call one way or the other", async () => {
+  const order = [];
+  const { session, ws } = setup({
+    opts: { greeting: "", feed: () => (order.push("feed"), () => {}), buildInstructions: async () => (order.push("briefing"), "B") },
+  });
+  await waitFor(() => ws.sent.length >= 1);
+  assert.deepEqual(order, ["feed", "briefing"]);
+  session.end("test", { hang: false });
+});
+
+test("a held live update for a row that the briefing tells is dropped; the others go in after the session.update", async () => {
+  let push;
+  const built = later();
+  const feed = (f) => ((push = f.push), () => {});
+  const { session, ws, logs } = setup({ opts: { greeting: "", feed, buildInstructions: () => built.promise } });
+  push("[in the briefing too]", "2026-12-02T14:59:00.000Z");
+  push("[only in the feed]", "2026-12-02T14:59:30.000Z");
+  push("[The user cleared the conversation]");
+  await waitFor(() => ws.readyState === 1);
+  built.resolve({ text: "BRIEFED", shown: new Set(["2026-12-02T14:59:00.000Z"]) });
+  await waitFor(() => ws.sent.length >= 3);
+  assert.deepEqual(ws.types(), ["session.update", "conversation.item.create", "conversation.item.create"]);
+  assert.deepEqual(systemItems(ws), ["[only in the feed]", "[The user cleared the conversation]"]);
+  assert.ok(logs.includes("📞 Dropped 1 live update(s) that the briefing tells already"), logs.join("\n"));
+  session.end("test", { hang: false });
+});
+
+test("a call that ends while its briefing is built sends nothing", async () => {
+  const built = later();
+  const { session, ws, ended } = setup({ opts: { buildInstructions: () => built.promise } });
+  await waitFor(() => ws.readyState === 1);
+  session.end("caller hung up", { hang: false });
+  built.resolve("BRIEFED");
+  await sleep(20);
+  assert.deepEqual(ws.sent, []);
+  assert.equal(ended(), 1);
+});
+
+test("through a real ledger: a text written while the briefing is built reaches the call once, and the call's own start is no background", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "alfred-brief-"));
+  const ledger = makeLedger({ file: path.join(dir, "messages.jsonl"), logsDir: path.join(dir, "logs") });
+  const who = { tag: "kuba", id: "1", channel: "c1" };
+  await ledger.append(inboundRow({ who, via: "discord", text: "I'm cooking pasta tonight", agentDir: dir }));
+  await ledger.append({ dir: "out", via: "discord", kind: "reply", text: "Sounds good.", files: 0 });
+  // As bot.js wires it. The builder waits for a text that lands as the call
+  // starts, so the row is in the briefing and in the feed's held items both.
+  let text;
+  const writes = [];
+  const { session, ws } = setup({
+    opts: {
+      greeting: "",
+      feed: ({ push }) => liveFeed({ ledger, push }),
+      onCallEvent: (ev) => {
+        const row = callRow(ev);
+        if (row) writes.push(ledger.append(row));
+      },
+      buildInstructions: async ({ callId, prompt }) => {
+        await text;
+        return callBriefing({ stateDir: dir, ledger, prompt, callId });
+      },
+    },
+  });
+  text = ledger.append(inboundRow({ who, via: "sms", text: "and garlic bread", agentDir: dir }));
+  await waitFor(() => ws.sent.length >= 1);
+  await Promise.all(writes);
+  const { instructions } = ws.sent[0].session;
+  assert.match(instructions, /the user said \(by text\): I'm cooking pasta tonight\n.*you said \(by text\): Sounds good\.\n.*the user said \(by SMS\): and garlic bread/);
+  assert.equal(instructions.includes("(a phone call started)"), false, "this call is not an earlier call");
+  assert.deepEqual(systemItems(ws), [], "the text came once: in the briefing");
+  // A text after the briefing reaches the call by the feed.
+  await ledger.append(inboundRow({ who, via: "sms", text: "and wine", agentDir: dir }));
+  assert.equal(systemItems(ws).length, 1);
+  assert.match(systemItems(ws)[0], /by SMS, the user said: "and wine"/);
+  session.end("call hung up", { hang: false });
 });

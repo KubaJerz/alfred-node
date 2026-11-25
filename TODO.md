@@ -218,8 +218,9 @@ allow list stops strangers, not a determined attacker. These close the gaps.
       with numbered lines, add under a section, check/uncheck, edit, remove,
       create subpage; any shared page), `calendar` (read, add, edit, delete),
       `get_time`. `use_tools` stays for everything else. Each direct write
-      leaves Alfred a simple note (daily note, and a line at the front of his
-      next message) until part 2 replaces it.
+      leaves Alfred a line in the daily note, and a `src: "tool"` row in the
+      ledger that his next message starts with (part 2, #153, replaced the
+      in-memory line).
 - [x] **Make the voice terse and conversational (#130).** Prompt only for
       now: quick tools get no words, "Done." after an action, one short line
       before `use_tools`. Code ideas, held until a test call shows the prompt
@@ -245,28 +246,53 @@ allow list stops strangers, not a determined attacker. These close the gaps.
       to your shopping list.") and narrates between tool calls whatever the
       prompt says. Compare other realtime models, or a cascaded setup (STT →
       LLM → TTS) where the spoken text can be trimmed before it is voiced.
-- [ ] **Part 2: one shared context for the voice and Alfred.** The voice
-      starts every call blank; Alfred keeps one resumed Claude Code session.
-      Goal: either side always knows what happened on the other, even when
-      Kuba switches between call and chat fast. Agreed so far (2026-11-22):
-  - Never write into Claude Code's own session JSONL (internal format, could
-    break `--resume`). Our `agent/var/messages.jsonl` is ours to append to.
-  - **Phone → Alfred:** at call end, the call transcript (both sides plus
-    direct tool actions) goes into `messages.jsonl` tagged `via: "call"`, a
-    summary goes at the front of Alfred's next message on any channel, and a
-    line goes in the daily note.
-  - **Alfred → phone, instantly:** nothing slow may run when a call starts.
-    Keep a ready briefing file; at call start read it and put it in the
-    voice's instructions with USER.md, MEMORY.md and today's daily note.
-  - **Cost:** no Haiku run after every reply. Recent messages are appended
-    raw to the briefing until they pass a token limit; only then does Haiku
-    condense them into the running summary. Same rule for call transcripts.
-  - **Test:** a fast back-and-forth between call, Discord and SMS, checking
-    each side knows what the other just did.
-  - A Fable architecture review of this plan is in
-    `docs/phone-context-review.md` (once written).
-- [ ] **Send Alfred the caller's own words** with each `use_tools` request,
-      so a request the voice retold wrong can be checked against them.
+- [x] **Part 2: one shared context for the voice and Alfred (#153).** Either
+      side knows what happened on the other, through one ledger,
+      `agent/var/messages.jsonl`; `docs/shared-context.md` has the whole
+      picture, and `docs/phone-context-review.md` the review it follows. No
+      model condenses anything (the review dropped Haiku: at these sizes there
+      is nothing to condense), and nothing writes into Claude Code's session
+      files. Shipped, in five steps:
+  - [x] Every day with messages gets a daily note: the nightly pass folds the
+    ledger into each row's own day before it dreams, with a watermark, and
+    `/clear` folds what it archives. Inbound rows name their saved files.
+    `scripts/backfill-dailies.mjs` folds past days on request.
+  - [x] A 2B call writes itself into the ledger as it happens: caller and
+    voice lines verbatim, start and end, direct tool changes (`src` `call`
+    and `tool`), so no call is lost to a crash or a restart.
+  - [x] **Phone → Alfred:** each turn on any channel starts with the call
+    lines and tool changes since his last turn, from a cursor on disk; a new
+    session gets yesterday's and today's notes and the last 6 hours on every
+    channel.
+  - [x] **Alfred → phone, live:** a text or SMS during a call, and Alfred's
+    reply, go into the call as they are written (system items, no reply
+    asked); `/clear` tells the call to forget.
+  - [x] **Alfred → phone, at call start:** the voice's prompt gets a briefing
+    (USER, MEMORY, the two notes, the last 6 hours), built while the socket
+    opens, about 24,000 characters at most, with the oldest messages dropped
+    first and a log line when anything is.
+  - [ ] **Run the voice eval** on the new `live-*` and `brief-*` scenarios
+    (paid; not run yet), and compare a few runs with the briefing off.
+  - [ ] **Test it live:** a fast back-and-forth between call, Discord and
+    SMS, checking each side knows what the other just did (the test matrix
+    in `docs/phone-context-review.md`).
+  - [ ] **Apply the backfill** to the real notes, after a dry run on a copy
+    is read and approved.
+  - [ ] **Watch the briefing's budget.** If "Briefing cut to fit" shows up
+    in the log often, add a condenser as a cache ("Condensing, if ever" in
+    the review).
+  - [ ] **The caller's newest line can miss its own `use_tools` turn.** The
+    transcript of a caller line can come after the turn read the ledger; it
+    then shows on Alfred's next turn. Waiting briefly for the transcript
+    before the turn reads would close it.
+  - [ ] `agent/SOUL.md`'s startup checklist still tells Alfred to read
+    USER.md, MEMORY.md and the notes himself, though a new session now gets
+    them. Trim it, or leave it as a reminder for a resumed session.
+- [x] **Send Alfred the caller's own words** with each `use_tools` request,
+      so a request the voice retold wrong can be checked against them. Done by
+      the catch-up (#153): a `use_tools` turn is a turn, so it starts with the
+      call so far, the caller's lines word for word. The one gap is the race
+      in the Part 2 list above.
 
 ### Web access — debug Alfred's browser, find the best web tools for agents
 

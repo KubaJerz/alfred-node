@@ -11,12 +11,19 @@
 // feed tells the call, as on a real call. The caller waits ROWS_QUIET_MS, then
 // says the line. Give rows only to a turn that waits for Alfred to finish.
 //
+// A scenario with a briefing ({ user, memory, yesterday, today, rows }) starts
+// from what the bot would know before the call: USER.md, MEMORY.md, the daily
+// notes of yesterday and today, and ledger rows from before the call, each
+// with its ts (at() below). The call's prompt is built from it by the bot's
+// own builder (callBriefing in context.js). A scenario without one gets the
+// prompt alone, as before.
+//
 // The clock in every call is Wednesday 2 December 2026, 10:00 AM Eastern
 // (openai-call.js), so "tomorrow" is Thursday the 3rd and "Friday" the 4th.
 
 import path from "node:path";
 import { attachmentName } from "../dailies.js";
-import { inboundRow } from "../ledger.js";
+import { callRow, inboundRow, toolRow } from "../ledger.js";
 
 // ── The world ────────────────────────────────────────────────────────────────
 
@@ -63,6 +70,56 @@ const WHO = { discord: { tag: "kuba", id: "1", channel: "c1" }, sms: { tag: "sms
 const texted = (text, { via = "discord", files = [] } = {}) =>
   inboundRow({ who: WHO[via], via, text, agentDir: AGENT_DIR, attachments: files.map((f, i) => path.join(DAY_DIR, attachmentName("1", i, f))) });
 const replied = (text, { via = "discord" } = {}) => ({ dir: "out", via, kind: "reply", text, files: 0 });
+
+// ── What the bot knew before the call (the briefing) ────────────────────────
+// All of it made up: the files the briefing reads, and rows from earlier the
+// same morning. at("09:00", row) puts a row at that Eastern time on the day
+// of the call.
+
+const at = (hhmm, row) => ({ ...row, ts: new Date(`2026-12-02T${hhmm}:00${ET}`).toISOString() });
+
+// The files, as small as the real ones, so the facts a caller asks about sit
+// among others, as they would.
+const BACKGROUND = {
+  user: "# User\n- Kuba. Eastern time.\n- Likes short, plain answers.",
+  memory:
+    '# Memory\n- The shopping list is the Notion page "Shopping list".\n- Runs most mornings before the lab.\n' +
+    "- Lab meeting every Wednesday at 2 PM.\n- Thesis advisor reviews chapters on Fridays.",
+  yesterday: "## 18:40 — Groceries\nWants oat milk next time.\n\n## 21:15 — Thesis\nSent chapter 3 to the advisor.",
+  today: "## 07:05 — Run\nRan 5 miles before the lab.",
+};
+
+// A chat at the start of the day, in every briefing: one exchange by text.
+const MORNING = [
+  at("08:15", texted("Morning! Anything on today?")),
+  at("08:15", replied("Morning. Just the lab meeting at 2.")),
+];
+
+// A call earlier this morning, as it wrote itself into the ledger: its lines,
+// the voice's own tool changes, and its end.
+const EARLIER = { callId: "eval-earlier-call", caller: "+10000000000" };
+const earlier = (hhmm, ev) => at(hhmm, callRow({ ...EARLIER, ...ev }));
+const EARLIER_CALL = [
+  earlier("09:40", { type: "start" }),
+  earlier("09:40", { type: "line", dir: "in", text: "Add a Greens section to my shopping list, with kale in it." }),
+  earlier("09:40", { type: "line", dir: "out", text: "Got it." }),
+  at("09:40", toolRow({ ...EARLIER, text: 'added "Greens" (Notion page "Shopping list")' })),
+  at("09:40", toolRow({ ...EARLIER, text: 'added "Kale" under "Greens" (Notion page "Shopping list")' })),
+  earlier("09:41", { type: "line", dir: "out", text: "Done, kale is under Greens." }),
+  earlier("09:41", { type: "line", dir: "in", text: "Great, thanks. Bye." }),
+  earlier("09:41", { type: "line", dir: "out", text: "Goodbye." }),
+  earlier("09:41", { type: "end", ms: 62_000, reason: "Alfred hung up (end_call)" }),
+];
+
+// The shopping list after that call: Greens with kale, and no spinach yet.
+const AFTER_EARLIER_CALL = `- [ ] Milk
+- [ ] Butter
+- [ ] Limes
+- [ ] Greens
+  - [ ] Kale
+- [ ] Eggs`;
+// The usual world, with one page's text changed.
+const worldWith = (title, markdown) => ({ ...world(), pages: PAGES.map((p) => (p.title === title ? { ...p, markdown } : p)) });
 
 // The photo in the live-photo calls. Only Alfred's reply says what it shows.
 const SHOES = "Those are Hoka Clifton 9 running shoes, in blue. Light and well cushioned: a good pick for daily road runs.";
@@ -143,6 +200,20 @@ const check = {
     test: (r) => useTools(r).some((u) => re.test(u.request)),
   }),
   notAskedAlfred: () => ({ name: "did it without Alfred", test: (r) => useTools(r).length === 0 }),
+  // What the briefing says needs no tool at all, not even a look.
+  noTools: () => ({ name: "used no tool", test: (r) => toolCalls(r).length === 0 && useTools(r).length === 0 }),
+  // word is a line nested under the line with parent, on the page.
+  under: (title, parent, word) => ({
+    name: `${word} under ${parent} on ${title}`,
+    test: (r) => {
+      const lines = page(r, title);
+      const top = lines.findIndex((l) => new RegExp(`\\b${parent}\\b`, "i").test(l.text));
+      if (top === -1) return false;
+      const end = lines.findIndex((l, i) => i > top && l.depth <= lines[top].depth);
+      const inside = lines.slice(top + 1, end === -1 ? lines.length : end);
+      return inside.some((l) => new RegExp(`\\b${word}\\b`, "i").test(l.text));
+    },
+  }),
   event: (label, fn) => ({ name: label, test: (r) => r.world.calendar.some(fn) }),
   pageExists: (re) => ({ name: `a page matching ${re} exists`, test: (r) => r.notion.titles().some((t) => re.test(t)) }),
   todoHas: (re) => ({ name: `Alfred's to-do file has ${re}`, test: (r) => r.world.computer.todo?.some((t) => re.test(t)) }),
@@ -345,6 +416,38 @@ export const SCENARIOS = [
       check.said("the shoes, once Alfred said", /clifton|hoka/i),
       check.quietOnRows(),
     ],
+  },
+  // ── What the voice knows as the call starts (the briefing) ──
+  {
+    // Texted an hour before the call; the voice should just know.
+    id: "brief-pasta",
+    goal: "An hour before the call, the user texted that they are cooking pasta tonight. Asked what they are making tonight, say pasta, from what the call started with: no tool, no asking Alfred.",
+    briefing: {
+      ...BACKGROUND,
+      rows: [...MORNING, at("09:00", texted("I'm cooking pasta tonight")), at("09:00", replied("Sounds good. Enjoy your dinner."))],
+    },
+    turns: [{ say: "What am I making tonight?" }],
+    checks: [check.said("pasta", /\bpasta\b/i), check.noTools()],
+  },
+  {
+    // Call A added kale under Greens; call B goes on with the same list.
+    id: "brief-last-call",
+    goal: "A call 20 minutes ago added a Greens section with kale to the shopping list. Now 'add spinach to the list we were adding to': add spinach to the shopping list, under Greens with the kale, directly in Notion, without asking Alfred or the caller which list.",
+    briefing: { ...BACKGROUND, rows: [...MORNING, ...EARLIER_CALL] },
+    world: worldWith("Shopping list", AFTER_EARLIER_CALL),
+    turns: [{ say: "Add spinach to the list we were adding to." }],
+    checks: [check.added("Shopping list", "Spinach"), check.under("Shopping list", "Greens", "Spinach"), check.notAskedAlfred()],
+  },
+  {
+    // An SMS this morning; the calendar does not have it.
+    id: "brief-dentist",
+    goal: "This morning the user texted (SMS) that the dentist is Tuesday at 3. Asked when the dentist is, say Tuesday at 3, from what the call started with: no tool, not the calendar.",
+    briefing: {
+      ...BACKGROUND,
+      rows: [...MORNING, at("08:30", texted("The dentist is Tuesday at 3.", { via: "sms" })), at("08:30", replied("Noted.", { via: "sms" }))],
+    },
+    turns: [{ say: "When's the dentist?" }],
+    checks: [check.said("Tuesday", /\btuesday\b/i), check.said("3 o'clock", /\b(3|three)\b/i), check.noTools()],
   },
 ];
 

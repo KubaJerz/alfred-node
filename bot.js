@@ -19,7 +19,7 @@ import { resolveRonnieLabels } from "./ronnie/labels.js";
 import { ensureLabels } from "./google/gmail-labels.js";
 import { dailyDir, dailyNotePath, attachmentName, buildAttachmentBlock } from "./dailies.js";
 import { makeLedger, inboundRow, callRow, toolRow } from "./ledger.js";
-import { makeCatchUp, sessionContext, liveFeed } from "./context.js";
+import { makeCatchUp, sessionContext, liveFeed, callBriefing } from "./context.js";
 import { ensureWatermark } from "./fold.js";
 import { parseClearCommand } from "./commands.js";
 import { transcribe, transcriptionAvailable } from "./voice/transcribe.js";
@@ -128,6 +128,13 @@ const VOICE_OPENAI = {
   // it, go into the call as they are written, with no reply asked (liveFeed in
   // context.js). "0" keeps the call to what is said on it.
   feed: process.env.VOICE_OPENAI_LIVE === "0" ? null : ({ push }) => liveFeed({ ledger, push }),
+  // Each call's prompt is phone-voice.md plus a briefing of what the voice
+  // should know already: USER.md, MEMORY.md, yesterday's and today's daily
+  // notes, and the last 6 hours of messages on every channel (callBriefing in
+  // context.js). It is built while the OpenAI socket opens. "0" starts every
+  // call with the prompt alone, as before.
+  buildInstructions: process.env.VOICE_OPENAI_BRIEFING === "0" ? null : ({ callId, prompt }) =>
+    callBriefing({ stateDir: STATE_DIR, ledger, prompt, callId }),
 };
 // The pipeline speaks Alfred's reply sentence by sentence while he writes it.
 // "0" makes it wait for the whole reply, as before.
@@ -1563,7 +1570,8 @@ startMailListener({ gmail: sharedGmail, enqueue: ronnie?.enqueue, onDrained: ron
 // SMS and v1 calls still start.
 let voicePipeline = null;
 // The talker prompt for engine "openai". A missing file keeps the default in
-// telnyx/realtime.js.
+// telnyx/realtime.js. Each call adds its briefing to it
+// (VOICE_OPENAI.buildInstructions); without one, it is the whole prompt.
 function readPhoneVoicePrompt() {
   try {
     return readFileSync(path.join(AGENT_DIR, "phone-voice.md"), "utf8").trim() || undefined;
