@@ -1,28 +1,37 @@
-// Direct tools for the 2B voice: Notion, the calendar and the time, done in
-// about a second instead of a 6–9 s trip through Alfred (use_tools).
+// Direct tools for the 2B voice: Notion, the calendar, reminders and the time,
+// done in about a second instead of a 6–9 s trip through Alfred (use_tools).
 //
 // They call the same broker routes Alfred's CLIs use, in process, so the same
 // guards hold: no comments, no page deletes, no property overwrites (those stay
 // with Alfred, who reports the old value), no calendar guests, no deleting an
-// event that has guests.
+// event that has guests, and a reminder goes to contact names only.
 //
-// Lines and events are addressed by number, or by their words. `read` numbers a
-// page's lines (or a day's events), and a number holds for the whole call: a
-// line keeps it after other lines go or come, and a new line gets the next one.
-// So several numbers from one read stay right however many changes follow.
-// check, uncheck and remove take several lines in one call: every target is
-// found first, then the writes run one after another, and the page is re-read
-// once at the end.
+// Lines, events and reminders are addressed by number, or by their words.
+// `read` numbers a page's lines (or a day's events), `list` numbers the
+// reminders, and a number holds for the whole call: a line keeps it after other
+// lines go or come, and a new line gets the next one. So several numbers from
+// one read stay right however many changes follow. check, uncheck and remove
+// take several lines in one call: every target is found first, then the writes
+// run one after another, and the page is re-read once at the end.
+//
+// The reminders tool has no field for a person, so a reminder that the voice
+// adds goes to the user ("me"). A reminder for another person goes through
+// Alfred. The tool lists, cancels and snoozes reminders, and never sees a job.
+// Snooze also finds a one-time reminder that went out in the last 6 hours, as
+// the service lets it.
 //
 // Every write calls `note` with one plain line, so Alfred learns what the voice
 // did without him (see bot.js).
 
 import { blockLine, markdownToBlocks } from "../notion/blocks.js";
 import { TIMEZONE } from "../google/calendar-rules.js";
+import { WEEKDAYS } from "../reminders/schedule.js";
 
 const NOTION_ACTIONS = ["search", "read", "add", "write", "check", "uncheck", "edit", "remove", "create"];
 export const DEFAULT_HOME_PAGE = "Teamspace Home";
 const CALENDAR_ACTIONS = ["read", "add", "edit", "delete"];
+const REMINDER_ACTIONS = ["add", "list", "cancel", "snooze"];
+const RECENT_MS = 6 * 3_600_000; // snooze finds a one-time reminder that went out this recently
 const COLORS = ["banana", "tomato", "peacock", "grape", "basil", "tangerine"];
 
 export const NOTION_TOOL = {
@@ -88,6 +97,35 @@ export const CALENDAR_TOOL = {
       end: { type: "string" },
       location: { type: "string" },
       color: { type: "string", enum: COLORS },
+    },
+    required: ["action"],
+  },
+};
+
+export const REMINDERS_TOOL = {
+  type: "function",
+  name: "reminders",
+  description:
+    "Quick. Before a change, say just \"Got it.\" or \"Will do.\"; nothing before a read. The user's reminders: at the " +
+    "time, a text and a Discord message go to the user. Times are Eastern, written like 2026-11-27T15:00, or a wait " +
+    "like 30m or 2h. Never guess a time: ask. A repeat is daily, weekly on days, or monthly, at a time like 08:00. " +
+    "Reminders are numbered, and a number stays the same all call. cancel and snooze take reminders (numbers), or " +
+    "match (words of the text, no list needed). snooze with match also finds a reminder that went out in the last " +
+    "6 hours: \"remind me again in 10 minutes\". A reminder for someone else goes to use_tools.",
+  parameters: {
+    type: "object",
+    properties: {
+      action: { type: "string", enum: REMINDER_ACTIONS },
+      text: { type: "string", description: "add: what to remind the user of, in a few words." },
+      at: { type: "string", description: "add: the time, like 2026-11-27T15:00. snooze: the new time." },
+      in: { type: "string", description: "add: instead of at, the wait from now, like 30m or 2h." },
+      repeat: { type: "string", enum: ["daily", "weekly", "monthly"], description: "add: a reminder that repeats. Give time too." },
+      time: { type: "string", description: "add with repeat: the time of day, like 08:00." },
+      days: { type: "array", items: { type: "string", enum: WEEKDAYS }, description: "add with weekly: the days." },
+      day: { type: "string", description: "add with monthly: the day of the month, 1 to 28, or last." },
+      reminders: { type: "array", items: { type: "integer" }, description: "cancel, snooze: reminder numbers, from a list." },
+      match: { type: "string", description: "cancel, snooze: words of the reminder's text, instead of numbers." },
+      for: { type: "string", description: "snooze: how long, like 30m, 2h or 1d (or give at)." },
     },
     required: ["action"],
   },
@@ -187,14 +225,28 @@ function eventLine(n, e) {
   return `${n}. ${when} ${e.summary || "(no title)"}${e.location ? ` @ ${e.location}` : ""}`;
 }
 
+const joinAnd = (list) => (list.length < 2 ? list.join("") : `${list.slice(0, -1).join(", ")} and ${list.at(-1)}`);
+
+// A reminder as the voice reads it: its words, then when. "me" is the caller,
+// so only other people are named.
+function reminderLine(n, e) {
+  const when = e.repeatText
+    ? `${e.repeatText}${e.dueText ? `, next ${e.dueText}` : ""}`
+    : e.dueText || (e.status === "done" && e.last ? `went out ${e.last.atText}` : "no time left");
+  const who = e.to.length === 1 && e.to[0] === "me" ? "" : `, to ${joinAnd(e.to)}`;
+  return `${n}. ${e.text} — ${when}${e.snoozed ? " (snoozed)" : ""}${who}`;
+}
+
 // One call's tools. Page ids and the latest numbering live here, so they last
-// the call and no longer.
+// the call and no longer. reminderRoutes is optional: without it, the call has
+// no reminders tool.
 // homePage: where a new page goes when the caller names no parent. Notion lets
 // an internal integration create a page only inside a page shared with it, so
 // a "new page of its own" lives in the top shared page.
 export function makeVoiceTools({
   notionRoutes,
   calendarRoutes,
+  reminderRoutes = null,
   fetchBlockChildren,
   note = () => {},
   now = () => new Date(),
@@ -206,6 +258,8 @@ export function makeVoiceTools({
   let events = null; // number → event, from the latest calendar read
   const eventNums = numbering(); // event id → its number, for the whole call
   let range = null; // the latest read's { from, to }, re-read after a change
+  let reminderList = null; // number → reminder, from the latest list
+  const reminderNums = numbering(); // reminder id → its number, for the whole call
 
   // One tool call at a time: parallel calls from one reply would otherwise
   // re-read and write the same page at once.
@@ -223,6 +277,7 @@ export function makeVoiceTools({
   };
   const N = (key, args) => route(notionRoutes, key, args);
   const C = (key, args) => route(calendarRoutes, key, args);
+  const R = (key, args) => route(reminderRoutes, key, args);
 
   async function findPage(name) {
     if (!name?.trim()) throw new Error("say which page, by its exact title");
@@ -567,14 +622,128 @@ export function makeVoiceTools({
     throw new Error(`unknown action "${action}"`);
   }
 
+  // The user's active reminders, numbered. A job is not a reminder, so the
+  // voice never sees one.
+  async function listReminders() {
+    const { entries } = await R("GET /reminders", { params: params({ kind: "reminder" }) });
+    reminderList = new Map();
+    if (!entries.length) return "No reminders are set.";
+    return entries
+      .map((e) => {
+        const n = numberOf(reminderNums, e.id);
+        reminderList.set(n, e);
+        return reminderLine(n, e);
+      })
+      .join("\n");
+  }
+
+  // The one-time reminders that went out in the last few hours. They are not
+  // active, so the list leaves them out, but snooze takes one of them: "remind
+  // me again in 10 minutes".
+  async function recentlySent() {
+    const { entries } = await R("GET /reminders", { params: params({ kind: "reminder", all: "1" }) });
+    const tNow = +now();
+    return entries.filter((e) => e.status === "done" && !e.repeat && e.last?.firedAt && tNow - Date.parse(e.last.firedAt) < RECENT_MS);
+  }
+
+  // The reminders a change names: numbers from a list, or `match`, words of
+  // the text (listed here, so no separate list is needed). Words that fit
+  // several reminders list them, so the next call can say which by number.
+  // recent: a match also looks at the reminders that went out recently.
+  async function reminderTargets(a, { recent = false } = {}) {
+    const numbers = numbersIn(a.reminders, a.reminder);
+    if (a.match?.trim() && !numbers.length) {
+      await listReminders();
+      if (recent) for (const e of await recentlySent()) reminderList.set(numberOf(reminderNums, e.id), e);
+      const re = wordsRe(a.match);
+      const hits = [...reminderList.entries()].filter(([, e]) => re.test(e.text));
+      if (!hits.length) throw new Error(`no reminder says "${a.match.trim()}"`);
+      if (hits.length > 1) {
+        const which = hits.map(([n, e]) => reminderLine(n, e)).join("\n");
+        throw new Error(`"${a.match.trim()}" could be:\n${which}\nsay which by number`);
+      }
+      return { list: [hits[0][1]], missing: [] };
+    }
+    if (!numbers.length) throw new Error("say which reminder, by number or match");
+    if (!reminderList) throw new Error("list the reminders first, or give match");
+    const list = [];
+    const missing = [];
+    for (const n of numbers) {
+      const e = reminderList.get(n);
+      if (e && !list.includes(e)) list.push(e);
+      else if (!e) missing.push(`no reminder ${n}`);
+    }
+    return { list, missing };
+  }
+
+  // After a change: what happened, and the reminders again (numbers kept)
+  // when this call listed them before.
+  async function remindersChanged(head) {
+    if (!reminderList) return head;
+    return `${head}\n\n${await listReminders()}`;
+  }
+
+  async function reminders(a) {
+    const action = a.action;
+    if (action === "list") return listReminders();
+
+    if (action === "add") {
+      const text = String(a.text || "").trim();
+      if (!text) throw new Error("say what the reminder is for");
+      if (!a.at && !a.in && !a.repeat) throw new Error("say when. Never guess a time: ask the caller");
+      // The route reads a field that is left out as "not given". An empty
+      // list or string from the model must not count as given.
+      const given = (v) => (Array.isArray(v) ? v.length > 0 : v !== undefined && v !== null && v !== "");
+      const body = {};
+      for (const k of ["at", "in", "repeat", "time", "days", "day"]) if (given(a[k])) body[k] = a[k];
+      const { entry } = await R("POST /reminders", { body: { text, ...body } });
+      const when = entry.repeatText ? `, ${entry.repeatText}` : ` for ${entry.dueText}`;
+      note(`added the reminder "${entry.text}"${when}`);
+      return remindersChanged(`Done: added "${entry.text}"${when}.`);
+    }
+
+    if (action === "cancel") {
+      const { list, missing } = await reminderTargets(a);
+      const done = [];
+      for (const e of list) {
+        try {
+          await R("DELETE /reminders", { params: params({ id: e.id }) });
+          done.push(e.text);
+        } catch (err) {
+          missing.push(`"${e.text}" was not cancelled: ${err.message}`);
+        }
+      }
+      const { head } = batchAnswer("cancelled", done, missing);
+      note(`cancelled the reminder${done.length > 1 ? "s" : ""} ${quoted(done)}`);
+      return remindersChanged(head);
+    }
+
+    if (action === "snooze") {
+      if (!a.for && !a.at) throw new Error("say for how long (for), or until when (at)");
+      if (a.for && a.at) throw new Error("give for or at, not both");
+      const { list, missing } = await reminderTargets(a, { recent: true });
+      if (!list.length) throw new Error(missing.join("; "));
+      if (list.length > 1) throw new Error("snooze one reminder at a time");
+      const e = list[0];
+      const { entry } = await R("POST /reminders/snooze", {
+        params: params({ id: e.id }),
+        body: a.for ? { for: a.for } : { until: a.at },
+      });
+      note(`snoozed the reminder "${e.text}" to ${entry.dueText}`);
+      return remindersChanged(`Done: snoozed "${e.text}" to ${entry.dueText}.`);
+    }
+    throw new Error(`unknown action "${action}"`);
+  }
+
   const run = {
     notion: serial(notion),
     calendar: serial(calendar),
+    ...(reminderRoutes ? { reminders: serial(reminders) } : {}),
     get_time: async () => timeNow(now()),
   };
 
   return {
-    defs: [NOTION_TOOL, CALENDAR_TOOL, TIME_TOOL],
+    defs: [NOTION_TOOL, CALENDAR_TOOL, ...(reminderRoutes ? [REMINDERS_TOOL] : []), TIME_TOOL],
     // The id of a page this call found or made, by title (for the smoke test).
     pageId: (title) => pages.get(String(title).trim().toLowerCase())?.id || null,
     names: Object.keys(run),

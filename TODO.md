@@ -411,25 +411,45 @@ the IP, the machine, or stale cookies; it is how the automated Chrome looks.
 
 ### Reminders
 
-- [ ] **Discuss: how to do reminders properly.** Added 2026-11-23, design not
-      started. Alfred has no reminder mechanism today: nothing in `bot.js` can
-      wake him at a set time, so "remind me at 5" has nowhere to go. Questions
-      to settle first:
-  - Where reminders live. Stay platform-agnostic: don't tie reminders to
-    one service. One idea: Alfred owns the source of truth and fires
-    reminders himself (cron jobs on this box), but there is still one place
-    to see them all. Also meet people in the app they already use: sync with
-    Google (Reminders now live in Google Tasks) and other popular calendars,
-    so a reminder made in either place shows up in both.
-  - What fires them: a timer in `bot.js`, cron, or something else. It has to
-    survive a restart and catch up on a reminder missed while the bot was
-    down.
-  - Which channel gets the reminder (Discord, SMS, a call), and whether that
-    depends on how urgent it is.
-  - Recurring reminders, snooze, and "done", and how to list or cancel them
-    by voice or chat.
-  - How it relates to the scheduled-job wrapper (Reliability) and the
-    someday todo store for Alfred himself.
+- [x] ~~**Reminders and recurring jobs.**~~ Built for #150. One list in
+      `agent/var/reminders.json`. `bin/remind.js` (and the 2B voice's
+      `reminders` tool) change it through broker routes, so `bot.js` is the
+      only writer. A tick in `bot.js` fires what is due, once a minute.
+      Delivery is at least once: Discord counts when the send resolves, SMS
+      when the Telnyx report says `delivered`. Repeats keep their clock time
+      across daylight saving. Each reminder gets a one-way copy in Google
+      Calendar. Jobs run only from files in `agent/jobs/` that git committed.
+      `SYSTEM-MAP.md` has the full picture. A Fable review compared four
+      shapes (Google Calendar as the source of truth, a separate scheduler
+      process, CalDAV, and this one) and backed this one.
+- [ ] **SMS reminders to other people.** Today another contact gets a
+      reminder by Discord only. The 10DLC campaign needs four steps before the
+      number texts anyone but Kuba (`docs/phone-design.md`): a confirmation
+      text to each new contact, an opt-in record, a STOP list, and "Jakub
+      Jerzmanowski's assistant" in each text.
+- [ ] **Must-acknowledge reminders.** Keep firing every 6 hours (tunable per
+      reminder) until someone acknowledges, e.g. by replying on Discord or SMS.
+- [ ] **Website.** A page listing reminders and jobs. Start with a
+      `/reminders` command that posts a rendered HTML page to Discord, like
+      the Ronnie dashboard. A real site listens on the Tailscale address only:
+      not on port 8788, which Funnel publishes to the internet, and not
+      through `tailscale serve`, since Alfred is the Tailscale operator and
+      could switch it to Funnel.
+- [ ] **Jobs and the same-user gap.** Alfred runs as the same Unix user as
+      `bot.js`, so he could edit `reminders.json` directly and skip the tool.
+      A job file must be committed with no change since, which keeps free text
+      out of the job list. The separate-user item (Security, above) closes the
+      rest.
+- [ ] **Move `dream.sh` into the job list.** A code job that is done only on
+      exit 0 fixes the unconditional `last-dream` stamp. It needs the crontab
+      line removed by hand, in the same step.
+- [ ] **Two-way calendar sync, later.** Today Alfred writes the copy and never
+      reads it back. First step: look for deleted copies every ten minutes and
+      cancel them. Write the conflict rule down before more (Calendar wins on
+      time, the list wins on who and how). Google Tasks cannot carry a timed
+      reminder: its API stores a due date but no time.
+- [ ] **Phone-call reminders.** Alfred cannot place an outgoing call yet. That
+      is its own build.
 
 ## Someday / Maybe
 

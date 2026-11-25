@@ -12,12 +12,18 @@ import { makeVoiceTools } from "./telnyx/voice-tools.js";
 import { INTERVALS_ROUTES } from "./intervals/broker.js";
 import { openDb as openStrengthDb, insertNote } from "./strength/db.js";
 import { startMailListener, enrich } from "./google/gmail-push.js";
-import { gmailClient, PUBSUB_KEY_FILE } from "./google/auth.js";
+import { gmailClient, calendarClient, PUBSUB_KEY_FILE } from "./google/auth.js";
 import { RONNIE_ROUTES } from "./ronnie/broker-routes.js";
 import { makeRonnie } from "./ronnie/runner.js";
 import { resolveRonnieLabels } from "./ronnie/labels.js";
 import { ensureLabels } from "./google/gmail-labels.js";
-import { easternDate, dailyDir, dailyNotePath, attachmentName, buildAttachmentBlock } from "./dailies.js";
+import { easternDate, dailyDir, dailyNotePath, attachmentName, buildAttachmentBlock, makeActionNotes } from "./dailies.js";
+import { makeStore as makeReminderStore } from "./reminders/store.js";
+import { parseContacts } from "./reminders/contacts.js";
+import { makeJobRunner } from "./reminders/jobs.js";
+import { makeCalendarMirror } from "./reminders/calendar-mirror.js";
+import { makeReminders, reminderConfig } from "./reminders/service.js";
+import { makeReminderRoutes } from "./reminders/routes.js";
 import { parseClearCommand } from "./commands.js";
 import { transcribe, transcriptionAvailable } from "./voice/transcribe.js";
 import { isVoiceInput } from "./voice/detect.js";
@@ -107,12 +113,13 @@ const VOICE_OPENAI = {
   noise: process.env.VOICE_OPENAI_NOISE || undefined,
   // "0": the reply after a quick tool is audio, not silent text (to compare).
   quietChains: process.env.VOICE_OPENAI_SILENT_CHAINS !== "0",
-  // The voice's own notion, calendar and get_time tools. "0" sends everything
-  // through Alfred (use_tools) again.
+  // The voice's own notion, calendar, reminders and get_time tools. "0" sends
+  // everything through Alfred (use_tools) again.
   directTools: process.env.VOICE_OPENAI_DIRECT_TOOLS === "0" ? null : () =>
     makeVoiceTools({
       notionRoutes: NOTION_ROUTES,
       calendarRoutes: GOOGLE_ROUTES,
+      reminderRoutes: REMINDER_ROUTES,
       fetchBlockChildren,
       note: notePhoneAction,
       // Where "make a new page" puts it when no page is named (a shared page).
@@ -160,6 +167,12 @@ const STATE_DIR = process.env.STATE_DIR || path.join(AGENT_DIR, "var");
 // Sentinel Alfred emits (and nothing else) when it judges a message isn't
 // directed at it. The bot detects it and stays silent instead of replying.
 const NO_REPLY = "<no_reply>";
+// Normalize away markdown/quoting/brackets, keep letters + underscore, so
+// `<no_reply>`, `> <no_reply>`, **<no_reply>** etc. all match. Requiring the
+// underscore avoids silencing a genuine reply like "no reply" (-> noreply).
+// A turn, the strength follow-up, and an agent job's result all use it.
+const canon = (s) => String(s || "").toLowerCase().replace(/[^a-z_]/g, "");
+const isNoReply = (text) => canon(text) === canon(NO_REPLY);
 
 // Alfred can attach files by writing {img:path}, {pdf:path}, or {file:path}
 // inline in its reply. All three behave the same — Discord auto-detects type;
@@ -942,7 +955,7 @@ async function handleTurn(target, userMessage, attachments = [], { signal, onTex
       : userMessage;
     // The tag rides on this message only, like the attachment block, so a
     // resumed session still sees it. A /clear above already took its prefix off.
-    messageBody = takePhoneActions() + messageBody;
+    messageBody = actionNotes.take() + messageBody;
     if (VIA_TAGS[target.via]) messageBody = `${VIA_TAGS[target.via]} ${messageBody}`;
 
     let finalMessage = messageBody;
@@ -993,12 +1006,7 @@ async function handleTurn(target, userMessage, attachments = [], { signal, onTex
     // Alfred can opt out of replying by emitting ONLY the sentinel — used when
     // a message clearly isn't directed at it. Tolerate stray markdown/quotes.
     const replyText = (response.result || "").trim();
-    // Normalize away markdown/quoting/brackets, keep letters + underscore, so
-    // `<no_reply>`, `> <no_reply>`, **<no_reply>** etc. all match. Requiring the
-    // underscore avoids silencing a genuine reply like "no reply" (-> noreply).
-    const canon = (s) => s.toLowerCase().replace(/[^a-z_]/g, "");
-    const isSilent = canon(replyText) === canon(NO_REPLY);
-    if (isSilent) {
+    if (isNoReply(replyText)) {
       console.log("🤫 Stayed silent (no_reply sentinel)");
       await logTurn({ dir: "out", kind: "silent", text: "", sessionId: response.session_id || null });
       return;
@@ -1094,8 +1102,7 @@ async function strengthFollowupTurn(target, { ok, out, err }) {
     }
 
     const replyText = (response.result || "").trim();
-    const canon = (s) => s.toLowerCase().replace(/[^a-z_]/g, "");
-    if (!replyText || canon(replyText) === canon(NO_REPLY)) { await target.send(fallback); return; }
+    if (!replyText || isNoReply(replyText)) { await target.send(fallback); return; }
 
     const { text: cleaned, files } = extractAttachments(replyText);
     const reply = cleaned.trim() || (files.length ? "" : fallback);
@@ -1403,22 +1410,16 @@ async function postFromCall(text, files = []) {
   }
 }
 
-// What the 2B voice did with its own tools, without Alfred. Each action goes in
-// today's daily note, and waits here to ride at the front of Alfred's next
-// message, so he knows the same day, on any channel.
-const phoneActions = [];
+// What happened without Alfred: the 2B voice's changes with its own tools, and
+// the reminders and job results that went out. Each one goes in today's daily
+// note, and waits here to ride at the front of Alfred's next message, so he
+// knows the same day, on any channel (makeActionNotes, dailies.js).
+const actionNotes = makeActionNotes({ memoriesDir: MEMORIES_DIR });
 function notePhoneAction(text) {
-  phoneActions.push(text);
-  const time = new Intl.DateTimeFormat("en-GB", { timeZone: "America/New_York", hour: "2-digit", minute: "2-digit" }).format(new Date());
-  const file = dailyNotePath(MEMORIES_DIR);
-  mkdir(path.dirname(file), { recursive: true })
-    .then(() => appendFile(file, `\n## ${time} — By phone\nThe phone voice ${text}.\n`))
-    .catch((err) => console.error(`⚠️  Could not note a phone action: ${err.message}`));
+  actionNotes.note("phone", text);
 }
-function takePhoneActions() {
-  if (!phoneActions.length) return "";
-  const lines = phoneActions.splice(0).map((t) => `- ${t}`).join("\n");
-  return `[Done on a phone call by the voice, without you, since your last message:\n${lines}]\n\n`;
+function noteReminder(text) {
+  actionNotes.note("reminder", text);
 }
 
 // A use_tools answer that came back after the call ended (2B). It goes by SMS
@@ -1505,13 +1506,75 @@ async function onCallTurn({ text, caller, takeMissed, signal, onText }) {
 // ── Launch ──────────────────────────────────────────────────────────────────
 await bootstrap();
 
+// Reminders and recurring jobs (reminders/). One list, in
+// STATE_DIR/reminders.json. bot.js is its only writer: Alfred changes it
+// through the broker routes (bin/remind.js), and the 2B voice through the same
+// routes in process. A tick below fires what is due. The service holds the
+// rules. This block only gives it the senders:
+//   - Discord: a DM, confirmed when Discord accepts it
+//   - SMS: Telnyx, confirmed by the delivery report (onReport, below). The
+//     service texts "me" only, until the opt-in steps of the 10DLC campaign
+//     exist (docs/phone-design.md).
+//   - Google Calendar: a one-way copy of each reminder. REMINDERS_CALENDAR=0
+//     turns it off. Only bot.js has this: no route gives Alfred calendar access.
+//   - jobs: the files in agent/jobs that git committed, run with the broker
+//     env, so a job can use the bin/ CLIs. env() runs when a job starts, after
+//     the broker is up.
+const REMINDER_CONFIG = reminderConfig();
+const reminders = makeReminders({
+  store: makeReminderStore({ file: path.join(STATE_DIR, "reminders.json"), log: console.warn }),
+  contacts: parseContacts({
+    spec: process.env.REMINDER_CONTACTS,
+    ownerDiscordId: ALLOWED_USER_IDS[0],
+    ownerSms: SMS_ALLOWED_NUMBERS[0],
+    log: console.warn,
+  }),
+  jobs: makeJobRunner({
+    dir: path.join(AGENT_DIR, "jobs"),
+    cwd: AGENT_DIR,
+    timeoutMs: REMINDER_CONFIG.jobTimeoutMs,
+    env: () => ({ ALFRED_BROKER: broker.url, ALFRED_BROKER_TOKEN: broker.token }),
+  }),
+  calendar: process.env.REMINDERS_CALENDAR === "0" ? null : makeCalendarMirror({ calendarClient, log: console.warn }),
+  sendDiscord: async (userId, text) => {
+    const dm = await (await client.users.fetch(userId)).createDM();
+    await dm.send({ content: text, allowedMentions: { parse: [] } });
+  },
+  discordReady: () => client.isReady(),
+  sendSms: (to, text) =>
+    sendSms({ apiKey: TELNYX_API_KEY, from: TELNYX_PHONE_NUMBER, to, text: smsText(text), messagingProfileId: TELNYX_MESSAGING_PROFILE_ID }),
+  smsEnabled: smsConfigured,
+  note: noteReminder,
+  silent: isNoReply,
+  config: REMINDER_CONFIG,
+});
+const REMINDER_ROUTES = makeReminderRoutes(reminders);
+
 // The broker holds the Google and Notion credentials so the agent doesn't have
 // to. It starts even when a service isn't configured yet — the routes then fail
 // with a message naming the missing setup step, which is more useful than the
-// whole bot refusing to boot over an integration that's still optional. Notion
-// and Intervals.icu routes mount alongside Google's on the one loopback server,
-// reached with the same token — one gateway, never a server per service.
-const broker = await startBroker({ extraRoutes: { ...NOTION_ROUTES, ...INTERVALS_ROUTES } });
+// whole bot refusing to boot over an integration that's still optional. Notion,
+// Intervals.icu and reminder routes mount alongside Google's on the one loopback
+// server, reached with the same token — one gateway, never a server per service.
+const broker = await startBroker({ extraRoutes: { ...NOTION_ROUTES, ...INTERVALS_ROUTES, ...REMINDER_ROUTES } });
+
+// Load the reminder list, then tick: once now (for what came due while the bot
+// was down), once a minute, and once when Discord is ready (a DM waits until
+// then). A list that cannot be read is tried again at the next tick. A tick
+// never runs twice at once, and an error in it is logged, never thrown.
+let remindersLoaded = null;
+function tickReminders() {
+  remindersLoaded ??= reminders.load().catch((err) => {
+    remindersLoaded = null;
+    throw err;
+  });
+  return remindersLoaded
+    .then(() => reminders.tick())
+    .catch((err) => console.error(`⚠️  Reminders: ${err.message}`));
+}
+tickReminders();
+setInterval(tickReminders, REMINDER_CONFIG.tickMs).unref();
+client.once("clientReady", tickReminders); // discord.js 14.22+ name of "ready"
 
 // The browser's PATH (browser.js), so Alfred can run agent-browser by name.
 const BROWSER_ENV = browserEnv(REPO_DIR);
@@ -1662,6 +1725,8 @@ if (smsConfigured || voiceConfigured || voicePipeline) {
           ourNumber: TELNYX_PHONE_NUMBER,
           allowFrom: SMS_ALLOWED_NUMBERS,
           onText: onSmsText,
+          // A delivery report confirms (or fails) a reminder SMS.
+          onReport: (report) => reminders.onSmsReport(report),
         }),
       } : {}),
       ...(voicePipeline ? voicePipeline.routes : {}),

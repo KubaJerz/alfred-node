@@ -223,6 +223,12 @@ test("the prompt keeps the voice in character as Alfred", async () => {
   // wordy, and the tool descriptions already carry the per-tool rules.
   assert.ok(file.split(/\s+/).length <= 400, `${file.split(/\s+/).length} words`);
   assert.doesNotMatch(USE_TOOLS.description, /Alfred/);
+  // Each quick tool of the prompt is named in what use_tools is not for, so
+  // the two never disagree about a reminder.
+  for (const tool of ["notion", "calendar", "reminders", "get_time"]) {
+    assert.match(file, new RegExp(`\\b${tool}\\b`), tool);
+    assert.match(USE_TOOLS.description.split(":")[1], new RegExp(`\\b${tool}\\b`), tool);
+  }
   assert.match(file, /notion holds the user's own pages/);
   assert.doesNotMatch(file, /Shopping list|Greens/i);
 });
