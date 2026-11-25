@@ -38,6 +38,11 @@ fi
 
 echo "$(date): Starting dreaming pass for $TARGET..."
 
+# --tools is what holds the pass to Read, Edit and Write: with
+# --dangerously-skip-permissions, --allowedTools holds nothing back (a test
+# fold wrote its notes with Bash and python). The notes now carry the day's
+# folded chat, mail and web text included, so the pass gets no shell and no
+# MCP server, like the fold (claudeRunner in fold.js).
 claude -p "You are Alfred's nightly dreaming pass — promote only durable facts into long-term memory.
 
 1. Read the daily note for the day that just ended: var/memories/dailies/${TARGET}/daily.md
@@ -58,7 +63,8 @@ Then append an entry to var/memories/changelog.json (read it first):
 { 'date', 'added_to_memory', 'removed_from_memory', 'summary' } — use empty
 lists when nothing changed, so the log still records that the pass ran." \
   --output-format json \
-  --allowedTools "Bash,Read,Edit,Write" \
+  --tools "Read,Edit,Write" --strict-mcp-config \
+  --allowedTools "Read,Edit,Write" \
   --dangerously-skip-permissions
 
 # Nightly strength digest: pull new Garmin lifts, interpret them with the Haiku
