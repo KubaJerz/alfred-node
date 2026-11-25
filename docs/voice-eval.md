@@ -52,3 +52,26 @@ record (`.json`) and a stereo recording (`.wav`, caller left, Alfred right) in
   request the scenarios need; a vague request gets "say what you need".
 - One run of a scenario is noisy. Compare with `--repeat 3` or more.
 - The grader is a model too: read the transcripts behind a surprising score.
+
+## Results so far
+
+2026-11-24, 17 scenarios × 3 calls each, reasoning `low`, silent chains off.
+"Before" is 2.39.0; "after" adds the fixes of #151: the date and time at the
+top of the prompt, "Alfred runs on the computer", `create` with no page, and a
+tick with no page finding the page.
+
+| | mini before | mini after | full before | full after |
+|---|---|---|---|---|
+| calls that passed every check | 22/51 | 35/51 | 27/51 | 51/51 |
+| grader /8 | 4.1 | 4.9 | 4.9 | 6.8 |
+| words a call | 45 | 36 | 35 | 27 |
+| first audio | 824 ms | 624 ms | 1199 ms | 993 ms |
+| cost of the 51 calls | $0.47 | $0.40 | $1.81 | $1.43 |
+
+- Most failures were the prompt and tools, not the model: both models gained
+  on dates, new pages and the computer's to-do list once those were fixed.
+- What was left is the model. Mini still runs long, treats a misheard "limes
+  and kefir" (`Lines and Keffer`) as a search, and gets some calendar moves
+  wrong; the full model handles the same audio.
+- So the phone runs `gpt-realtime-2.1` (`VOICE_OPENAI_MODEL`), about 3¢ a call
+  against 1¢. Retry mini after the next prompt or tool change, with this suite.
