@@ -3,7 +3,8 @@
 // One JSON object per line, one line for each thing that happened on a
 // channel: what the user sent (dir "in") and what Alfred answered (dir "out").
 // It is the bot's own record, separate from Claude Code's session files. The
-// daily-note fold (fold.js) reads it, and /clear archives it under logs/.
+// daily-note fold (fold.js) reads it, and so does context.js: what Alfred is
+// told about the phone and the recent past. /clear archives it under logs/.
 //
 // Row fields. Old rows have only some of them, so a reader must accept a row
 // without the newer ones:
@@ -254,6 +255,18 @@ export function makeLedger({ file, logsDir, now = () => Date.now(), fs = fsp, lo
     });
   }
 
+  // The bytes of an open file from pos to its end.
+  async function readToEnd(fh, pos, size) {
+    const buf = Buffer.alloc(Math.max(0, size - pos));
+    let off = 0;
+    while (off < buf.length) {
+      const { bytesRead } = await fh.read(buf, off, buf.length - off, pos + off);
+      if (!bytesRead) break;
+      off += bytesRead;
+    }
+    return buf.subarray(0, off);
+  }
+
   // The last `bytes` of the file as text. When the window starts inside the
   // file, it reads one byte more and drops everything up to the first line
   // break: that cuts a partial first line, and keeps a whole one.
@@ -268,13 +281,7 @@ export function makeLedger({ file, logsDir, now = () => Date.now(), fs = fsp, lo
       const { size } = await fh.stat();
       const start = Math.max(0, size - bytes);
       const pos = start > 0 ? start - 1 : 0;
-      const buf = Buffer.alloc(size - pos);
-      for (let off = 0; off < buf.length; ) {
-        const { bytesRead } = await fh.read(buf, off, buf.length - off, pos + off);
-        if (!bytesRead) break;
-        off += bytesRead;
-      }
-      let text = buf.toString("utf8");
+      let text = (await readToEnd(fh, pos, size)).toString("utf8");
       if (start > 0) {
         const nl = text.indexOf("\n");
         text = nl === -1 ? "" : text.slice(nl + 1);
@@ -315,5 +322,44 @@ export function makeLedger({ file, logsDir, now = () => Date.now(), fs = fsp, lo
     return pick(parseRows(raw).map(withSrc), narrow);
   }
 
-  return { file, logsDir, append, archive, tail, readDay, readAll };
+  // The rows after byte `offset`, for a reader that keeps its own place in the
+  // file (the catch-up cursor in context.js). It takes the lock, so each row
+  // that an append started before this call is whole in the file. It reads
+  // whole lines only. An offset past the end means that /clear archived the
+  // file and it started again, so it reads from 0. When more than maxBytes
+  // come after the offset, it reads the last maxBytes only and drops the
+  // partial first line (cut is then true).
+  // Resolves to { rows, end, cut }, src filled in. end is the offset after
+  // the last whole line: where the next read starts.
+  function readFrom(offset, { maxBytes = TAIL_BYTES } = {}) {
+    return locked(async () => {
+      let fh;
+      try {
+        fh = await fs.open(file, "r");
+      } catch (err) {
+        if (err.code === "ENOENT") return { rows: [], end: 0, cut: false };
+        throw err;
+      }
+      try {
+        const { size } = await fh.stat();
+        const from = Number.isInteger(offset) && offset >= 0 && offset <= size ? offset : 0;
+        const start = Math.max(from, size - maxBytes);
+        const cut = start > from;
+        // One byte more when cut, so a window that starts on a line start
+        // keeps that line (as readTail does).
+        const pos = cut ? start - 1 : start;
+        const buf = await readToEnd(fh, pos, size);
+        const nl = buf.indexOf(10);
+        const first = !cut ? 0 : nl === -1 ? buf.length : nl + 1;
+        const last = buf.lastIndexOf(10) + 1; // after the last line break: only whole lines
+        const stop = Math.max(first, last);
+        const rows = parseRows(buf.subarray(first, stop).toString("utf8")).map(withSrc);
+        return { rows, end: pos + stop, cut };
+      } finally {
+        await fh.close();
+      }
+    });
+  }
+
+  return { file, logsDir, append, archive, tail, readDay, readAll, readFrom };
 }

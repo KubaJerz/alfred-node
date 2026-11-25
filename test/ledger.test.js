@@ -318,3 +318,76 @@ test("call and tool rows go through append with the ledger's ts, and the readers
   assert.deepEqual((await ledger.readAll()).map((r) => r.src), ["call", "tool", "tool"]);
   assert.deepEqual((await ledger.tail({ where: { src: "call" } })).map((r) => r.kind), ["start"]);
 });
+
+// ── readFrom: a reader that keeps its own place ─────────────────────────────
+
+test("readFrom gives the rows after an offset and the offset after them", async () => {
+  const { file, ledger } = setup({ now: () => Date.parse("2026-11-24T15:00:00.000Z") });
+  await ledger.append({ dir: "in", text: "one" });
+  const first = await ledger.readFrom(0);
+  assert.deepEqual(first.rows.map((r) => [r.text, r.src]), [["one", "chat"]]);
+  assert.equal(first.end, readFileSync(file).length);
+  assert.equal(first.cut, false);
+  await ledger.append({ dir: "out", src: "call", text: "two" });
+  await ledger.append({ dir: "out", src: "tool", text: "three" });
+  const next = await ledger.readFrom(first.end);
+  assert.deepEqual(next.rows.map((r) => r.text), ["two", "three"]);
+  assert.deepEqual(await ledger.readFrom(next.end), { rows: [], end: next.end, cut: false });
+});
+
+test("readFrom: an offset past the end means the file started again, so it reads from 0", async () => {
+  const { ledger } = setup();
+  await ledger.append({ dir: "in", text: "after a clear" });
+  const read = await ledger.readFrom(1_000_000);
+  assert.deepEqual(read.rows.map((r) => r.text), ["after a clear"]);
+  // No file yet is the same: nothing to read, from 0.
+  const empty = setup();
+  assert.deepEqual(await empty.ledger.readFrom(500), { rows: [], end: 0, cut: false });
+});
+
+test("readFrom reads whole lines only, so a line still being written is read next time", async () => {
+  const { file, ledger } = setup();
+  const whole = row("2026-11-24T10:00:00.000Z", "whole");
+  const half = row("2026-11-24T11:00:00.000Z", "half");
+  writeFileSync(file, `${whole}\n${half.slice(0, 10)}`);
+  const read = await ledger.readFrom(0);
+  assert.deepEqual(read.rows.map((r) => r.text), ["whole"]);
+  assert.equal(read.end, Buffer.byteLength(whole) + 1);
+  writeFileSync(file, `${whole}\n${half}\n`);
+  assert.deepEqual((await ledger.readFrom(read.end)).rows.map((r) => r.text), ["half"]);
+});
+
+test("readFrom reads at most maxBytes, the newest, and says that it cut", async () => {
+  const { file, ledger } = setup();
+  const rows = ["a", "b", "c"].map((t, i) => row(`2026-11-24T1${i}:00:00.000Z`, t));
+  writeFileSync(file, rows.join("\n") + "\n");
+  const lastTwo = Buffer.byteLength(`${rows[1]}\n${rows[2]}\n`);
+  // The window starts inside "b": only "c" is whole.
+  const inside = await ledger.readFrom(0, { maxBytes: lastTwo - 3 });
+  assert.deepEqual(inside.rows.map((r) => r.text), ["c"]);
+  assert.equal(inside.cut, true);
+  assert.equal(inside.end, Buffer.byteLength(rows.join("\n") + "\n"));
+  // The window starts on the first byte of "b": it is whole, so it is kept.
+  assert.deepEqual((await ledger.readFrom(0, { maxBytes: lastTwo })).rows.map((r) => r.text), ["b", "c"]);
+});
+
+test("readFrom waits for an append that started before it, so it never misses that row", async () => {
+  // An appendFile that stops until the test lets it go. Without the lock, the
+  // read runs in that gap and does not see the row.
+  let release;
+  const gate = new Promise((r) => (release = r));
+  const slowFs = {
+    ...fsp,
+    appendFile: async (...args) => {
+      await gate;
+      return fsp.appendFile(...args);
+    },
+  };
+  const { ledger } = setup({ fs: slowFs });
+  const written = ledger.append({ dir: "in", src: "call", text: "said just now" });
+  const read = ledger.readFrom(0);
+  await new Promise((r) => setTimeout(r, 20)); // give the read every chance to cut in
+  release();
+  await written;
+  assert.deepEqual((await read).rows.map((r) => r.text), ["said just now"]);
+});

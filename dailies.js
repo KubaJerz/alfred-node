@@ -35,6 +35,15 @@ export function easternDate(date = new Date()) {
   return date.toLocaleDateString("en-CA", { timeZone: TIMEZONE });
 }
 
+// The day before `date` ('YYYY-MM-DD'). It counts on the calendar. "Now minus
+// 24 hours" is wrong for this: at the end of the 25-hour day when DST ends, it
+// is still the same Eastern day.
+export function dayBefore(date) {
+  const d = new Date(`${date}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() - 1);
+  return d.toISOString().slice(0, 10);
+}
+
 export function dailyDir(memoriesDir, date = easternDate()) {
   return path.join(memoriesDir, "dailies", date);
 }

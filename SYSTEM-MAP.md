@@ -74,7 +74,8 @@ flowchart TD
     VP <-->|"v2: STT + TTS"| TS["Telnyx speech<br/>telnyx/speech.js"]
     VP <-->|"v3: JSON lines on stdin/stdout"| LS["local speech sidecar<br/>Silero · Parakeet · Kokoro<br/>voice/local-speech.js → local_speech.py"]
     VP <-->|"2B: PCMU both ways + use_tools → Alfred"| OA["OpenAI Realtime<br/>telnyx/realtime.js"]
-    CTX["loadContext<br/>SOUL.md + USER.md + MEMORY.md + today's daily"] --> Q
+    CTX["loadContext · context.js (new session)<br/>SOUL.md + USER.md + MEMORY.md<br/>yesterday's + today's daily + the last 6 h of messages"] --> Q
+    CU["catch-up · context.js (every turn)<br/>the phone's ledger rows since the last turn"] --> Q
     Q --> SPAWN["spawn: claude -p<br/>cwd = agent/"]
     SPAWN -.->|"skill matches"| SK["skills<br/>gmail · gcal · notion · intervals · strength · browser"]
     SK -.->|"names cmd + rules"| CLIS["CLIs · bin/ · run via Bash<br/>gmail.js · gcal.js · notion.js · intervals.js · strength.js · broker-client.js"]
@@ -227,8 +228,7 @@ flowchart TD
     VT ==>|"in process"| BR["broker routes<br/>NOTION_ROUTES · GOOGLE_ROUTES"]
     BR --> N["Notion"]
     BR --> G["Google Calendar"]
-    VT -.->|"each change"| NOTE["phone actions<br/>+ today's daily note"]
-    NOTE -.->|"prefixed to the next turn"| SPAWN
+    VT -.->|"each change"| NOTE["today's daily note"]
     RT -->|"use_tools: the caller's request"| Q["onCallTurn → enqueueTurn<br/>[via phone call]"]
     Q --> SPAWN["claude -p --resume<br/>Alfred: email, memory, files, web"]
     SPAWN -->|"reply = function output"| RT
@@ -237,6 +237,8 @@ flowchart TD
     RT -->|"onCallEvent: each line as it is said,<br/>start, end, a late answer · src call"| LED["messages.jsonl<br/>the ledger · ledger.js"]
     VT -->|"each change · src tool"| LED
     Q -->|"the use_tools turn · src chat<br/>with the call's id"| LED
+    LED -.->|"call + tool rows since his last turn<br/>in front of his next message · context.js"| SPAWN
+    LED -.- CUR["ledger-cursor.json<br/>moves after a turn that worked"]
     classDef external fill:#d6e2f2,stroke:#1f5fb8,color:#123f7d
     classDef gateway fill:#d8ebe2,stroke:#1b6b52,color:#12503c
     classDef stack fill:#f5e8d5,stroke:#b07a2a,color:#6e4a12
@@ -244,7 +246,7 @@ flowchart TD
     class CALL,CC,OA,N,G external
     class VP,BR gateway
     class SPAWN stack
-    class LED store
+    class LED,CUR,NOTE store
 ```
 
 **One caller turn.** The voice decides which path: answer itself (small talk,
@@ -255,10 +257,18 @@ the reply comes back as the function output and the voice says it in its own
 words. Barge-in clears the audio and truncates the voice's item where the
 caller stopped hearing it.
 
-**Who knows what.** Every direct-tool change is written to today's daily note
-and queued as a phone action; the next Alfred turn starts with that list, so
-he is never surprised by an edit he didn't make. The other way does not work
-yet: the voice gets no briefing of recent chat. That is part 2 in `TODO.md`.
+**Who knows what.** Alfred's next turn, on any channel, starts with what was
+said and done on the phone since his last turn: the call's lines word for word,
+and each direct-tool change (the catch-up in `context.js`). He is never
+surprised by an edit he did not make. On the call it was Alfred too, so the
+block says "you said (on the call)" and names no other assistant. A cursor
+file, `agent/var/ledger-cursor.json`, keeps his place in the ledger. It moves
+only after a turn worked, and only past the rows that turn read. So a restart
+or a failed turn loses nothing, and `/clear` sets it back to the start. A
+`use_tools` turn is a turn too, so it carries the call so far: Alfred reads the
+caller's own words next to the request. Each direct-tool change also goes in
+today's daily note. The other way does not work yet: the voice gets no briefing
+of recent chat. That is part 2 in `TODO.md`.
 
 **The call in the ledger.** The call writes itself into `messages.jsonl` as it
 happens, not at the end: each caller line as transcribed, each voice line as
@@ -272,7 +282,8 @@ the same call id), because Alfred's session already holds them. So the ledger
 has a call twice, in two wordings, and a reader shows it once: from its own
 rows, leaving out the turns that retell them (`retoldByCall`). With
 transcription off, the requests stay, since the caller's words are not there.
-Today the fold is the only reader.
+The fold and a new session's recent messages read the ledger this way. The
+catch-up reads only the call and tool rows.
 
 **Guarantees here.** The allow list, signature and token checks in
 `pipeline.js`, and the broker's own rules (no guest-deletes), are code. In
@@ -634,8 +645,10 @@ FIT download and decode.
 Every turn appends to the live transcript, `messages.jsonl`, which resumes into
 the next turn — the tight loop. `ledger.js` owns that file. It writes each row
 with a ts later than the one before, archives the file on `/clear`, and reads
-it back (only the last bytes, or one Eastern day). Append and archive take one
-lock, so a row that arrives during an archive lands in the new file. An inbound
+it back (only the last bytes, one Eastern day, or the rows after a byte
+offset). Append and archive take one lock, so a row that arrives during an
+archive lands in the new file. The offset reader takes the lock too, so it
+never misses a row that an append started before it. An inbound
 row names the files saved with it (`files`, paths from `agent/`), so a fold can
 open a photo that the words do not describe. Every row names its channel
 (`via`), and a row's `src` says what wrote it: a chat turn, or a 2B call's own
@@ -677,8 +690,9 @@ flowchart TD
     FOLD -->|"each row once,<br/>into its own day"| DAILY["daily note<br/>dailies/YYYY-MM-DD/daily.md"]
     FOLD -->|"after each run that worked"| WM["fold-watermark.json"]
     DAILY -.->|"nightly · dream.sh, after the fold"| MEM["MEMORY.md"]
-    DAILY --> PLUS(("+"))
+    DAILY -->|"yesterday's + today's"| PLUS(("+"))
     MEM --> PLUS
+    LIVE -.->|"the last 6 h, word for word"| PLUS
     PLUS -->|"seeds a new session"| CTX
     classDef agent fill:#f5e8d5,stroke:#b07a2a,color:#6e4a12
     classDef store fill:#e7e7e7,stroke:#888,color:#333
@@ -686,9 +700,15 @@ flowchart TD
     class LIVE,ARCH,WM store
 ```
 
-The `+` is `loadContext`: a new session is seeded with **both** `MEMORY.md` and
-today's daily note. The dotted arrow is the resumed session — it carries the
-prior turns as context but re-injects nothing.
+The `+` is `loadContext` (`sessionContext` in `context.js`). A new session is
+seeded with `MEMORY.md`, the daily notes of yesterday and today, and the
+messages of the last 6 hours on every channel, word for word. A new session
+holds none of them: it starts after `/clear`, or after a dream pass, when
+yesterday's evening chat is in no session. The notes cover the days, and the
+messages cover the hours that no fold has reached yet. Over 24,000 characters,
+the oldest messages go first. A call shows once, from its own lines. The
+dotted arrow is the resumed session — it carries the prior turns as context
+but re-injects nothing.
 
 Two stages, decoupled in time. The fold does transcript → daily note, every
 night and on `/clear`. The dream does daily note → `MEMORY.md`, every night

@@ -3,6 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   easternDate,
+  dayBefore,
   dailyDir,
   dailyNotePath,
   attachmentName,
@@ -21,6 +22,18 @@ test("easternDate handles DST correctly — winter is EST (UTC-5)", () => {
 
 test("easternDate: a plain daytime instant stays on its own day", () => {
   assert.equal(easternDate(new Date("2026-08-14T16:00:00Z")), "2026-08-14"); // noon EDT
+});
+
+test("dayBefore counts back one calendar day, across a month, a year and DST", () => {
+  assert.equal(dayBefore("2026-11-24"), "2026-11-23");
+  assert.equal(dayBefore("2026-03-01"), "2026-02-28");
+  assert.equal(dayBefore("2026-01-01"), "2025-12-31");
+  // 23:30 EST at the end of the 25-hour day when DST ends (1 November 2026).
+  // "Now minus 24 hours" is still 1 November there; the day before is not.
+  const late = new Date("2026-11-02T04:30:00Z");
+  assert.equal(easternDate(late), "2026-11-01");
+  assert.equal(easternDate(new Date(late.getTime() - 24 * 3600 * 1000)), "2026-11-01");
+  assert.equal(dayBefore(easternDate(late)), "2026-10-31");
 });
 
 test("dailyDir and dailyNotePath build the per-day folder layout", () => {

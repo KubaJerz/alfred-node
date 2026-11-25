@@ -17,8 +17,9 @@ import { RONNIE_ROUTES } from "./ronnie/broker-routes.js";
 import { makeRonnie } from "./ronnie/runner.js";
 import { resolveRonnieLabels } from "./ronnie/labels.js";
 import { ensureLabels } from "./google/gmail-labels.js";
-import { easternDate, dailyDir, dailyNotePath, attachmentName, buildAttachmentBlock } from "./dailies.js";
+import { dailyDir, dailyNotePath, attachmentName, buildAttachmentBlock } from "./dailies.js";
 import { makeLedger, inboundRow, callRow, toolRow } from "./ledger.js";
+import { makeCatchUp, sessionContext } from "./context.js";
 import { ensureWatermark } from "./fold.js";
 import { parseClearCommand } from "./commands.js";
 import { transcribe, transcriptionAvailable } from "./voice/transcribe.js";
@@ -200,6 +201,9 @@ const LOGS_DIR = path.join(STATE_DIR, "logs");
 const MEMORIES_DIR = path.join(STATE_DIR, "memories");
 const FOLD_SCRIPT = path.join(REPO_DIR, "scripts", "fold-day.mjs");
 const ledger = makeLedger({ file: CHAT_LOG, logsDir: LOGS_DIR });
+// What the phone wrote to the ledger since Alfred's last turn (context.js).
+// Its cursor is a file in STATE_DIR, so a restart loses nothing.
+const catchUp = makeCatchUp({ ledger, stateDir: STATE_DIR });
 
 // Paths handed to a spawned `claude` must be relative to AGENT_DIR, since that
 // is its cwd — absolute paths would leak this machine's layout into prompts.
@@ -258,9 +262,9 @@ async function bootstrap() {
 }
 
 // One row in messages.jsonl. ledger.js stamps the time, and logs a failed
-// write instead of throwing it.
+// write instead of throwing it. Resolves to the row as written, or null.
 async function logTurn(entry) {
-  await ledger.append(entry);
+  return ledger.append(entry);
 }
 
 // After a /clear archive: fold the rows of the archive that no nightly pass
@@ -820,6 +824,8 @@ async function handleTurn(target, userMessage, attachments = [], { signal, onTex
       archivePath = await ledger.archive();
       if (archivePath) {
         console.log(`📦 Archived conversation → ${archivePath}`);
+        // The ledger starts again at 0, so Alfred's place in it does too.
+        await catchUp.reset();
         await consolidateMemory(archivePath);
       }
     } catch (err) {
@@ -851,7 +857,7 @@ async function handleTurn(target, userMessage, attachments = [], { signal, onTex
   // Log the inbound turn now — after any /clear reset above — so it lands in the
   // fresh transcript rather than the one we just archived. The row names the
   // saved files (Discord and SMS alike), so a fold can open a photo later.
-  await logTurn(inboundRow({ who: target.who, via: target.via, text: userMessage, attachments, agentDir: AGENT_DIR, callId: target.callId }));
+  const inbound = await logTurn(inboundRow({ who: target.who, via: target.via, text: userMessage, attachments, agentDir: AGENT_DIR, callId: target.callId }));
   // An out row of this turn names its channel and call too, so no reader has to
   // take them from the row before it: a call's own lines can come between.
   const logOut = (row) => logTurn({ dir: "out", via: target.via, ...row, callId: target.callId });
@@ -871,6 +877,11 @@ async function handleTurn(target, userMessage, attachments = [], { signal, onTex
     const shouldResume = state.status === "open" && state.last_session_id && !dreamed;
     const sessionId = shouldResume ? state.last_session_id : null;
 
+    // What was said and done on the phone since Alfred's last turn: the call
+    // lines and the voice's tool changes (context.js). A use_tools turn is a
+    // turn too, so it carries the call so far, with the caller's own words.
+    const phone = await catchUp.read();
+
     // Files the user sent ride with THIS message, not the session context, so
     // they reach the turn on a resumed session too (a photo dropped mid-chat is
     // the common case). The attachment block attaches to the message body. When
@@ -880,24 +891,34 @@ async function handleTurn(target, userMessage, attachments = [], { signal, onTex
     let messageBody = attachBlock
       ? `${attachBlock}\n\n${userMessage || "(The user sent the file(s) above with no other text.)"}`
       : userMessage;
-    // The tag rides on this message only, like the attachment block, so a
-    // resumed session still sees it. A /clear above already took its prefix off.
-    messageBody = takePhoneActions() + messageBody;
-    if (VIA_TAGS[target.via]) messageBody = `${VIA_TAGS[target.via]} ${messageBody}`;
 
-    let finalMessage = messageBody;
+    let context = "";
+    let shown = null;
     if (shouldResume) {
       console.log(`🔄 Resuming session ${sessionId}`);
     } else {
       if (dreamed) console.log("🌙 A dream pass ran since the last turn — starting fresh to load new memory");
       console.log(`🆕 Starting new session - loading context...`);
-      const context = await loadContext();
-      finalMessage = context + messageBody;
+      // until: this turn's own row. The message carries it, so the recent
+      // messages leave it out.
+      ({ text: context, shown } = await loadContext({ until: inbound?.ts }));
     }
+
+    // The phone block and the tag ride on this message only, like the
+    // attachment block, so a resumed session still sees them. A new session's
+    // recent messages show the newest calls already, so the block leaves those
+    // rows out. A /clear above already took its prefix off.
+    messageBody = catchUp.block(phone, { skip: shown }) + messageBody;
+    if (VIA_TAGS[target.via]) messageBody = `${VIA_TAGS[target.via]} ${messageBody}`;
+    const finalMessage = context + messageBody;
 
     // Run Claude
     // onText: a phone call that speaks the reply while Alfred writes it.
     const response = await runClaude(finalMessage, sessionId, { signal, onText });
+    // Alfred read the phone's rows up to phone.end: the cursor moves there now.
+    // A dropped turn, a login lapse or a timeout leaves it, so the next turn
+    // shows those rows again.
+    await catchUp.advance(phone, response);
 
     // A dropped phone turn: Telnyx sent a longer version of the same words.
     // Keep no state and send nothing. The next turn carries the words.
@@ -1049,35 +1070,12 @@ async function strengthFollowupTurn(target, { ok, out, err }) {
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
-async function loadContext() {
-  const today = easternDate();
-
-  // SOUL lives with the agent's tracked config; the rest is personal state.
-  // Paths are labelled relative to AGENT_DIR so Alfred can reopen any of these
-  // files itself — the labels double as working paths from its cwd.
-  const files = [
-    { path: path.join(AGENT_DIR, "SOUL.md"), label: "SOUL" },
-    { path: path.join(STATE_DIR, "USER.md"), label: "USER" },
-    { path: path.join(MEMORIES_DIR, "MEMORY.md"), label: "LONG_TERM_MEMORY" },
-    { path: dailyNotePath(MEMORIES_DIR, today), label: "DAILY_NOTES" },
-  ];
-
-  let context = "=== SYSTEM CONTEXT START ===\n";
-  context += "The following files contain your core instructions, user preferences, and long-term memory. Use them to guide your response.\n";
-
-  for (const file of files) {
-    if (existsSync(file.path)) {
-      try {
-        const content = await readFile(file.path, "utf-8");
-        context += `\n[FILE: ${agentRel(file.path)}]\n${content}\n`;
-      } catch (e) {
-        console.error(`Error reading ${agentRel(file.path)}:`, e);
-      }
-    }
-  }
-  context += "\n=== SYSTEM CONTEXT END ===\n";
-  context += "\nUser Message: ";
-  return context;
+// A new session's context (context.js): SOUL, USER, MEMORY, the daily notes of
+// yesterday and today, and the last hours of messages on every channel, word
+// for word. Resolves to { text, shown }: shown is the rows the messages show.
+// until: the row of this turn's message, which the message itself carries.
+function loadContext({ until } = {}) {
+  return sessionContext({ agentDir: AGENT_DIR, stateDir: STATE_DIR, ledger, until });
 }
 
 // Download every file attached to an inbound message into that day's folder and
@@ -1357,23 +1355,16 @@ function logCallEvent(ev) {
 }
 
 // What the 2B voice did with its own tools, without Alfred. Each action is a
-// ledger row (src "tool") and a line in today's daily note, and waits here to
-// ride at the front of Alfred's next message, so he knows the same day, on any
-// channel.
-const phoneActions = [];
+// ledger row (src "tool") and a line in today's daily note. Alfred's next turn,
+// on any channel, starts with the row (the catch-up in context.js), so he
+// knows the same day. The row is on disk, so a restart does not lose it.
 function notePhoneAction(text, { caller, callId } = {}) {
-  phoneActions.push(text);
   logTurn(toolRow({ text, caller, callId }));
   const time = new Intl.DateTimeFormat("en-GB", { timeZone: "America/New_York", hour: "2-digit", minute: "2-digit" }).format(new Date());
   const file = dailyNotePath(MEMORIES_DIR);
   mkdir(path.dirname(file), { recursive: true })
     .then(() => appendFile(file, `\n## ${time} — By phone\nThe phone voice ${text}.\n`))
     .catch((err) => console.error(`⚠️  Could not note a phone action: ${err.message}`));
-}
-function takePhoneActions() {
-  if (!phoneActions.length) return "";
-  const lines = phoneActions.splice(0).map((t) => `- ${t}`).join("\n");
-  return `[Done on a phone call by the voice, without you, since your last message:\n${lines}]\n\n`;
 }
 
 // A use_tools answer that came back after the call ended (2B). It goes by SMS
