@@ -18,6 +18,8 @@ import { makeRonnie } from "./ronnie/runner.js";
 import { resolveRonnieLabels } from "./ronnie/labels.js";
 import { ensureLabels } from "./google/gmail-labels.js";
 import { easternDate, dailyDir, dailyNotePath, attachmentName, buildAttachmentBlock } from "./dailies.js";
+import { makeLedger, inboundRow } from "./ledger.js";
+import { ensureWatermark } from "./fold.js";
 import { parseClearCommand } from "./commands.js";
 import { transcribe, transcriptionAvailable } from "./voice/transcribe.js";
 import { isVoiceInput } from "./voice/detect.js";
@@ -185,14 +187,18 @@ const LAST_DREAM_FILE = path.join(STATE_DIR, "last-dream");
 // Append-only JSONL transcript of every turn through the bot — one JSON object
 // per line, both inbound (user → bot) and outbound (bot → user). This is the
 // bot's OWN log, separate from Claude Code's per-session .jsonl files.
+// ledger.js owns the file: it writes the rows, archives them, and reads them.
 const CHAT_LOG = path.join(STATE_DIR, "messages.jsonl");
 
-// On /clear, the live transcript is archived under LOGS_DIR and a headless
-// Claude is spawned to fold it into today's daily note using MEMORY_PROMPT_FILE.
-// The nightly dream.sh pass later promotes durable facts from dailies → MEMORY.md.
+// On /clear, the live transcript is archived under LOGS_DIR, and FOLD_SCRIPT
+// folds the rows not folded yet into the daily note of each one's own day
+// (fold.js, with the prompt in agent/memory-prompt.md). The nightly dream.sh
+// runs the same fold for yesterday first, then promotes durable facts from the
+// dailies into MEMORY.md.
 const LOGS_DIR = path.join(STATE_DIR, "logs");
 const MEMORIES_DIR = path.join(STATE_DIR, "memories");
-const MEMORY_PROMPT_FILE = path.join(AGENT_DIR, "memory-prompt.md");
+const FOLD_SCRIPT = path.join(REPO_DIR, "scripts", "fold-day.mjs");
+const ledger = makeLedger({ file: CHAT_LOG, logsDir: LOGS_DIR });
 
 // Paths handed to a spawned `claude` must be relative to AGENT_DIR, since that
 // is its cwd — absolute paths would leak this machine's layout into prompts.
@@ -250,104 +256,33 @@ async function bootstrap() {
   }
 }
 
+// One row in messages.jsonl. ledger.js stamps the time, and logs a failed
+// write instead of throwing it.
 async function logTurn(entry) {
-  try {
-    await appendFile(CHAT_LOG, JSON.stringify({ ts: new Date().toISOString(), ...entry }) + "\n");
-  } catch (err) {
-    console.error(`⚠️  Failed to write ${CHAT_LOG}: ${err.message}`);
-  }
+  await ledger.append(entry);
 }
 
-// On /clear: copy the just-ended conversation from messages.jsonl into
-// logs/<firstTs>_to_<lastTs>.jsonl (UTC, filename-safe), then reset the live
-// transcript so the next conversation starts clean. The /clear command line
-// never appears here — handleTurn archives *before* it logs the inbound turn,
-// so the transcript holds only the real messages. Returns the archive path, or
-// null if there was nothing to save.
-async function archiveConversation() {
-  let raw;
-  try {
-    raw = await readFile(CHAT_LOG, "utf-8");
-  } catch {
-    return null; // no transcript yet
-  }
-
-  const entries = raw
-    .split("\n")
-    .filter(Boolean)
-    .map((l) => { try { return JSON.parse(l); } catch { return null; } })
-    .filter(Boolean);
-
-  if (!entries.length) return null;
-
-  const safe = (ts) => String(ts).replace(/:/g, "-"); // ':' is awkward in filenames
-  const name = `${safe(entries[0].ts)}_to_${safe(entries[entries.length - 1].ts)}.jsonl`;
-
-  await mkdir(LOGS_DIR, { recursive: true });
-  const archivePath = path.join(LOGS_DIR, name);
-  await writeFile(archivePath, entries.map((e) => JSON.stringify(e)).join("\n") + "\n");
-
-  await writeFile(CHAT_LOG, ""); // reset live transcript for the next conversation
-  return archivePath;
-}
-
-// Spawn a headless Claude to fold an archived transcript into today's daily
-// note. The prompt lives in memory-prompt.md so it can change without touching
-// code: `{{TRANSCRIPT}}` → archive path, `{{DAILY_PATH}}` → today's note path,
-// `{{DAILY}}` → its current contents (so the pass merges instead of clobbering).
-// Detached + unref'd so it never blocks the bot or dies when the bot restarts.
+// After a /clear archive: fold the rows of the archive that no nightly pass
+// folded yet, each into the daily note of its own day. FOLD_SCRIPT (fold.js)
+// runs one headless Claude per day with agent/memory-prompt.md, and records
+// how far it got only after a run worked. Detached + unref'd so it never
+// blocks the bot or dies when the bot restarts. Its output goes to
+// logs/consolidate.log, as the old one-shot pass did.
 async function consolidateMemory(archivePath) {
-  let template;
-  try {
-    template = (await readFile(MEMORY_PROMPT_FILE, "utf-8")).trim();
-  } catch {
-    console.warn(`🧠 No ${MEMORY_PROMPT_FILE} yet — skipping memory consolidation`);
-    return;
-  }
-  if (!template) {
-    console.warn(`🧠 ${MEMORY_PROMPT_FILE} is empty — skipping memory consolidation`);
-    return;
-  }
-
-  // Target today's daily note. Inject its current contents so the pass appends
-  // to what's there instead of overwriting. Use {{DAILY}} in the prompt, else
-  // it's appended. {{DAILY_PATH}} tells the pass where to write.
-  const today = easternDate();
-  const dailyAbs = dailyNotePath(MEMORIES_DIR, today);
-  const dailyRel = agentRel(dailyAbs);
-  // The note lives in a per-day folder; make sure it exists so the pass can write.
-  await mkdir(dailyDir(MEMORIES_DIR, today), { recursive: true });
-  let daily = "";
-  try {
-    daily = (await readFile(dailyAbs, "utf-8")).trim();
-  } catch {
-    /* no note for today yet */
-  }
-
-  let prompt = template.includes("{{TRANSCRIPT}}")
-    ? template.replaceAll("{{TRANSCRIPT}}", archivePath)
-    : `${template}\n\nTranscript file: ${archivePath}`;
-
-  prompt = prompt.replaceAll("{{DAILY_PATH}}", dailyRel);
-
-  prompt = prompt.includes("{{DAILY}}")
-    ? prompt.replaceAll("{{DAILY}}", daily || "(empty)")
-    : `${prompt}\n\n=== TODAY'S DAILY NOTE (${dailyRel}) ===\n${daily || "(empty)"}\n=== END DAILY NOTE ===`;
-
-  const args = ["-p", prompt, "--allowedTools", "Read,Write,Edit", "--dangerously-skip-permissions"];
-
   try {
     await mkdir(LOGS_DIR, { recursive: true });
     const logFd = openSync(path.join(LOGS_DIR, "consolidate.log"), "a");
-    const proc = spawn("claude", args, {
+    // process.execPath is this bot's own node, so nvm/tmux PATHs don't matter.
+    const proc = spawn(process.execPath, [FOLD_SCRIPT, "--archive", archivePath], {
       cwd: AGENT_DIR,
+      env: { ...process.env, AGENT_DIR, STATE_DIR },
       detached: true,
       stdio: ["ignore", logFd, logFd],
     });
     proc.unref();
-    console.log(`🧠 Spawned headless daily-note consolidation (pid ${proc.pid}) → ${archivePath}`);
+    console.log(`🧠 Spawned the daily-note fold (pid ${proc.pid}) → ${archivePath}`);
   } catch (err) {
-    console.error(`🧠 Failed to spawn memory consolidation: ${err.message}`);
+    console.error(`🧠 Failed to spawn the daily-note fold: ${err.message}`);
   }
 }
 
@@ -871,9 +806,17 @@ async function handleTurn(target, userMessage, attachments = [], { signal, onTex
     console.log(`🧹 Clearing session for ${target.who.tag}`);
 
     // Archive the just-ended conversation, then kick off memory consolidation.
+    // The fold watermark must exist before the archive does, so the archive
+    // counts as not folded until its fold works (fold.js). Its first value
+    // marks the older archives as folded.
+    await ensureWatermark({ stateDir: STATE_DIR, logsDir: LOGS_DIR })
+      .catch((err) => console.error(`⚠️  Fold watermark: ${err.message}`));
     let archivePath = null;
     try {
-      archivePath = await archiveConversation();
+      // ledger.archive() copies messages.jsonl to logs/<firstTs>_to_<lastTs>.jsonl
+      // and empties it. The /clear command is not in the archive: the inbound
+      // turn is logged below, after the archive, without the command.
+      archivePath = await ledger.archive();
       if (archivePath) {
         console.log(`📦 Archived conversation → ${archivePath}`);
         await consolidateMemory(archivePath);
@@ -905,16 +848,9 @@ async function handleTurn(target, userMessage, attachments = [], { signal, onTex
   }
 
   // Log the inbound turn now — after any /clear reset above — so it lands in the
-  // fresh transcript rather than the one we just archived.
-  await logTurn({
-    dir: "in",
-    user: target.who.tag,
-    userId: target.who.id,
-    channel: target.who.channel,
-    via: target.via,
-    text: userMessage,
-    attachments: attachments.length,
-  });
+  // fresh transcript rather than the one we just archived. The row names the
+  // saved files (Discord and SMS alike), so a fold can open a photo later.
+  await logTurn(inboundRow({ who: target.who, via: target.via, text: userMessage, attachments, agentDir: AGENT_DIR }));
 
   console.log(`📨 ${target.who.tag}: ${userMessage.slice(0, 100)}`);
 

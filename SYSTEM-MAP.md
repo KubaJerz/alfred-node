@@ -612,12 +612,29 @@ FIT download and decode.
 
 ## Memory
 
-Every turn appends to the live transcript, which resumes into the next turn —
-the tight loop. **Only `/clear` ends a conversation**; nothing auto-archives, so
-if you never `/clear`, a conversation never reaches the daily note. On `/clear`,
-`consolidateMemory` folds the transcript into today's daily note. Separately, at
-3 AM, `dream.sh` promotes durable facts from that note into `MEMORY.md`. A new
-session is seeded with **both** `MEMORY.md` and today's daily note.
+Every turn appends to the live transcript, `messages.jsonl`, which resumes into
+the next turn — the tight loop. `ledger.js` owns that file. It writes each row
+with a ts later than the one before, archives the file on `/clear`, and reads
+it back (only the last bytes, or one Eastern day). Append and archive take one
+lock, so a row that arrives during an archive lands in the new file. An inbound
+row names the files saved with it (`files`, paths from `agent/`), so a fold can
+open a photo that the words do not describe.
+
+**Every day with messages gets a daily note.** `fold.js` folds each ledger row
+into the note of its own Eastern day, one time. Two runs do it:
+
+- At 3 AM, `dream.sh` first runs `scripts/fold-day.mjs --nightly`: every row
+  not folded yet, up to the end of yesterday. Then it dreams.
+- On `/clear`, `consolidateMemory` starts the same script, detached, for the
+  rows of the new archive that no nightly pass folded.
+
+Each run is one `claude -p` per day (cwd `agent/`, Read/Write/Edit, the prompt
+in `memory-prompt.md`) that merges the day's transcript into its note.
+`agent/var/fold-watermark.json` records how far folding got. It moves only
+after a run worked, so the next run tries a failed day again. That includes the
+rows of a `/clear` archive whose fold failed: every run also reads the archives
+that hold rows after the watermark. A lock file keeps the nightly fold and a
+`/clear` fold from folding the same rows at once.
 
 `/clear` (and its `/c` alias, parsed in `commands.js`) is a **prefix**, not a
 bare word: alone it clears and waits, but `/c <text>` clears and then runs
@@ -629,26 +646,40 @@ folders drawn below and the 3 AM cron — all key on Eastern through one helper,
 
 ```mermaid
 flowchart TD
-    CTX["a turn's context"] -->|"appended, every turn"| LIVE["messages.jsonl<br/>transcript"]
+    CTX["a turn's context"] -->|"appended, every turn · ledger.js"| LIVE["messages.jsonl<br/>the ledger"]
     LIVE -.->|"resumes (not re-injected)"| CTX
-    LIVE -.->|"/clear only"| DAILY["daily note<br/>dailies/YYYY-MM-DD/daily.md"]
-    DAILY -.->|"nightly · dream.sh"| MEM["MEMORY.md"]
+    LIVE -.->|"/clear: archive"| ARCH["logs/ archives<br/>first_to_last.jsonl"]
+    LIVE -.->|"nightly · dream.sh<br/>up to the end of yesterday"| FOLD["fold.js · scripts/fold-day.mjs<br/>claude -p per day · memory-prompt.md"]
+    ARCH -.->|"/clear, detached<br/>rows not folded yet"| FOLD
+    FOLD -->|"each row once,<br/>into its own day"| DAILY["daily note<br/>dailies/YYYY-MM-DD/daily.md"]
+    FOLD -->|"after each run that worked"| WM["fold-watermark.json"]
+    DAILY -.->|"nightly · dream.sh, after the fold"| MEM["MEMORY.md"]
     DAILY --> PLUS(("+"))
     MEM --> PLUS
     PLUS -->|"seeds a new session"| CTX
     classDef agent fill:#f5e8d5,stroke:#b07a2a,color:#6e4a12
-    class CTX agent
+    classDef store fill:#e7e7e7,stroke:#888,color:#333
+    class CTX,FOLD agent
+    class LIVE,ARCH,WM store
 ```
 
 The `+` is `loadContext`: a new session is seeded with **both** `MEMORY.md` and
 today's daily note. The dotted arrow is the resumed session — it carries the
 prior turns as context but re-injects nothing.
 
-Two stages, decoupled in time: `/clear` does transcript → daily note; the
-nightly cron does daily note → `MEMORY.md`. Both are LLM-selective, not
-mechanical copies (`memory-prompt.md`, then `dream.sh`). `MEMORY.md` seeds every
-new session, so anything reaching it is re-read forever — which is why promotion
-is strict.
+Two stages, decoupled in time. The fold does transcript → daily note, every
+night and on `/clear`. The dream does daily note → `MEMORY.md`, every night
+after the fold. Both are LLM-selective, not mechanical copies
+(`memory-prompt.md`, then `dream.sh`). `MEMORY.md` seeds every new session, so
+anything reaching it is re-read forever — which is why promotion is strict.
+
+**Past days.** Before the fold, only `/clear` wrote a note from the chat, and it
+put the whole conversation into the note of the day of the `/clear`.
+`scripts/backfill-dailies.mjs` folds the archived days into their own notes, on
+request. It needs an explicit state dir (`--state-dir`, for a copy, or
+`--real-state`) and has a dry run. It reads only the rows up to the
+watermark's `start`, the ones the fold does not own, and never moves the
+watermark. Nothing runs it on a schedule.
 
 ## Layers
 
@@ -672,7 +703,7 @@ Two entries, and that's the whole of what runs on a schedule.
 | when | runs | does |
 |---|---|---|
 | `@reboot` | `tmux` session `alfred-bot` → `start-alfred.sh` | supervisor: holds a lock so only one runs, waits for DNS, rotates the log, keeps `bot.js` up — restarts on crash with 5s→300s backoff |
-| `0 3 * * *` (3 AM daily) | `dream.sh` | consolidates the day's notes into `MEMORY.md` |
+| `0 3 * * *` (3 AM daily) | `dream.sh` | folds the ledger into each day's note (`scripts/fold-day.mjs`), then consolidates yesterday's note into `MEMORY.md` |
 
 The supervisor restarts on **crash only** — a healthy process keeps running the
 code it started with until something kills it or the box reboots. That once hid
