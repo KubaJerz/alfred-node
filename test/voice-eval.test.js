@@ -8,7 +8,7 @@ import { makeRealtimeSession } from "../telnyx/realtime.js";
 import { callBriefing, liveUpdate } from "../context.js";
 import { fakeAlfred, fakeCalendar, fakeNotion } from "../voice-eval/fakes.js";
 import { makeCallLedger, EVAL_NOW } from "../voice-eval/openai-call.js";
-import { SCENARIOS, COMMON_CHECKS } from "../voice-eval/scenarios.js";
+import { SCENARIOS, COMMON_CHECKS, EVERYDAY } from "../voice-eval/scenarios.js";
 import { scoreChecks, transcript, graderPrompt } from "../voice-eval/score.js";
 
 const world = () => {
@@ -298,7 +298,7 @@ test("the transcript and the grader show what the call was told mid-call", () =>
 
 // ── What the voice knows as the call starts (the briefing) ──────────────────
 
-const BRIEFED = ["brief-pasta", "brief-last-call", "brief-dentist"];
+const BRIEFED = ["brief-pasta", "brief-last-call", "brief-dentist", "brief-stale-list", "brief-calendar-fresh"];
 const scenario = (id) => SCENARIOS.find((s) => s.id === id);
 // A test call's ledger at the eval's clock, with the scenario's world in it.
 async function seeded(id) {
@@ -307,9 +307,10 @@ async function seeded(id) {
   return call;
 }
 
-test("the briefing scenarios carry a made-up world from before the call, and only they do", () => {
-  assert.deepEqual(SCENARIOS.filter((s) => s.briefing).map((s) => s.id), BRIEFED);
-  for (const id of BRIEFED) {
+test("the briefing scenarios carry a made-up world from before the call, and every other call starts with the everyday one", () => {
+  assert.deepEqual(SCENARIOS.filter((s) => s.briefing !== EVERYDAY).map((s) => s.id), BRIEFED);
+  assert.ok(SCENARIOS.every((s) => s.briefing), "a real call always has a background");
+  for (const id of [...BRIEFED, "add-two"]) {
     const { briefing } = scenario(id);
     assert.ok(briefing.user && briefing.memory && briefing.yesterday && briefing.today, id);
     for (const row of briefing.rows) assert.ok(Date.parse(row.ts) < EVAL_NOW.getTime(), `${id}: ${row.text} is from before the call`);
@@ -329,6 +330,8 @@ test("a briefing scenario's world goes where the bot keeps it, and the call's pr
     "brief-pasta": "the user said (by text): I'm cooking pasta tonight",
     "brief-last-call": 'you did (on the call): added "Kale" under "Greens" (Notion page "Shopping list")',
     "brief-dentist": "the user said (by SMS): The dentist is Tuesday at 3.",
+    "brief-stale-list": "Milk, butter and limes.",
+    "brief-calendar-fresh": "- Gym on Thursdays at 7 AM.",
   };
   for (const id of BRIEFED) {
     const call = await seeded(id);
@@ -348,9 +351,9 @@ test("a briefing scenario's world goes where the bot keeps it, and the call's pr
   }
 });
 
-test("a scenario without a briefing world gets the prompt alone, as before", async () => {
+test("a call seeded with no briefing world gets the prompt alone", async () => {
   const call = makeCallLedger({ now: () => EVAL_NOW.getTime() });
-  await call.seed(scenario("add-two").briefing);
+  await call.seed(undefined);
   const built = await call.buildInstructions({ callId: "eval-add-two", prompt: "PROMPT" });
   assert.equal(built.text, "PROMPT");
   assert.equal(built.background, "");

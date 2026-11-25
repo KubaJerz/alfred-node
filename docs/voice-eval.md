@@ -54,16 +54,20 @@ node scripts/voice-eval.mjs --compare agent/var/voice-eval/runs/<a> agent/var/vo
   (`at("HH:MM", row)`, Eastern, on the day of the call; `texted`, `replied`,
   `callRow` and `toolRow` build them as the bot does). The call's prompt is
   then built by the bot's own builder (`callBriefing` in `context.js`), as on a
-  real call: `phone-voice.md`, then the background. A scenario without a
-  briefing gets the prompt alone, so the other scenarios run as before. The
-  `brief-*` scenarios use it: pasta texted an hour before ("what am I making
-  tonight?", no tool), a call 20 minutes before that put kale under Greens
-  ("add spinach to the greens on the list we were adding to": spinach under
-  Greens, no Alfred; a Garden list has Greens too, so only the briefing says
-  which; the caller names the section, since the notion tool nests a line only
-  then), and
-  the dentist by SMS ("when's the dentist?": Tuesday at 3, no tool, though the
-  calendar does not have it).
+  real call: `phone-voice.md`, then the background. A real call always has a
+  background, so a scenario without its own briefing gets `EVERYDAY` (the
+  made-up USER, MEMORY and notes, and one text exchange that morning). The
+  `brief-*` scenarios carry their own: pasta texted an hour before ("what am I
+  making tonight?", no tool), a call 20 minutes before that put kale under
+  Greens ("add spinach to the greens on the list we were adding to": spinach
+  under Greens, no Alfred; a Garden list has Greens too, so only the briefing
+  says which; the caller names the section, since the notion tool nests a line
+  only then), the dentist by SMS ("when's the dentist?": Tuesday at 3, no tool,
+  though the calendar does not have it), and two where the background is out
+  of date: a text reply two hours ago listed the shopping list as milk, butter
+  and limes (`brief-stale-list`: read the list fresh, say kefir and eggs too),
+  and memory has the gym on Thursdays but not the call with Mom
+  (`brief-calendar-fresh`: read the calendar, say both).
 - **Control runs.** `--no-briefing` starts each call with the prompt alone (as
   `VOICE_OPENAI_BRIEFING=0`), and `--no-feed` tells a call nothing mid-call (as
   `VOICE_OPENAI_LIVE=0`); the scenario's world and rows are written all the
@@ -129,5 +133,30 @@ tick with no page finding the page.
 - So the phone runs `gpt-realtime-2.1` (`VOICE_OPENAI_MODEL`), about 3¢ a call
   against 1¢. Retry mini after the next prompt or tool change, with this suite.
 
-The `live-*` and `brief-*` scenarios (#153) came after this run and have no
-results yet.
+### Phase two: the shared memory (#153), 2026-11-25
+
+Full model, reasoning `low`. From here on every call starts with a background,
+as a real call does (`EVERYDAY`, or the scenario's own), so the 17 old
+scenarios now test the voice with its briefing in the prompt.
+
+| run | calls that passed every check | grader /8 | words a call | cost |
+|---|---|---|---|---|
+| 25 scenarios × 3 | 71/75 | 6.8 | 24 | $1.97 |
+| the 7 the last two fixes touch, × 3 | 20/21 | 7.3 | 20 | $0.54 |
+| 25 scenarios × 1, final code | 25/25 | 7.1 | 23 | $0.63 |
+
+- The old 17 passed 51/51 with the background in the prompt: it costs nothing
+  on calls that do not need it.
+- Live updates: a photo and the reply that names it, a texted "out of eggs",
+  and a photo whose reply has not come (no guess; it asks and waits) all pass.
+- What the call starts knowing: pasta texted an hour before, the list the last
+  call was adding to, a stale list (read fresh, kefir and eggs said) and a
+  partial memory of tomorrow (calendar read, both events said) all pass.
+- The dentist by SMS took two rewordings of the briefing head. "Answer from it
+  at once, not even a look" fixed it but would answer stale lists from the
+  notes; "read lists and the calendar fresh" made the voice doubt the SMS when
+  the calendar lacked it (0/3). The head now says both. In the last runs the
+  voice still checks the calendar first in about 1 call of 3, then gives the
+  SMS's time and says it is not on the calendar yet.
+- `brief-last-call` found a tool bug: `under: 0` with no read put spinach at
+  the end of the page. It now asks for the read, and the voice nests it.

@@ -688,11 +688,11 @@ test("the call's briefing: the prompt, then one headed background block: USER, M
   // prompt sends "the user's own life" to a tool and lets only "what was
   // already said on this call" go without one: the head puts the background
   // with the second, by name, so the two never pull apart (brief-dentist).
-  // And it rules out a look to check: "needs no tool" alone still read the
-  // calendar first.
+  // What lists and the calendar held then is read fresh, since it can be out
+  // of date by the call (brief-stale-list, brief-calendar-fresh).
   assert.match(
     b.background,
-    /It is background only\. What it says counts as already said on this call, even about the user's own life: when the caller asks about it, answer from it at once, with no tool, not even a look at the calendar or notion to check\. For anything it does not say, and anything to change, still use your tools\. Do not recite it, or bring it up, unless the caller asks\./,
+    /It is background only\. What the user told you in it counts as already said on this call, even about their own life: when the caller asks about it, answer from it at once, with no tool, even if a list or the calendar does not have it\. What a list, page or the calendar held then may have changed: when the caller asks what is on one now, read it with your tools\. For anything it does not say, and anything to change, use your tools too\. Do not recite it, or bring it up, unless the caller asks\./,
   );
   const voicePrompt = readFileSync(path.join(REPO, "agent", "phone-voice.md"), "utf8").replace(/\s+/g, " ");
   assert.match(voicePrompt, /The user's own life, anything to do, and anything current go to a tool\. What was already said on this call needs no tool\./, "the rule the head answers");

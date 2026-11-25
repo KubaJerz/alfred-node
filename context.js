@@ -517,16 +517,22 @@ const NOTE_CUT = "(The start of this note is left out.)";
 // the dentist?" reads the calendar instead of the SMS that says it. "Needs no
 // tool" alone was not enough: the voice still read the calendar first, to
 // check, and answered 3 s later (brief-dentist in the voice eval, 3 calls of
-// 3). So it says to answer at once, without even a look. No line names a
+// 3). So what the user told counts as said, to answer at once. But the notes
+// and replies in it also say what lists and the calendar held then, which
+// can be out of date by the call: those are read fresh (brief-stale-list,
+// brief-calendar-fresh). Told only that, the voice read the calendar for the
+// dentist, did not find it, and doubted the SMS (2 calls of 3): what the user
+// told holds even where a list or the calendar lacks it. No line names a
 // model, a service or another assistant.
 const briefingHead = (hours) =>
   [
     "=== BACKGROUND: WHAT YOU KNOW FROM BEFORE THIS CALL ===",
     `About the user, your memory, the daily notes of yesterday and today, and what was said in the last ${plural(hours, "hour")}, ` +
       'and before that when no note has it yet: by text, by SMS and on earlier calls. "You" in it is you, on every channel.',
-    "It is background only. What it says counts as already said on this call, even about the user's own life: " +
-      "when the caller asks about it, answer from it at once, with no tool, not even a look at the calendar or notion to check. " +
-      "For anything it does not say, and anything to change, still use your tools. " +
+    "It is background only. What the user told you in it counts as already said on this call, even about their own life: " +
+      "when the caller asks about it, answer from it at once, with no tool, even if a list or the calendar does not have it. " +
+      "What a list, page or the calendar held then may have changed: when the caller asks what is on one now, read it with your tools. " +
+      "For anything it does not say, and anything to change, use your tools too. " +
       "Do not recite it, or bring it up, unless the caller asks.",
   ].join("\n");
 

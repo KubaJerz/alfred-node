@@ -15,8 +15,9 @@
 // from what the bot would know before the call: USER.md, MEMORY.md, the daily
 // notes of yesterday and today, and ledger rows from before the call, each
 // with its ts (at() below). The call's prompt is built from it by the bot's
-// own builder (callBriefing in context.js). A scenario without one gets the
-// prompt alone, as before.
+// own builder (callBriefing in context.js). A scenario without one gets
+// EVERYDAY, since a real call always starts with a background; --no-briefing
+// runs the prompt alone.
 //
 // The clock in every call is Wednesday 2 December 2026, 10:00 AM Eastern
 // (openai-call.js), so "tomorrow" is Thursday the 3rd and "Friday" the 4th.
@@ -211,6 +212,12 @@ const check = {
   notAskedAlfred: () => ({ name: "did it without Alfred", test: (r) => useTools(r).length === 0 }),
   // What the briefing says needs no tool at all, not even a look.
   noTools: () => ({ name: "used no tool", test: (r) => toolCalls(r).length === 0 && useTools(r).length === 0 }),
+  // A fresh read, where the briefing only says what a list or the calendar
+  // held then.
+  read: (tool, label) => ({
+    name: `read ${label} fresh`,
+    test: (r) => toolCalls(r, tool).some((e) => e.args?.action === "read"),
+  }),
   // word is a line nested under the line with parent, on the page.
   under: (title, parent, word) => ({
     name: `${word} under ${parent} on ${title}`,
@@ -477,9 +484,35 @@ export const SCENARIOS = [
     turns: [{ say: "When's the dentist?" }],
     checks: [check.said("Tuesday", /\btuesday\b/i), check.said("3 o'clock", /\b(3|three)\b/i), check.noTools()],
   },
+  {
+    // The briefing says what the list held two hours ago; it has more now.
+    // Answered from the briefing, the caller would miss the kefir and eggs.
+    id: "brief-stale-list",
+    goal: "Two hours ago, by text, the user was told the shopping list was milk, butter and limes; it has changed since. Asked what's on the list, read it fresh in Notion and say what is on it now, kefir and eggs included.",
+    briefing: {
+      ...BACKGROUND,
+      rows: [...MORNING, at("08:20", texted("What's on my shopping list?")), at("08:20", replied("Milk, butter and limes."))],
+    },
+    turns: [{ say: "What's on my shopping list?" }],
+    checks: [check.read("notion", "the list"), check.said("kefir", /\bkefir\b/i), check.said("eggs", /\beggs?\b/i), check.notAskedAlfred()],
+  },
+  {
+    // Memory has the gym on Thursdays, but not the call with Mom: only the
+    // calendar has the whole day.
+    id: "brief-calendar-fresh",
+    goal: "Memory says the gym is on Thursdays at 7. Asked what's on tomorrow (Thursday), read the calendar, not just memory, and say both the gym at 7 and the call with Mom at 6 PM.",
+    briefing: { ...BACKGROUND, memory: `${BACKGROUND.memory}\n- Gym on Thursdays at 7 AM.`, rows: MORNING },
+    turns: [{ say: "What do I have tomorrow?" }],
+    checks: [check.read("calendar", "the calendar"), check.saidAll(["gym", "mom/mum"]), check.notAskedAlfred()],
+  },
 ];
+
+// What every other call starts knowing: a real call always has a background,
+// so a scenario without its own still gets the files and the morning's text.
+export const EVERYDAY = { ...BACKGROUND, rows: MORNING };
 
 for (const s of SCENARIOS) {
   s.world ||= world();
   s.alfred ||= ALFRED;
+  s.briefing ||= EVERYDAY;
 }

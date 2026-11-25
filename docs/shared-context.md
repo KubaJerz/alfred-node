@@ -177,11 +177,13 @@ It is Wednesday, December 2, 2026 at 10:00 AM (Eastern) as the call starts.
 About the user, your memory, the daily notes of yesterday and today, and what
 was said in the last 6 hours, and before that when no note has it yet: by
 text, by SMS and on earlier calls. ...
-It is background only. What it says counts as already said on this call, even
-about the user's own life: when the caller asks about it, answer from it at
-once, with no tool, not even a look at the calendar or notion to check. For
-anything it does not say, and anything to change, still use your tools. Do not
-recite it, or bring it up, unless the caller asks.
+It is background only. What the user told you in it counts as already said on
+this call, even about their own life: when the caller asks about it, answer
+from it at once, with no tool, even if a list or the calendar does not have it.
+What a list, page or the calendar held then may have changed: when the caller
+asks what is on one now, read it with your tools. For anything it does not
+say, and anything to change, use your tools too. Do not recite it, or bring it
+up, unless the caller asks.
 
 [About the user]                         USER.md
 [Your memory]                            MEMORY.md
@@ -198,8 +200,13 @@ user's own life" to a tool and lets only "what was already said on this call"
 go without one; the head says the background is the second, so "when's the
 dentist?" answers from an SMS in it instead of reading the calendar. "It needs
 no tool" alone was not enough: in the voice eval the voice still read the
-calendar first, to check, and answered about 3 s later, so the head rules out
-even a look.
+calendar first, to check, and answered about 3 s later, so what the user told
+is to be answered at once. But the notes and replies in the background also
+say what a list or the calendar held then, and that can be out of date by the
+call: the head sends those to a fresh read (`brief-stale-list`,
+`brief-calendar-fresh`). Told only that, the voice read the calendar for the
+dentist, did not find it there, and doubted the SMS, so what the user told
+holds even where a list or the calendar lacks it.
 
 **What the messages show.** The ledger rows of the last 6 hours, and older
 ones that no fold has put in a note yet, as for a new session
