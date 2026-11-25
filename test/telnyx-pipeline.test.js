@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import crypto from "crypto";
 import http from "http";
+import { EventEmitter } from "events";
 import WebSocket, { WebSocketServer } from "ws";
 import {
   tokenOk,
@@ -690,6 +691,46 @@ test("pipeline: a reply whose end mark never comes back counts as heard after th
     assert.ok(!s.logs.some((l) => /Barge-in/.test(l)));
     assert.equal(s.turns[1].missed, false);
     assert.ok(!peer.frames.some((f) => f.event === "clear"));
+  } finally {
+    await s.close();
+  }
+});
+
+// A stand-in for the OpenAI Realtime socket of engine "openai": it opens, and
+// takes what is sent.
+class FakeRealtimeWs extends EventEmitter {
+  constructor() {
+    super();
+    this.readyState = 0;
+    setImmediate(() => {
+      this.readyState = 1;
+      this.emit("open");
+    });
+  }
+  send() {}
+  close() {
+    this.readyState = 3;
+  }
+}
+
+test("pipeline (openai): realtime.onCallEvent gets the call's events, with its id and caller", async () => {
+  const events = [];
+  const realtime = { apiKey: "sk-test", WebSocketImpl: FakeRealtimeWs, greeting: "", onCallEvent: (e) => events.push(e) };
+  const s = await setup({ pipelineOpts: { engine: "openai", realtime } });
+  try {
+    assert.equal(await s.incoming("v3:call9"), 200);
+    await waitFor(() => s.commands.length === 1);
+    const peer = s.connectMedia();
+    await peer.open();
+    peer.start("v3:call9");
+    await waitFor(() => events.length === 1);
+    assert.deepEqual(events[0], { type: "start", callId: "v3:call9", caller: OWNER });
+    await s.postEvent("call.hangup", { call_control_id: "v3:call9", hangup_cause: "normal_clearing", hangup_source: "caller" });
+    await waitFor(() => events.length === 2 && peer.closed !== null);
+    assert.equal(events[1].type, "end");
+    assert.equal(events[1].reason, "call hung up");
+    assert.equal(events[1].callId, "v3:call9");
+    assert.equal(events.length, 2, "the socket closing after the hangup ends nothing twice");
   } finally {
     await s.close();
   }

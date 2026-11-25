@@ -18,7 +18,7 @@ import { makeRonnie } from "./ronnie/runner.js";
 import { resolveRonnieLabels } from "./ronnie/labels.js";
 import { ensureLabels } from "./google/gmail-labels.js";
 import { easternDate, dailyDir, dailyNotePath, attachmentName, buildAttachmentBlock } from "./dailies.js";
-import { makeLedger, inboundRow } from "./ledger.js";
+import { makeLedger, inboundRow, callRow, toolRow } from "./ledger.js";
 import { ensureWatermark } from "./fold.js";
 import { parseClearCommand } from "./commands.js";
 import { transcribe, transcriptionAvailable } from "./voice/transcribe.js";
@@ -110,17 +110,18 @@ const VOICE_OPENAI = {
   // "0": the reply after a quick tool is audio, not silent text (to compare).
   quietChains: process.env.VOICE_OPENAI_SILENT_CHAINS !== "0",
   // The voice's own notion, calendar and get_time tools. "0" sends everything
-  // through Alfred (use_tools) again.
-  directTools: process.env.VOICE_OPENAI_DIRECT_TOOLS === "0" ? null : () =>
+  // through Alfred (use_tools) again. Made once per call, for that call.
+  directTools: process.env.VOICE_OPENAI_DIRECT_TOOLS === "0" ? null : ({ caller, callId } = {}) =>
     makeVoiceTools({
       notionRoutes: NOTION_ROUTES,
       calendarRoutes: GOOGLE_ROUTES,
       fetchBlockChildren,
-      note: notePhoneAction,
+      note: (text) => notePhoneAction(text, { caller, callId }),
       // Where "make a new page" puts it when no page is named (a shared page).
       homePage: process.env.VOICE_NOTION_HOME || undefined,
     }),
-  // "0" turns off the caller transcript in the log (it costs a little).
+  // "0" turns off the caller transcript (it costs a little): in the log, and
+  // the caller's lines in messages.jsonl, so the call keeps only the voice's.
   ...(process.env.VOICE_OPENAI_TRANSCRIBE === "0" ? { transcribeModel: "" } : {}),
 };
 // The pipeline speaks Alfred's reply sentence by sentence while he writes it.
@@ -850,7 +851,10 @@ async function handleTurn(target, userMessage, attachments = [], { signal, onTex
   // Log the inbound turn now — after any /clear reset above — so it lands in the
   // fresh transcript rather than the one we just archived. The row names the
   // saved files (Discord and SMS alike), so a fold can open a photo later.
-  await logTurn(inboundRow({ who: target.who, via: target.via, text: userMessage, attachments, agentDir: AGENT_DIR }));
+  await logTurn(inboundRow({ who: target.who, via: target.via, text: userMessage, attachments, agentDir: AGENT_DIR, callId: target.callId }));
+  // An out row of this turn names its channel and call too, so no reader has to
+  // take them from the row before it: a call's own lines can come between.
+  const logOut = (row) => logTurn({ dir: "out", via: target.via, ...row, callId: target.callId });
 
   console.log(`📨 ${target.who.tag}: ${userMessage.slice(0, 100)}`);
 
@@ -899,7 +903,7 @@ async function handleTurn(target, userMessage, attachments = [], { signal, onTex
     // Keep no state and send nothing. The next turn carries the words.
     if (response.is_aborted) {
       console.log("✂️  Turn cancelled (Telnyx dropped an early guess)");
-      await logTurn({ dir: "out", kind: "cancelled", text: "" });
+      await logOut({ kind: "cancelled", text: "" });
       return;
     }
 
@@ -922,7 +926,7 @@ async function handleTurn(target, userMessage, attachments = [], { signal, onTex
     if (infraFailed) {
       const kind = response.is_auth_error ? "auth_error" : "timeout";
       await target.send(response.result);
-      await logTurn({ dir: "out", kind, text: response.result });
+      await logOut({ kind, text: response.result });
       return;
     }
 
@@ -936,7 +940,7 @@ async function handleTurn(target, userMessage, attachments = [], { signal, onTex
     const isSilent = canon(replyText) === canon(NO_REPLY);
     if (isSilent) {
       console.log("🤫 Stayed silent (no_reply sentinel)");
-      await logTurn({ dir: "out", kind: "silent", text: "", sessionId: response.session_id || null });
+      await logOut({ kind: "silent", text: "", sessionId: response.session_id || null });
       return;
     }
 
@@ -956,14 +960,14 @@ async function handleTurn(target, userMessage, attachments = [], { signal, onTex
     await target.send(reply, files, { streamed: !!onText && !!cleaned.trim() });
 
     console.log(`✅ Replied (${reply.length} chars${files.length ? `, ${files.length} file(s)` : ""}${deferStrength ? ", deferred digest" : ""})`);
-    await logTurn({ dir: "out", kind: "reply", text: reply, files: files.length, sessionId: response.session_id || null });
+    await logOut({ kind: "reply", text: reply, files: files.length, sessionId: response.session_id || null });
 
     if (deferStrength) startStrengthDigestFollowup(target);
   } catch (err) {
     console.error("❌ Error:", err);
     const errReply = `Something went wrong:\n\`\`\`\n${err.message}\n\`\`\``;
     await target.send(errReply).catch((e) => console.error(`⚠️  Couldn't send the error reply: ${e.message}`));
-    await logTurn({ dir: "out", kind: "error", text: errReply, error: err.message });
+    await logOut({ kind: "error", text: errReply, error: err.message });
   } finally {
     clearInterval(typingInterval);
     target.done?.();
@@ -1037,7 +1041,7 @@ async function strengthFollowupTurn(target, { ok, out, err }) {
     const reply = cleaned.trim() || (files.length ? "" : fallback);
     await target.send(reply, files);
     console.log(`✅ Strength follow-up replied (${reply.length} chars${files.length ? `, ${files.length} file(s)` : ""})`);
-    await logTurn({ dir: "out", kind: "reply", text: reply, files: files.length, sessionId: response.session_id || null });
+    await logTurn({ dir: "out", via: target.via, kind: "reply", text: reply, files: files.length, sessionId: response.session_id || null });
   } catch (e) {
     console.error(`❌ Strength follow-up error: ${e.message}`);
     await target.send(fallback).catch(() => {});
@@ -1181,13 +1185,16 @@ async function postChunks(post, text, files) {
 // answer in Discord, by SMS, or in both. A target has:
 //
 //   who             { tag, id, channel } for the transcript and the console
-//   via             "sms" or "call" when the reply does not go to Discord only
+//   via             "discord", "sms" or "call": where the turn came from, for
+//                   the tag on the message and the ledger rows
+//   callId          a 2B call's id (call targets only): the turn's rows carry it
 //   typing()        show that Alfred is working. It never throws.
 //   react(emoji)    react to the inbound message. It never throws.
 //   send(text, files)  deliver a reply. It throws only if no copy arrived.
 function discordTarget(msg) {
   return {
     who: { tag: msg.author.tag, id: msg.author.id, channel: msg.channelId },
+    via: "discord",
     typing: () => msg.channel.sendTyping().catch(() => {}),
     react: (emoji) => msg.react(emoji).catch(() => {}),
     send: (text, files = []) => sendReply(msg, text, files),
@@ -1339,12 +1346,24 @@ async function postFromCall(text, files = []) {
   }
 }
 
-// What the 2B voice did with its own tools, without Alfred. Each action goes in
-// today's daily note, and waits here to ride at the front of Alfred's next
-// message, so he knows the same day, on any channel.
+// What is said and done on a 2B call, as it happens (telnyx/realtime.js): each
+// line, the start and the end, an answer that came after the hangup. Each is a
+// ledger row with src "call" (callRow in ledger.js), so a reader can tell the
+// call's own lines from its use_tools turns, which are chat rows with the same
+// callId. logTurn never throws; a failed write is logged.
+function logCallEvent(ev) {
+  const row = callRow(ev);
+  return row ? logTurn(row) : null;
+}
+
+// What the 2B voice did with its own tools, without Alfred. Each action is a
+// ledger row (src "tool") and a line in today's daily note, and waits here to
+// ride at the front of Alfred's next message, so he knows the same day, on any
+// channel.
 const phoneActions = [];
-function notePhoneAction(text) {
+function notePhoneAction(text, { caller, callId } = {}) {
   phoneActions.push(text);
+  logTurn(toolRow({ text, caller, callId }));
   const time = new Intl.DateTimeFormat("en-GB", { timeZone: "America/New_York", hour: "2-digit", minute: "2-digit" }).format(new Date());
   const file = dailyNotePath(MEMORIES_DIR);
   mkdir(path.dirname(file), { recursive: true })
@@ -1375,10 +1394,11 @@ async function onLateCallAnswer({ request, reply, caller }) {
 // route to stream back, and posts a copy in the mirror channel (if set). A late
 // send, for example a deferred strength follow-up, reaches the mirror only.
 // opts.streamed: the caller heard this text while Alfred wrote it.
-function callTarget({ discord = null, who, onReply }) {
+function callTarget({ discord = null, who, onReply, callId }) {
   return {
     who,
     via: "call",
+    callId,
     typing: () => discord?.typing() ?? Promise.resolve(),
     react: (emoji) => discord?.react(emoji) ?? Promise.resolve(),
     send: async (text, files = [], opts = {}) => {
@@ -1398,7 +1418,10 @@ function callTarget({ discord = null, who, onReply }) {
 // text while Alfred writes it. Then this resolves only to text that did not
 // stream and must be spoken whole: an error, a timeout, or a default line.
 // The mirror post still gets the whole reply.
-async function onCallTurn({ text, caller, takeMissed, signal, onText }) {
+//
+// callId (2B only): the call this use_tools request came from. The turn's rows
+// carry it next to the call's own lines (logCallEvent).
+async function onCallTurn({ text, caller, takeMissed, signal, onText, callId }) {
   let discord = null;
   if (VOICE_MIRROR_CHANNEL) {
     try {
@@ -1417,6 +1440,7 @@ async function onCallTurn({ text, caller, takeMissed, signal, onText }) {
   const target = callTarget({
     discord,
     who: { tag: `call:${caller}`, id: caller, channel: VOICE_MIRROR_CHANNEL || "call" },
+    callId,
     onReply: (t, { streamed = false } = {}) => {
       // The pipeline spoke this text from the stream. Do not give it again.
       // If no text came by the stream, give it, so the call is not silent.
@@ -1574,10 +1598,12 @@ if (voicePipelineConfigured) {
       engine: VOICE_PIPELINE_ENGINE,
       localSpeech,
       streamReply: VOICE_STREAM_REPLY,
+      // 2B only, passed through to telnyx/realtime.js like onLate.
       realtime: VOICE_PIPELINE_ENGINE === "openai" ? {
         apiKey: OPENAI_API_KEY,
         instructions: readPhoneVoicePrompt(),
         onLate: onLateCallAnswer,
+        onCallEvent: logCallEvent,
         ...VOICE_OPENAI,
       } : {},
     });

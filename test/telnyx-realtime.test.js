@@ -370,7 +370,7 @@ test("a slow Alfred gets a spoken still-working line", async () => {
 });
 
 // A slow use_tools call whose still-working line has been asked for.
-async function slowWithUpdate() {
+async function slowWithUpdate(opts = {}) {
   let release;
   const logs = [];
   const session = makeRealtimeSession({
@@ -384,6 +384,7 @@ async function slowWithUpdate() {
     WebSocketImpl: FakeWs,
     greeting: "",
     updateMs: 60,
+    ...opts,
   });
   session.start();
   const ws = FakeWs.last;
@@ -631,4 +632,174 @@ test("a quiet goodbye with end_call is said, then the call hangs up", async () =
   ws.server({ type: "response.done", response: { id: "s1", status: "completed", metadata: { kind: "say" } } });
   await waitFor(() => hung() === 1, 3000);
   session.end("test", { hang: false });
+});
+
+// ── The call in the ledger (onCallEvent) ────────────────────────────────────
+
+const WHO = { callId: "v3:abc", caller: "+15551234567" };
+
+test("call events: the start, the caller's and the voice's lines as they come, and the end with its length", async () => {
+  let t = 1000;
+  const events = [];
+  const { session, ws } = setup({ opts: { greeting: "", now: () => t, onCallEvent: (e) => events.push(e) } });
+  assert.deepEqual(events, [{ type: "start", ...WHO }], "the start comes as the session starts");
+  await waitFor(() => ws.readyState === 1);
+  ws.server({ type: "conversation.item.input_audio_transcription.completed", item_id: "in1", transcript: " Add kale to the list. " });
+  ws.server({ type: "conversation.item.input_audio_transcription.completed", item_id: "in2", transcript: "  " });
+  ws.server({ type: "response.created", response: { id: "r1" } });
+  ws.server({ type: "response.output_audio_transcript.done", response_id: "r1", item_id: "out1", transcript: "Got it." });
+  assert.equal(events.length, 3, "each line goes as it comes, not at the end of the call");
+  t += 125_000;
+  session.end("call hung up", { hang: false });
+  session.end("again", { hang: false });
+  assert.deepEqual(events.slice(1), [
+    { type: "line", dir: "in", text: "Add kale to the list.", ...WHO },
+    { type: "line", dir: "out", text: "Got it.", ...WHO },
+    { type: "end", reason: "call hung up", ms: 125_000, ...WHO },
+  ]);
+});
+
+test("the text of a silent tool chain is never a line; the answer the caller heard is", async () => {
+  const events = [];
+  const { session, ws } = await quietChain({ onCallEvent: (e) => events.push(e) });
+  // Narration between tool calls: silent text, never audio.
+  ws.server({
+    type: "response.done",
+    response: { id: "q1", status: "completed", metadata: { kind: "quiet" }, output: [message("Now the eggs."), { type: "function_call", name: "notion", call_id: "c2" }] },
+  });
+  ws.server({ type: "response.created", response: { id: "q2", metadata: { kind: "quiet" } } });
+  ws.server({
+    type: "response.done",
+    response: { id: "q2", status: "completed", metadata: { kind: "quiet" }, output: [message("Done, bread is off the list.")] },
+  });
+  assert.equal(events.filter((e) => e.type === "line").length, 0, "nothing was said yet");
+  // The answer is said out of band; its audio transcript is what was heard.
+  ws.server({ type: "response.created", response: { id: "s1", metadata: { kind: "say" } } });
+  ws.server({ type: "response.output_audio_transcript.done", response_id: "s1", item_id: "s_it", transcript: "Done, bread is off the list." });
+  assert.deepEqual(events.filter((e) => e.type === "line").map((e) => [e.dir, e.text]), [["out", "Done, bread is off the list."]]);
+  session.end("test", { hang: false });
+});
+
+test("a still-working line is filler, not a line of the call", async () => {
+  const events = [];
+  const { session, ws, release } = await slowWithUpdate({ onCallEvent: (e) => events.push(e) });
+  ws.server({ type: "response.created", response: { id: "r_upd", metadata: { kind: "still_working" } } });
+  ws.server({ type: "response.output_audio.delta", response_id: "r_upd", item_id: "it_upd", delta: ulaw(200) });
+  ws.server({ type: "response.output_audio_transcript.done", response_id: "r_upd", item_id: "it_upd", transcript: "Still on it." });
+  ws.server({ type: "response.done", response: { id: "r_upd", status: "completed" } });
+  release("Two meetings.");
+  await waitFor(() => ws.sent.some((e) => e.type === "conversation.item.create"));
+  ws.server({ type: "response.created", response: { id: "r_ans" } });
+  ws.server({ type: "response.output_audio_transcript.done", response_id: "r_ans", item_id: "it_ans", transcript: "You have two meetings." });
+  assert.deepEqual(events.filter((e) => e.type === "line").map((e) => e.text), ["You have two meetings."]);
+  session.end("test", { hang: false });
+});
+
+test("a line the caller talked over says how much they heard, before or after its transcript came", async () => {
+  let t = 1000;
+  const events = [];
+  const { session, ws } = setup({ opts: { greeting: "", now: () => t, onCallEvent: (e) => events.push(e) } });
+  await waitFor(() => ws.readyState === 1);
+  // The transcript first, then the caller cuts in 400 ms into 3 s of audio.
+  ws.server({ type: "response.created", response: { id: "r1" } });
+  ws.server({ type: "response.output_audio.delta", response_id: "r1", item_id: "a", delta: ulaw(3000) });
+  ws.server({ type: "response.output_audio_transcript.done", response_id: "r1", item_id: "a", transcript: "Milk, eggs, bread, kale and spinach." });
+  t += 400;
+  ws.server({ type: "input_audio_buffer.speech_started" });
+  // The caller cuts in first; the transcript of the cut reply comes after.
+  t = 5000;
+  ws.server({ type: "response.created", response: { id: "r2" } });
+  ws.server({ type: "response.output_audio.delta", response_id: "r2", item_id: "b", delta: ulaw(2000) });
+  t += 250;
+  ws.server({ type: "input_audio_buffer.speech_started" });
+  ws.server({ type: "response.output_audio_transcript.done", response_id: "r2", item_id: "b", transcript: "Sure, the list has" });
+  // A reply heard to the end is a plain line.
+  t = 9000;
+  ws.server({ type: "response.created", response: { id: "r3" } });
+  ws.server({ type: "response.output_audio.delta", response_id: "r3", item_id: "c", delta: ulaw(500) });
+  ws.server({ type: "response.output_audio_transcript.done", response_id: "r3", item_id: "c", transcript: "Kale is on it." });
+  assert.deepEqual(ws.sent.filter((e) => e.type === "conversation.item.truncate").map((e) => [e.item_id, e.audio_end_ms]), [["a", 400], ["b", 250]]);
+  assert.deepEqual(events.slice(1).map(({ callId, caller, ...e }) => e), [
+    { type: "line", dir: "out", text: "Milk, eggs, bread, kale and spinach." },
+    { type: "cut", heardMs: 400, totalMs: 3000 },
+    { type: "line", dir: "out", text: "Sure, the list has", heardMs: 250, totalMs: 2000 },
+    { type: "line", dir: "out", text: "Kale is on it." },
+  ]);
+  session.end("test", { hang: false });
+});
+
+test("use_tools gets the call's id, and an answer after the hangup is a late event", async () => {
+  const run = async (answer) => {
+    let release;
+    const events = [];
+    const turns = [];
+    const session = makeRealtimeSession({
+      callControlId: "v3:late",
+      caller: "+1",
+      sendFrame: () => {},
+      onTurn: (t) => {
+        turns.push(t);
+        return new Promise((r) => (release = r));
+      },
+      onCallEvent: (e) => events.push(e),
+      hangup: async () => {},
+      log: () => {},
+      apiKey: "sk-test",
+      WebSocketImpl: FakeWs,
+      greeting: "",
+    });
+    session.start();
+    const ws = FakeWs.last;
+    await waitFor(() => ws.readyState === 1);
+    ws.server({ type: "response.function_call_arguments.done", name: "use_tools", call_id: "c8", arguments: '{"request":"read the list"}' });
+    await waitFor(() => release);
+    session.end("call hung up", { hang: false });
+    release(answer);
+    await sleep(20);
+    return { events, turns };
+  };
+  const { events, turns } = await run("Milk, eggs.");
+  assert.equal(turns[0].callId, "v3:late");
+  assert.deepEqual(events.map((e) => e.type), ["start", "end", "late"]);
+  assert.deepEqual(events[2], { type: "late", request: "read the list", text: "Milk, eggs.", callId: "v3:late", caller: "+1" });
+  // An empty answer sends nothing, so there is nothing to keep.
+  assert.deepEqual((await run("  ")).events.map((e) => e.type), ["start", "end"]);
+});
+
+test("the direct tools are made for the call: its caller and its id", () => {
+  let made = null;
+  const directTools = (who) => {
+    made = who;
+    return { defs: [], names: [], call: async () => "" };
+  };
+  const { session } = setup({ opts: { greeting: "", directTools } });
+  assert.deepEqual(made, WHO);
+  session.end("test", { hang: false });
+});
+
+test("an onCallEvent that throws or rejects is logged, and the call goes on", async () => {
+  const throws = () => {
+    throw new Error("disk full");
+  };
+  const rejects = async () => {
+    throw new Error("disk full");
+  };
+  for (const onCallEvent of [throws, rejects]) {
+    const { session, ws, turns, logs, ended } = setup({ opts: { greeting: "", onCallEvent } });
+    await waitFor(() => ws.readyState === 1);
+    assert.equal(ws.sent[0].type, "session.update", "the start event's failure did not stop the connect");
+    ws.server({ type: "conversation.item.input_audio_transcription.completed", item_id: "i1", transcript: "What's on today?" });
+    ws.server({ type: "response.created", response: { id: "r1" } });
+    ws.server({ type: "response.output_audio_transcript.done", response_id: "r1", item_id: "o1", transcript: "One moment." });
+    ws.server({ type: "response.function_call_arguments.done", name: "use_tools", call_id: "c1", arguments: '{"request":"today"}' });
+    await waitFor(() => ws.sent.some((e) => e.type === "conversation.item.create"));
+    assert.equal(turns.length, 1, "use_tools still reached Alfred");
+    session.end("test", { hang: false });
+    assert.equal(ended(), 1);
+    await waitFor(() => logs.filter((l) => /^⚠️ {2}Call event \w+ failed: disk full$/.test(l)).length === 4);
+    assert.deepEqual(
+      logs.map((l) => /Call event (\w+) failed/.exec(l)?.[1]).filter(Boolean),
+      ["start", "line", "line", "end"],
+    );
+  }
 });

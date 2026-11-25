@@ -19,6 +19,14 @@
 // Barge-in: OpenAI sends input_audio_buffer.speech_started. We tell Telnyx to
 // "clear" its queue and truncate the assistant item at the point the caller
 // heard, so the model knows what was not said.
+//
+// The ledger: onCallEvent gets what happens on the call as it happens: the
+// caller's lines as transcribed, the voice's as spoken, the start and the end,
+// and an answer that came after the hangup. bot.js writes each as a row of
+// messages.jsonl (callRow in ledger.js). Only what the caller heard is a line.
+// The text of a silent tool chain is never audio, so it never comes; the
+// still-working filler is left out; a line the caller talked over says how
+// much of it they heard.
 
 import WebSocket from "ws";
 import { makePlayer, makeReorder } from "./pipeline.js";
@@ -229,6 +237,10 @@ export function makeRealtimeSession({
   hangup,
   onEnd = () => {},
   onLate = () => {}, // a use_tools result that came back after the call ended
+  // Each event of the call, for the ledger: { type, callId, caller, ... }, with
+  // type start, line, cut, late or end (see callRow in ledger.js). It is not
+  // awaited, and a failure is only logged: the call never waits on the ledger.
+  onCallEvent = () => {},
   log = console.log,
   now = () => Date.now(),
   apiKey,
@@ -257,7 +269,7 @@ export function makeRealtimeSession({
 }) {
   if (!apiKey) throw new Error("The OpenAI engine needs OPENAI_API_KEY");
   const player = makePlayer({ send: sendFrame, now });
-  const directTools = typeof makeTools === "function" ? makeTools({ caller }) : makeTools;
+  const directTools = typeof makeTools === "function" ? makeTools({ caller, callId: callControlId }) : makeTools;
   const usage = { audioIn: 0, audioCached: 0, textIn: 0, textCached: 0, audioOut: 0, textOut: 0 };
   const startedAt = now();
   let ws = null;
@@ -277,9 +289,39 @@ export function makeRealtimeSession({
   let update = null; // the still-working line that runs now: { id, heard, cancel }
   const jobs = new Set(); // use_tools calls (Alfred turns) that run now
   const marks = new Map(); // reply end marks sent to Telnyx and not echoed yet
+  const said = new Set(); // voice items whose line went to onCallEvent
+  const cuts = new Map(); // voice item → { heardMs, totalMs }: talked over before its line came
 
   const send = (obj) => {
     if (ws && ws.readyState === OPEN) ws.send(JSON.stringify(obj));
+  };
+
+  // One event for onCallEvent. Whatever the callback does, a throw or a
+  // rejected promise, the call goes on: it is logged and nothing more.
+  const emit = (ev) => {
+    const failed = (err) => log(`⚠️  Call event ${ev.type} failed: ${err?.message || err}`);
+    try {
+      Promise.resolve(onCallEvent({ ...ev, callId: callControlId, caller })).catch(failed);
+    } catch (err) {
+      failed(err);
+    }
+  };
+
+  // A line the voice spoke, for the ledger. A still-working line is filler,
+  // outside the conversation, so it is left out. A line the caller has already
+  // talked over says how much of it they heard.
+  const voiceLine = (m) => {
+    if (update?.id && m.response_id === update.id) return;
+    said.add(m.item_id);
+    emit({ type: "line", dir: "out", text: m.transcript.trim(), ...cuts.get(m.item_id) });
+  };
+
+  // The caller talked over a line after heardMs of it. A line already in the
+  // ledger gets a cut event after it; one whose transcript has not come yet
+  // carries the numbers itself (voiceLine).
+  const cutLine = (itemId, heardMs, totalMs) => {
+    if (said.has(itemId)) emit({ type: "cut", heardMs, totalMs });
+    else cuts.set(itemId, { heardMs, totalMs });
   };
 
   const appendAudio = (payload) => {
@@ -367,6 +409,7 @@ export function makeRealtimeSession({
     if (heard < total) {
       send({ type: "conversation.item.truncate", item_id: item.id, content_index: 0, audio_end_ms: heard });
       log(`📞 Barge-in: the caller talked over Alfred (heard ${heard} of ${Math.round(total)} ms)`);
+      cutLine(item.id, heard, Math.round(total));
     }
     item = null;
   };
@@ -421,13 +464,16 @@ export function makeRealtimeSession({
     }
     let reply = "";
     try {
-      reply = (await onTurn({ text: request, caller, takeMissed: () => false })) || "";
+      // callId: the turn's ledger rows carry it, so a reader can match them to
+      // this call's own lines.
+      reply = (await onTurn({ text: request, caller, callId: callControlId, takeMissed: () => false })) || "";
     } catch (err) {
       reply = `That failed: ${err.message}`;
     }
     jobs.delete(job);
     if (ended) {
       log(`📞 use_tools answered after the call ended, in ${now() - job.at} ms (${reply.length} chars)`);
+      if (reply.trim()) emit({ type: "late", request, text: reply });
       return onLate({ request, reply, caller });
     }
     log(`📞 use_tools answered in ${now() - job.at} ms (${reply.length} chars)`);
@@ -522,10 +568,16 @@ export function makeRealtimeSession({
         }
         return;
       case "conversation.item.input_audio_transcription.completed":
-        if (m.transcript?.trim()) log(`📞 Caller: ${oneLine(m.transcript)}`);
+        if (m.transcript?.trim()) {
+          log(`📞 Caller: ${oneLine(m.transcript)}`);
+          emit({ type: "line", dir: "in", text: m.transcript.trim() });
+        }
         return;
       case "response.output_audio_transcript.done":
-        if (m.transcript?.trim()) log(`🗣️  Voice: ${oneLine(m.transcript)}`);
+        if (m.transcript?.trim()) {
+          log(`🗣️  Voice: ${oneLine(m.transcript)}`);
+          voiceLine(m);
+        }
         return;
       case "response.function_call_arguments.done":
         if (m.name === USE_TOOLS.name) {
@@ -629,6 +681,7 @@ export function makeRealtimeSession({
         `about $${usd.toFixed(4)}${mins > 0 ? ` ($${(usd / mins).toFixed(4)}/min)` : ""}` +
         (jobs.size ? `, ${jobs.size} use_tools request(s) still running` : "")
     );
+    emit({ type: "end", reason, ms: now() - startedAt });
     if (hang) hangup().catch((err) => log(`⚠️  Hangup failed: ${err.message}`));
     onEnd();
   };
@@ -637,6 +690,7 @@ export function makeRealtimeSession({
     callControlId,
     caller,
     start() {
+      emit({ type: "start" });
       connect();
     },
     onFrame(msg) {

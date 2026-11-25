@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   makeLedger, srcOf, dayOf, parseRows, archiveName, parseArchiveName, inboundRow,
+  callRow, toolRow, retoldByCall,
 } from "../ledger.js";
 
 const tmp = () => mkdtempSync(path.join(tmpdir(), "alfred-ledger-"));
@@ -217,8 +218,8 @@ test("inboundRow names the saved files from the agent dir and keeps the count", 
     dir: "in", user: "kuba", userId: "1", channel: "c1", via: "sms", text: "what is this?", attachments: 2,
     files: ["var/memories/dailies/2026-11-24/sms-1-0-part0.jpg", "var/memories/dailies/2026-11-24/sms-1-1-a.pdf"],
   });
-  // Discord has no via, and a message with no files has no files field: the
-  // row is the same as before the field existed.
+  // No via (as older Discord rows had) and no files: the row is the same as
+  // before those fields existed.
   const plain = inboundRow({ who, via: undefined, text: "hi", agentDir });
   assert.equal(JSON.stringify(plain), '{"dir":"in","user":"kuba","userId":"1","channel":"c1","text":"hi","attachments":0}');
 });
@@ -233,4 +234,87 @@ test("an inbound row with files goes through append unchanged", async () => {
   const [written] = lines(file);
   assert.equal(written.attachments, 1);
   assert.deepEqual(written.files, ["var/memories/dailies/2026-11-24/9-0-photo.png"]);
+});
+
+// ── Phone calls ─────────────────────────────────────────────────────────────
+
+const CALL = { callId: "v3:abc", caller: "+15551234567" };
+const callRowOf = (extra) => ({ via: "call", src: "call", ...CALL, ...extra });
+
+test("callRow: a call's start, its lines both ways, a cut, a late answer and the end", () => {
+  assert.deepEqual(callRow({ type: "start", ...CALL }), callRowOf({ dir: "in", kind: "start", text: "" }));
+  assert.deepEqual(callRow({ type: "line", dir: "in", text: " Add kale to the list. ", ...CALL }), callRowOf({ dir: "in", text: "Add kale to the list." }));
+  assert.deepEqual(callRow({ type: "line", dir: "out", text: "Got it.", ...CALL }), callRowOf({ dir: "out", text: "Got it." }));
+  // A voice line the caller talked over before its transcript came.
+  assert.deepEqual(
+    callRow({ type: "line", dir: "out", text: "Milk, eggs, bread.", heardMs: 400, totalMs: 3000, ...CALL }),
+    callRowOf({ dir: "out", text: "Milk, eggs, bread.", heardMs: 400, totalMs: 3000 }),
+  );
+  assert.deepEqual(callRow({ type: "cut", heardMs: 400, totalMs: 3000, ...CALL }), callRowOf({ dir: "out", kind: "cut", text: "", heardMs: 400, totalMs: 3000 }));
+  assert.deepEqual(
+    callRow({ type: "end", ms: 125_400, reason: "call hung up", ...CALL }),
+    callRowOf({ dir: "in", kind: "end", text: "", secs: 125, reason: "call hung up" }),
+  );
+  assert.deepEqual(
+    callRow({ type: "late", request: "read the list", text: "Milk, eggs.", ...CALL }),
+    callRowOf({ dir: "out", kind: "late", text: "Milk, eggs.", request: "read the list" }),
+  );
+});
+
+test("callRow keeps nothing for an empty line or late answer, a line with no side, or an unknown event", () => {
+  assert.equal(callRow({ type: "line", dir: "in", text: "  ", ...CALL }), null);
+  assert.equal(callRow({ type: "line", text: "hi", ...CALL }), null);
+  assert.equal(callRow({ type: "late", request: "x", text: "", ...CALL }), null);
+  assert.equal(callRow({ type: "ringing", ...CALL }), null);
+});
+
+test("toolRow: a change the voice made, as an out row of its call", () => {
+  assert.deepEqual(toolRow({ text: ' added "Kale" (Notion page "Shopping list") ', ...CALL }), {
+    dir: "out", via: "call", src: "tool", ...CALL, text: 'added "Kale" (Notion page "Shopping list")',
+  });
+});
+
+test("retoldByCall: a call's turns, all of them when the caller's lines are there, else only the answers", () => {
+  const turn = (callId, dir, text) => ({ dir, via: "call", callId, text });
+  const rows = [
+    // A: transcribed. The caller's own lines tell the requests and the answers.
+    { src: "call", dir: "in", kind: "start", callId: "A" },
+    { src: "call", dir: "in", callId: "A", text: "Any email from Sarah?" },
+    { src: "call", dir: "out", callId: "A", text: "Yes, about the lease." },
+    // B: transcription off. Only the voice's lines: the request is kept.
+    { src: "call", dir: "in", kind: "start", callId: "B" },
+    { src: "call", dir: "out", callId: "B", text: "You have two meetings." },
+    // C: a tool row alone is not the call's lines.
+    { src: "tool", dir: "out", callId: "C", text: "added kale" },
+  ];
+  const retold = retoldByCall(rows);
+  assert.equal(retold(turn("A", "in", "check mail from Sarah")), true);
+  assert.equal(retold(turn("A", "out", "Sarah wrote about the lease.")), true);
+  assert.equal(retold(turn("B", "in", "what is on today")), false, "the only record of what was asked");
+  assert.equal(retold(turn("B", "out", "Two meetings.")), true, "the voice said it");
+  assert.equal(retold(turn("C", "in", "x")), false);
+  // A turn of a call from before call rows, or of no call, is never retold.
+  assert.equal(retold({ dir: "in", via: "call", text: "add milk" }), false);
+  assert.equal(retold({ dir: "out", kind: "reply", text: "Added." }), false);
+  // A call's own rows are never "retold": they are the telling.
+  assert.equal(retold(rows[1]), false);
+});
+
+test("inboundRow carries the call's id on a use_tools request, and only there", () => {
+  const who = { tag: "call:+15551234567", id: "+15551234567", channel: "call" };
+  const row = inboundRow({ who, via: "call", text: "Check for an email from Sarah", agentDir: "/a", callId: "v3:abc" });
+  assert.equal(row.callId, "v3:abc");
+  assert.equal("callId" in inboundRow({ who, via: "call", text: "hi", agentDir: "/a" }), false);
+});
+
+test("call and tool rows go through append with the ledger's ts, and the readers keep their src", async () => {
+  const { file, ledger } = setup({ now: () => Date.parse("2026-11-24T15:00:00.000Z") });
+  await ledger.append(callRow({ type: "start", ...CALL }));
+  await ledger.append(toolRow({ text: "added kale", ...CALL }));
+  await ledger.append(toolRow({ text: "added eggs" })); // no call known: no empty fields
+  const raw = readFileSync(file, "utf8").split("\n");
+  assert.equal(raw[0], '{"ts":"2026-11-24T15:00:00.000Z","dir":"in","via":"call","src":"call","kind":"start","callId":"v3:abc","caller":"+15551234567","text":""}');
+  assert.equal(raw[2], '{"ts":"2026-11-24T15:00:00.002Z","dir":"out","via":"call","src":"tool","text":"added eggs"}');
+  assert.deepEqual((await ledger.readAll()).map((r) => r.src), ["call", "tool", "tool"]);
+  assert.deepEqual((await ledger.tail({ where: { src: "call" } })).map((r) => r.kind), ["start"]);
 });

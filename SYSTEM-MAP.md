@@ -234,12 +234,17 @@ flowchart TD
     SPAWN -->|"reply = function output"| RT
     RT -->|"end_call: after the goodbye"| HU["hangup"]
     HU --> CC
+    RT -->|"onCallEvent: each line as it is said,<br/>start, end, a late answer · src call"| LED["messages.jsonl<br/>the ledger · ledger.js"]
+    VT -->|"each change · src tool"| LED
+    Q -->|"the use_tools turn · src chat<br/>with the call's id"| LED
     classDef external fill:#d6e2f2,stroke:#1f5fb8,color:#123f7d
     classDef gateway fill:#d8ebe2,stroke:#1b6b52,color:#12503c
     classDef stack fill:#f5e8d5,stroke:#b07a2a,color:#6e4a12
+    classDef store fill:#e7e7e7,stroke:#888,color:#333
     class CALL,CC,OA,N,G external
     class VP,BR gateway
     class SPAWN stack
+    class LED store
 ```
 
 **One caller turn.** The voice decides which path: answer itself (small talk,
@@ -254,6 +259,20 @@ caller stopped hearing it.
 and queued as a phone action; the next Alfred turn starts with that list, so
 he is never surprised by an edit he didn't make. The other way does not work
 yet: the voice gets no briefing of recent chat. That is part 2 in `TODO.md`.
+
+**The call in the ledger.** The call writes itself into `messages.jsonl` as it
+happens, not at the end: each caller line as transcribed, each voice line as
+spoken, the start, the end with its length, and an answer that came back after
+the hangup (`src: "call"`, with the caller and the call's id; `callRow` in
+`ledger.js`). Each direct-tool change is a `src: "tool"` row. Only what the
+caller heard is a line: the text of a silent tool chain never is, the
+still-working filler is left out, and a line the caller talked over says how
+much of it they heard. The `use_tools` turns stay chat rows (`via: "call"`,
+the same call id), because Alfred's session already holds them. So the ledger
+has a call twice, in two wordings, and a reader shows it once: from its own
+rows, leaving out the turns that retell them (`retoldByCall`). With
+transcription off, the requests stay, since the caller's words are not there.
+Today the fold is the only reader.
 
 **Guarantees here.** The allow list, signature and token checks in
 `pipeline.js`, and the broker's own rules (no guest-deletes), are code. In
@@ -618,7 +637,10 @@ with a ts later than the one before, archives the file on `/clear`, and reads
 it back (only the last bytes, or one Eastern day). Append and archive take one
 lock, so a row that arrives during an archive lands in the new file. An inbound
 row names the files saved with it (`files`, paths from `agent/`), so a fold can
-open a photo that the words do not describe.
+open a photo that the words do not describe. Every row names its channel
+(`via`), and a row's `src` says what wrote it: a chat turn, or a 2B call's own
+lines and tool changes, written as the call goes (see "The call in the ledger"
+above).
 
 **Every day with messages gets a daily note.** `fold.js` folds each ledger row
 into the note of its own Eastern day, one time. Two runs do it:
@@ -647,6 +669,7 @@ folders drawn below and the 3 AM cron — all key on Eastern through one helper,
 ```mermaid
 flowchart TD
     CTX["a turn's context"] -->|"appended, every turn · ledger.js"| LIVE["messages.jsonl<br/>the ledger"]
+    CALLV["a 2B call<br/>telnyx/realtime.js"] -->|"each line as it is said"| LIVE
     LIVE -.->|"resumes (not re-injected)"| CTX
     LIVE -.->|"/clear: archive"| ARCH["logs/ archives<br/>first_to_last.jsonl"]
     LIVE -.->|"nightly · dream.sh<br/>up to the end of yesterday"| FOLD["fold.js · scripts/fold-day.mjs<br/>claude -p per day · memory-prompt.md"]

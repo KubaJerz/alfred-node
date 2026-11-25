@@ -12,14 +12,27 @@
 //                before, so a watermark on ts (fold.js) is exact.
 //   dir          "in" | "out"
 //   text         the words
-//   via          "sms" | "call". Missing means Discord. Only in rows carry it.
+//   via          "discord" | "sms" | "call". Missing means Discord. Older out
+//                rows have none: they take the channel of their turn's in row.
 //   user, userId, channel   who sent an in row, and where
 //   attachments  in rows: how many files came with the message
 //   files        in rows: the saved files, as paths from the agent dir.
 //                Out rows: how many files the reply carried (a number).
-//   kind         out rows: "reply" | "silent" | "cancelled" | "error" | ...
-//   src          where the row came from. Missing means "chat", a turn through
-//                handleTurn. The readers here fill it in.
+//   kind         chat out rows: "reply" | "silent" | "cancelled" | "error" | ...
+//                Call rows: see callRow.
+//   src          where the row came from. Missing means "chat". The readers
+//                here fill it in.
+//                  chat  a turn through handleTurn: Alfred's own session.
+//                  call  a 2B phone call as it happened (callRow below).
+//                  tool  a change the voice made with its own tools on a
+//                        call (toolRow below).
+//   callId, caller   call and tool rows: the call and the number that called.
+//                A call's use_tools turns are chat rows with its callId.
+//
+// A call is in the ledger twice: its own lines (src "call"), and its use_tools
+// turns (src "chat", via "call"), which Alfred's session holds. They tell the
+// same requests and answers in other words, so a reader shows a call once:
+// see retoldByCall.
 //
 // One process writes the file: bot.js. append() and archive() share one lock,
 // so a row that arrives while /clear archives waits and lands in the new file.
@@ -82,7 +95,8 @@ export function parseArchiveName(name) {
 // The in row for a message the user sent. `files` names each saved file by its
 // path from the agent dir, so a fold or a reader can open a photo that the
 // words do not describe. `attachments` (the count) stays for older readers.
-export function inboundRow({ who, via, text, attachments = [], agentDir }) {
+// callId: the 2B call a use_tools request came from.
+export function inboundRow({ who, via, text, attachments = [], agentDir, callId }) {
   const row = {
     dir: "in",
     user: who.tag,
@@ -93,7 +107,72 @@ export function inboundRow({ who, via, text, attachments = [], agentDir }) {
     attachments: attachments.length,
   };
   if (attachments.length) row.files = attachments.map((p) => path.relative(agentDir, p));
+  if (callId) row.callId = callId;
   return row;
+}
+
+// ── Phone calls ─────────────────────────────────────────────────────────────
+
+// The row for an event of a 2B phone call (the onCallEvent option of
+// telnyx/realtime.js), or null for one with nothing to keep. Every call row
+// has via "call", src "call", the call's id and the caller's number.
+//
+//   start  the call began (dir "in").
+//   (none) a line: the caller's words as transcribed (dir "in"), or the
+//          voice's as it spoke them (dir "out"). heardMs/totalMs on a voice
+//          line: the caller talked over it, and heard only that much.
+//   cut    the caller talked over the voice line before it, after heardMs of
+//          totalMs (dir "out").
+//   end    the call ended (dir "in"): secs long. reason is why, in the bot
+//          log's words; it can name a service, so it is not for a prompt.
+//   late   an answer that came back after the call ended (dir "out"). It was
+//          sent in writing, never said. request is what it answers.
+export function callRow(ev) {
+  const call = { via: "call", src: "call" };
+  const who = { callId: ev.callId, caller: ev.caller };
+  const text = typeof ev.text === "string" ? ev.text.trim() : "";
+  switch (ev.type) {
+    case "start":
+      return { dir: "in", ...call, kind: "start", ...who, text: "" };
+    case "line": {
+      if (!text || (ev.dir !== "in" && ev.dir !== "out")) return null;
+      const heard = ev.heardMs != null ? { heardMs: ev.heardMs, totalMs: ev.totalMs } : {};
+      return { dir: ev.dir, ...call, ...who, text, ...heard };
+    }
+    case "cut":
+      return { dir: "out", ...call, kind: "cut", ...who, text: "", heardMs: ev.heardMs, totalMs: ev.totalMs };
+    case "end":
+      return { dir: "in", ...call, kind: "end", ...who, text: "", secs: Math.round((Number(ev.ms) || 0) / 1000), reason: ev.reason };
+    case "late":
+      return text ? { dir: "out", ...call, kind: "late", ...who, text, request: ev.request } : null;
+    default:
+      return null;
+  }
+}
+
+// The row for a change the voice made with its own tools on a call
+// (note() in telnyx/voice-tools.js): what changed, in plain words.
+export function toolRow({ text, caller, callId }) {
+  return { dir: "out", via: "call", src: "tool", callId, caller, text: String(text ?? "").trim() };
+}
+
+// A test for the chat rows of `rows` that a call's own rows already tell. A
+// call's use_tools turns (chat rows with its callId) retell it: the voice's
+// request for what the caller said, and Alfred's answer, which the voice then
+// said in its own words. So a reader that shows the call's own rows leaves out
+// all its turns when the caller's lines are there, and only the answers when
+// just the voice's are: with transcription off, the request is all that says
+// what was asked. A call with no rows of its own (from before them) keeps all.
+export function retoldByCall(rows) {
+  const heard = new Set(); // calls with the caller's own lines
+  const spoken = new Set(); // calls with the voice's lines, or a late answer
+  for (const row of rows) {
+    if (srcOf(row) !== "call" || !row.callId) continue;
+    if (row.dir === "in" && !row.kind) heard.add(row.callId);
+    if (row.dir === "out") spoken.add(row.callId);
+  }
+  return (row) =>
+    srcOf(row) === "chat" && !!row.callId && (heard.has(row.callId) || (row.dir === "out" && spoken.has(row.callId)));
 }
 
 const toMs = (t) => (t instanceof Date ? t.getTime() : typeof t === "number" ? t : Date.parse(t));

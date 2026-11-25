@@ -137,7 +137,76 @@ test("the transcript gives time, channel, who and words, with files and the turn
     "23:59 phone call · user: add milk",
     "23:59 phone call · Alfred: Added.",
     "    (sent 1 file with it)",
-    "23:59 phone call · Alfred [tool]: notion: added 'milk'",
+    "23:59 phone call · Alfred did: notion: added 'milk'",
+  ].join("\n"));
+});
+
+// A 2B call's rows, as bot.js writes them (callRow and toolRow in ledger.js).
+const CALL = { via: "call", callId: "v3:abc", caller: "+15551234567" };
+const line = (ts, dir, text, extra = {}) => ({ ts, dir, src: "call", ...CALL, text, ...extra });
+
+test("a call is told once: by its own lines, tool rows, start and end, not again by its use_tools turns", () => {
+  const rows = [
+    { ts: "2026-11-24T19:00:00.000Z", dir: "in", via: "discord", text: "I'm cooking pasta tonight", attachments: 0 },
+    line("2026-11-24T19:00:30.000Z", "in", "", { kind: "start" }),
+    line("2026-11-24T19:00:31.000Z", "out", "Hey."),
+    line("2026-11-24T19:00:35.000Z", "in", "Add kale to the shopping list."),
+    { ts: "2026-11-24T19:00:36.000Z", dir: "out", src: "tool", ...CALL, text: 'added "Kale" (Notion page "Shopping list")' },
+    // The Discord turn's reply lands during the call. An older reply has no
+    // via: it still takes its turn's channel, not the call's.
+    { ts: "2026-11-24T19:00:37.000Z", dir: "out", kind: "reply", text: "Enjoy!", files: 0 },
+    line("2026-11-24T19:00:38.000Z", "out", "Done, kale is on the list."),
+    line("2026-11-24T19:01:00.000Z", "in", "Any email from Sarah?"),
+    line("2026-11-24T19:01:01.000Z", "out", "One moment."),
+    // The use_tools turn: the same request and answer, in Alfred's session.
+    { ts: "2026-11-24T19:01:02.000Z", dir: "in", user: "call:+15551234567", via: "call", callId: "v3:abc", text: "Check for an email from Sarah", attachments: 0 },
+    { ts: "2026-11-24T19:01:10.000Z", dir: "out", via: "call", callId: "v3:abc", kind: "reply", text: "Yes: Sarah wants to sign the lease Friday.", files: 0 },
+    line("2026-11-24T19:01:12.000Z", "out", "Yes, Sarah wants to sign the lease on Friday."),
+    line("2026-11-24T19:01:14.000Z", "out", "", { kind: "cut", heardMs: 1500, totalMs: 4200 }),
+    line("2026-11-24T19:01:20.000Z", "out", "Your list has milk, eggs and bread.", { heardMs: 800, totalMs: 2600 }),
+    line("2026-11-24T19:02:30.000Z", "in", "", { kind: "end", secs: 120, reason: "call hung up" }),
+    line("2026-11-24T19:02:40.000Z", "out", "The lease PDF is in your inbox.", { kind: "late", request: "the lease" }),
+  ];
+  assert.equal(renderTranscript(rows), [
+    "14:00 Discord · user: I'm cooking pasta tonight",
+    "14:00 phone call · (the call starts)",
+    "14:00 phone call · Alfred: Hey.",
+    "14:00 phone call · user: Add kale to the shopping list.",
+    '14:00 phone call · Alfred did: added "Kale" (Notion page "Shopping list")',
+    "14:00 Discord · Alfred: Enjoy!",
+    "14:00 phone call · Alfred: Done, kale is on the list.",
+    "14:01 phone call · user: Any email from Sarah?",
+    "14:01 phone call · Alfred: One moment.",
+    "14:01 phone call · Alfred: Yes, Sarah wants to sign the lease on Friday.",
+    "14:01 phone call · (the user talked over that line: they heard about 1.5 s of 4.2 s)",
+    "14:01 phone call · Alfred: Your list has milk, eggs and bread.",
+    "    (the user talked over it: they heard about 0.8 s of 2.6 s)",
+    "14:02 phone call · (the call ends after 2 min)",
+    "14:02 phone call · Alfred, after the call ended (sent in writing, never said): The lease PDF is in your inbox.",
+  ].join("\n"));
+});
+
+test("a call without the caller's lines keeps its requests: they are all that says what was asked", () => {
+  // Transcription off: only the voice's lines, which say the answer. And a
+  // call from before the call rows, with no id at all: all of it stays.
+  const rows = [
+    line("2026-11-24T19:00:30.000Z", "in", "", { kind: "start" }),
+    line("2026-11-24T19:00:31.000Z", "out", "Hey."),
+    { ts: "2026-11-24T19:00:40.000Z", dir: "in", via: "call", callId: "v3:abc", text: "What is on today?", attachments: 0 },
+    { ts: "2026-11-24T19:00:48.000Z", dir: "out", via: "call", callId: "v3:abc", kind: "reply", text: "Two meetings.", files: 0 },
+    line("2026-11-24T19:00:50.000Z", "out", "You have two meetings today."),
+    line("2026-11-24T19:01:30.000Z", "in", "", { kind: "end", secs: 45 }),
+    { ts: "2026-11-24T21:00:00.000Z", dir: "in", via: "call", text: "add milk", attachments: 0 },
+    { ts: "2026-11-24T21:00:05.000Z", dir: "out", kind: "reply", text: "Added.", files: 0 },
+  ];
+  assert.equal(renderTranscript(rows), [
+    "14:00 phone call · (the call starts)",
+    "14:00 phone call · Alfred: Hey.",
+    "14:00 phone call · user: What is on today?",
+    "14:00 phone call · Alfred: You have two meetings today.",
+    "14:01 phone call · (the call ends after 45 s)",
+    "16:00 phone call · user: add milk",
+    "16:00 phone call · Alfred: Added.",
   ].join("\n"));
 });
 
@@ -284,6 +353,27 @@ test("an archive whose /clear fold failed is folded by the next nightly pass, da
     ["2026-11-23", ["msg-1"]],
     ["2026-11-24", ["msg-2", "msg-3"]],
   ]);
+});
+
+test("a call folds once into its day: its own lines go to the run, its use_tools turns ride along unsaid", async () => {
+  const w = world();
+  const call = { via: "call", callId: "v3:abc", caller: "+15551234567" };
+  await w.say("2026-11-23T19:00:00Z", "", { src: "call", kind: "start", ...call });
+  await w.say("2026-11-23T19:00:05Z", "msg-1 add kale to the list", { src: "call", ...call });
+  await w.say("2026-11-23T19:00:06Z", "msg-2 added kale", { dir: "out", src: "tool", ...call });
+  await w.say("2026-11-23T19:00:10Z", "msg-3 any mail from Sarah", { src: "call", ...call });
+  await w.say("2026-11-23T19:00:11Z", "msg-4 check the mail for Sarah", { via: "call", callId: "v3:abc" });
+  await w.say("2026-11-23T19:00:19Z", "msg-5 Sarah wrote about the lease", { dir: "out", kind: "reply", via: "call", callId: "v3:abc" });
+  await w.say("2026-11-23T19:00:21Z", "msg-6 Sarah wrote about the lease", { dir: "out", src: "call", ...call });
+  await w.say("2026-11-23T19:01:00Z", "", { src: "call", kind: "end", secs: 60, ...call });
+  const stub = stubRunner(w);
+  await nightly(w, stub.run, "2026-11-24T08:00:00Z");
+  assert.deepEqual(stub.calls.map((c) => [c.date, c.tokens]), [["2026-11-23", ["msg-1", "msg-2", "msg-3", "msg-6"]]]);
+  assert.match(stub.calls[0].prompt, /phone call · \(the call starts\)\n.*phone call · user: msg-1 add kale/);
+  // The watermark passed every row, the skipped ones too: nothing runs again.
+  assert.equal((await readWatermark(w.stateDir)).through, "2026-11-23T19:01:00.000Z");
+  await nightly(w, stub.run, "2026-11-24T08:05:00Z");
+  assert.equal(stub.calls.length, 1);
 });
 
 test("a day of only silent turns needs no run, and the watermark still passes it", async () => {

@@ -31,7 +31,7 @@ import { randomUUID } from "node:crypto";
 import { link, mkdir, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { TIMEZONE, dailyDir, dailyNotePath, easternDate } from "./dailies.js";
-import { dayOf, parseArchiveName, parseRows, srcOf } from "./ledger.js";
+import { dayOf, parseArchiveName, parseRows, retoldByCall, srcOf } from "./ledger.js";
 
 export const WATERMARK_FILE = "fold-watermark.json";
 export const LOCK_FILE = "fold.lock";
@@ -49,7 +49,7 @@ export const MAX_TRANSCRIPT_CHARS = 60_000;
 export const MAX_NOTE_CHARS = 20_000;
 export const FOLD_TIMEOUT_MS = 10 * 60 * 1000;
 
-const CHANNELS = { sms: "SMS", call: "phone call" };
+const CHANNELS = { discord: "Discord", sms: "SMS", call: "phone call" };
 
 // A path as the prompt gives it: from the agent dir (Claude's cwd), or whole
 // when it is outside it (a copy of the state dir).
@@ -237,24 +237,56 @@ function cut(text, max) {
 
 const indent = (text) => text.replace(/\n/g, "\n    ");
 const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+// Call times as the transcript says them: "2.4 s" heard, a call "45 s" or "4 min".
+const seconds = (ms) => `${(Number(ms) / 1000).toFixed(1)} s`;
+const duration = (s) => (s < 60 ? `${s} s` : `${Math.round(s / 60)} min`);
+
+// A row of a 2B call (src "call", callRow in ledger.js) after its head (time
+// and channel), or null for one with nothing to say. The voice is Alfred too.
+function callEntry(row, head, words) {
+  const heard = (what) => `(the user talked over ${what}: they heard about ${seconds(row.heardMs)} of ${seconds(row.totalMs)})`;
+  switch (row.kind) {
+    case "start":
+      return `${head} (the call starts)`;
+    case "end":
+      return `${head} (the call ends${row.secs > 0 ? ` after ${duration(row.secs)}` : ""})`;
+    case "cut":
+      return `${head} ${heard("that line")}`;
+    case "late":
+      return words ? `${head} Alfred, after the call ended (sent in writing, never said): ${words}` : null;
+    default: {
+      if (!words) return null;
+      const entry = `${head} ${row.dir === "in" ? "user" : "Alfred"}: ${words}`;
+      return row.heardMs != null ? `${entry}\n    ${heard("it")}` : entry;
+    }
+  }
+}
 
 // Each row as transcript text, or null for a row with nothing to say (a
 // silent or cancelled turn). One line per row: time, channel, who, words.
 // More lines of the message are indented under it, and so are the files.
-// An out row has no `via`, so it takes the channel of the last in row.
+// An older out row has no `via`, so it takes the channel of its turn's in row:
+// the last chat in row (a call's own lines are not turns).
+// A 2B call is told by its own rows: lines, tool changes, start and end. Its
+// use_tools turns retell it, so they are left out (retoldByCall in ledger.js).
 // dayDir: where that day's files are, for old rows that kept only a count.
 export function renderRows(rows, { dayDir, messageChars = MAX_MESSAGE_CHARS } = {}) {
+  const retold = retoldByCall(rows);
   let channel = "Discord";
   return rows.map((row) => {
-    if (row.dir === "in") channel = CHANNELS[row.via] || "Discord";
-    const where = CHANNELS[row.via] || channel;
     const src = srcOf(row);
-    const tag = src === "chat" ? "" : ` [${src}]`;
-    const time = clock.format(new Date(row.ts));
+    if (row.dir === "in" && src === "chat") channel = CHANNELS[row.via] || "Discord";
+    const where = CHANNELS[row.via] || channel;
+    const head = `${clock.format(new Date(row.ts))} ${where} ·`;
     const text = typeof row.text === "string" ? row.text.trim() : "";
+    const words = text && indent(cut(text, messageChars));
+    if (src === "call") return callEntry(row, head, words);
+    if (src === "tool") return words ? `${head} Alfred did: ${words}` : null;
+    if (retold(row)) return null;
+    const tag = src === "chat" ? "" : ` [${src}]`;
     let entry;
     if (row.dir === "in") {
-      entry = `${time} ${where} · user${tag}: ${text ? indent(cut(text, messageChars)) : "(no words)"}`;
+      entry = `${head} user${tag}: ${words || "(no words)"}`;
       if (Array.isArray(row.files) && row.files.length) {
         entry += `\n    files: ${row.files.join(", ")}`;
       } else if (row.attachments > 0) {
@@ -264,11 +296,11 @@ export function renderRows(rows, { dayDir, messageChars = MAX_MESSAGE_CHARS } = 
     } else {
       if (row.kind === "silent" || row.kind === "cancelled") return null;
       if (["error", "timeout", "auth_error"].includes(row.kind)) {
-        entry = `${time} ${where} · Alfred${tag}: (no answer: the turn failed)`;
+        entry = `${head} Alfred${tag}: (no answer: the turn failed)`;
       } else if (!text && !(row.files > 0)) {
         return null;
       } else {
-        entry = `${time} ${where} · Alfred${tag}: ${text ? indent(cut(text, messageChars)) : "(only files)"}`;
+        entry = `${head} Alfred${tag}: ${words || "(only files)"}`;
         if (row.files > 0) entry += `\n    (sent ${plural(row.files, "file")} with it)`;
       }
     }
