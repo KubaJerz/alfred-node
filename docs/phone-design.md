@@ -51,7 +51,9 @@ webhook server (`telnyx/mms.js`). Telnyx limits: 10 files per message, about
 1 MB per file. MMS Transcoding is on in the messaging profile, so a bigger
 photo or video is shrunk by Telnyx; any other file over 1 MB stays in Discord.
 
-Not built: Alfred texting first (reminders).
+Alfred texts first only for a reminder (#150, `reminders/service.js`), and
+only to Kuba. A reminder to another person goes by Discord. The steps below
+come before any text to another person.
 
 The campaign allows texts only to people who gave Kuba verbal consent. Kuba
 reads them this script:
@@ -64,8 +66,9 @@ reads them this script:
 > purposes.
 
 The bot does not text anyone but Kuba yet: it drops every number that is not
-in `SMS_ALLOWED_NUMBERS`. A stranger who texts first gets no reply, and that
-must stay true. Before it texts anyone else, it must:
+in `SMS_ALLOWED_NUMBERS`, and the reminder service texts the "me" contact
+only. A stranger who texts first gets no reply, and that must stay true.
+Before it texts anyone else, it must:
 
 - start each new contact with the confirmation text ("You have agreed to
   receive SMS updates from Jakub Jerzmanowski. Msg freq may vary. Std msg &

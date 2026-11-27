@@ -1,12 +1,16 @@
 // Run with: npm test   (node's built-in runner, no network, no credentials)
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import {
   easternDate,
   dailyDir,
   dailyNotePath,
   attachmentName,
   buildAttachmentBlock,
+  makeActionNotes,
 } from "../dailies.js";
 
 test("easternDate keys on the Eastern day, not UTC — after midnight UTC (EDT)", () => {
@@ -62,4 +66,51 @@ test("buildAttachmentBlock delimits the paths and names them as files to open", 
   assert.match(block, /\[\/ATTACHMENTS\]$/);
   assert.ok(block.includes("/m/dailies/2026-08-14/1-a.png"));
   assert.ok(block.includes("/m/dailies/2026-08-14/1-b.pdf"));
+});
+
+// The notes about what happened between turns. The phone wording must stay as
+// it was before reminders used the same helper.
+test("makeActionNotes writes each action to today's note and gives it once to the next message", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "alfred-dailies-"));
+  const notes = makeActionNotes({ memoriesDir: dir, now: () => new Date("2026-11-24T22:05:00Z") }); // 17:05 EST
+  await notes.note("phone", 'added "Milk" (Notion page "Shopping list")');
+  await notes.note("reminder", 'Reminder r7k2 "Call mom" went to me by Discord and SMS.');
+  await notes.note("reminder", 'Job j3x9 "brief" ran. Its result went to me by Discord.');
+
+  const daily = readFileSync(path.join(dir, "dailies", "2026-11-24", "daily.md"), "utf8");
+  assert.equal(
+    daily,
+    '\n## 17:05 — By phone\nThe phone voice added "Milk" (Notion page "Shopping list").\n' +
+      '\n## 17:05 — Reminders\nReminder r7k2 "Call mom" went to me by Discord and SMS.\n' +
+      '\n## 17:05 — Reminders\nJob j3x9 "brief" ran. Its result went to me by Discord.\n'
+  );
+
+  assert.equal(
+    notes.take(),
+    '[Done on a phone call by the voice, without you, since your last message:\n- added "Milk" (Notion page "Shopping list")]\n\n' +
+      '[Sent from your reminder list since your last message ("me" is your user):\n' +
+      '- Reminder r7k2 "Call mom" went to me by Discord and SMS.\n' +
+      '- Job j3x9 "brief" ran. Its result went to me by Discord.]\n\n'
+  );
+  assert.equal(notes.take(), "", "a second take finds nothing");
+});
+
+test("makeActionNotes keeps a kind with nothing out of the block, and logs a failed write", async () => {
+  const logs = [];
+  const notes = makeActionNotes({
+    memoriesDir: "/nowhere",
+    append: async () => {
+      throw new Error("read-only file system");
+    },
+    log: (line) => logs.push(line),
+  });
+  assert.equal(notes.take(), "");
+  await notes.note("reminder", "A catch-up summary went to me by Discord.");
+  assert.deepEqual(logs, ["⚠️  Could not note a reminder action: read-only file system"]);
+  assert.equal(
+    notes.take(),
+    '[Sent from your reminder list since your last message ("me" is your user):\n- A catch-up summary went to me by Discord.]\n\n',
+    "a failed note write still reaches the next message"
+  );
+  assert.throws(() => notes.note("fax", "x"), /no action kind "fax"/);
 });
