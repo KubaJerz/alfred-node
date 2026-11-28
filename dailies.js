@@ -26,6 +26,7 @@
 // offset) handles DST for free.
 
 import path from "path";
+import { mkdir, appendFile } from "fs/promises";
 
 export const TIMEZONE = "America/New_York";
 
@@ -78,4 +79,67 @@ export function buildAttachmentBlock(paths) {
     "Open the ones relevant to the request with your Read tool:\n" +
     `${lines}\n[/ATTACHMENTS]`
   );
+}
+
+// Things that happen without Alfred, between his turns: the reminder list
+// sends a reminder or a job result ("reminder"). Alfred must know about them
+// the same day, on any channel. So note() puts each one in two places:
+//
+//   - today's daily note, at once, under the heading of its kind
+//   - a list in memory, which take() puts at the front of his next message
+//
+// The 2B voice's own tool changes are not a kind here: they are ledger rows
+// (toolRow in ledger.js), which his next turn reads (the catch-up in
+// context.js) and the nightly fold writes into the note.
+//
+// A kind is { heading, line(text), intro }: the daily-note heading, the
+// sentence in the note, and the first line of the block in the next message.
+export const ACTION_KINDS = {
+  reminder: {
+    heading: "Reminders",
+    line: (text) => text,
+    intro: 'Sent from your reminder list since your last message ("me" is your user):',
+  },
+};
+
+async function appendNote(file, text) {
+  await mkdir(path.dirname(file), { recursive: true });
+  await appendFile(file, text);
+}
+
+/**
+ * @param {{
+ *   memoriesDir: string,
+ *   kinds?: typeof ACTION_KINDS,
+ *   now?: () => Date,
+ *   append?: (file: string, text: string) => Promise<void>,  // for tests
+ *   log?: (line: string) => void,
+ * }} opts
+ * @returns {{ note(kind: string, text: string): Promise<void>, take(): string }}
+ *   note() never rejects: a failed write is logged. take() empties the list.
+ */
+export function makeActionNotes({ memoriesDir, kinds = ACTION_KINDS, now = () => new Date(), append = appendNote, log = console.error }) {
+  const pending = new Map(Object.keys(kinds).map((kind) => [kind, []]));
+  const clock = new Intl.DateTimeFormat("en-GB", { timeZone: TIMEZONE, hour: "2-digit", minute: "2-digit" });
+  return {
+    note(kind, text) {
+      const k = kinds[kind];
+      if (!k) throw new Error(`no action kind "${kind}"`);
+      pending.get(kind).push(text);
+      const at = now();
+      const file = dailyNotePath(memoriesDir, easternDate(at));
+      return Promise.resolve()
+        .then(() => append(file, `\n## ${clock.format(at)} — ${k.heading}\n${k.line(text)}\n`))
+        .catch((err) => log(`⚠️  Could not note a ${kind} action: ${err.message}`));
+    },
+    take() {
+      let out = "";
+      for (const [kind, list] of pending) {
+        if (!list.length) continue;
+        const lines = list.splice(0).map((t) => `- ${t}`).join("\n");
+        out += `[${kinds[kind].intro}\n${lines}]\n\n`;
+      }
+      return out;
+    },
+  };
 }

@@ -1,6 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { makeVoiceTools, numberLines, nextDay, timeNow } from "../telnyx/voice-tools.js";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { makeVoiceTools, numberLines, nextDay, timeNow, REMINDERS_TOOL } from "../telnyx/voice-tools.js";
+import { makeStore } from "../reminders/store.js";
+import { makeReminders } from "../reminders/service.js";
+import { parseContacts } from "../reminders/contacts.js";
+import { makeReminderRoutes } from "../reminders/routes.js";
 
 const todo = (id, text, checked = false, children) => ({
   id, type: "to_do", to_do: { checked, rich_text: [{ plain_text: text, text: { content: text }, annotations: {} }] },
@@ -369,4 +376,259 @@ test("calendar edit of several events changes one field on each, never their tim
   assert.match(await t.call("calendar", { action: "edit", events: [1, 2], color: "tomato" }), /^Done: changed "Lab meeting", "Holiday" \(color tomato\)\./);
   assert.equal(c.log.filter((l) => l[0] === "edit").length, 2);
   assert.match(await t.call("calendar", { action: "edit", events: [1, 2], start: "2026-11-27T16:00" }), /change times one event at a time/);
+});
+
+// ── Reminders ───────────────────────────────────────────────────────────────
+
+// A reminder list in memory that answers with the reminder routes' shapes.
+function fakeReminders() {
+  const log = [];
+  const r = (id, text, dueText, extra = {}) => ({ id, kind: "reminder", text, dueText, repeatText: null, snoozed: false, to: ["me"], status: "active", ...extra });
+  const list = [
+    r("r2aa", "Call the bank", "Wed Nov 25, 9:00 AM"),
+    r("r3bb", "Stand-up", "Wed Nov 25, 9:30 AM", { repeatText: "every Monday and Wednesday at 9:30 AM" }),
+    r("r4cc", "Take out the bins", "Thu Nov 26, 7:00 PM", { to: ["me", "mom"] }),
+    r("r5dd", "Bank transfer", "Fri Nov 27, 8:00 AM"),
+  ];
+  const find = (params) => list.find((e) => e.id === params.get("id"));
+  const routes = {
+    "GET /reminders": async ({ params }) => {
+      log.push(["list", params.get("kind")]);
+      return { entries: list.filter((e) => e.status === "active") };
+    },
+    "POST /reminders": async ({ body }) => {
+      log.push(["add", body]);
+      if (body.at === "2026-11-01T09:00") return { error: "Sun Nov 1, 9:00 AM is in the past", status: 400 };
+      const entry = r(`r9${list.length}`, body.text, "Fri Nov 27, 3:00 PM", body.repeat ? { repeatText: `every day at ${body.time}` } : {});
+      list.unshift(entry); // due first, so it lists first
+      return { entry, line: `${entry.id}: "${entry.text}"` };
+    },
+    "DELETE /reminders": async ({ params }) => {
+      log.push(["cancel", params.get("id")]);
+      const e = find(params);
+      if (e.id === "r5dd") return { error: "the list is not loaded yet", status: 503 };
+      e.status = "cancelled";
+      return { entry: e, line: `Cancelled ${e.id}: "${e.text}".` };
+    },
+    "POST /reminders/snooze": async ({ params, body }) => {
+      log.push(["snooze", params.get("id"), body]);
+      const e = find(params);
+      Object.assign(e, { dueText: body.for ? "Tue Nov 24, 3:30 PM" : "Wed Nov 25, 10:00 AM", snoozed: true });
+      return { entry: e, line: `Snoozed ${e.id}` };
+    },
+  };
+  return { routes, log };
+}
+
+function reminderTools(routes = fakeReminders().routes) {
+  const notes = [];
+  const t = makeVoiceTools({
+    notionRoutes: {},
+    calendarRoutes: {},
+    reminderRoutes: routes,
+    fetchBlockChildren: async () => [],
+    note: (x) => notes.push(x),
+    now: () => new Date("2026-11-24T20:00:00Z"),
+  });
+  return { t, notes };
+}
+
+test("the reminders tool is there only with reminder routes, in the defs too", () => {
+  const { t } = reminderTools();
+  assert.deepEqual(t.names, ["notion", "calendar", "reminders", "get_time"]);
+  assert.deepEqual(t.defs.map((d) => d.name), t.names);
+  assert.match(REMINDERS_TOOL.description, /Never guess a time: ask/);
+  assert.match(REMINDERS_TOOL.description, /Eastern, written like 2026-11-27T15:00/);
+  // No field takes a person: a reminder from the voice goes to the user only.
+  assert.ok(!["to", "phone", "number", "via"].some((k) => k in REMINDERS_TOOL.parameters.properties));
+});
+
+test("reminders list numbers the user's reminders, and names only other people", async () => {
+  const f = fakeReminders();
+  const { t } = reminderTools(f.routes);
+  assert.equal(
+    await t.call("reminders", { action: "list" }),
+    "1. Call the bank — Wed Nov 25, 9:00 AM\n" +
+      "2. Stand-up — every Monday and Wednesday at 9:30 AM, next Wed Nov 25, 9:30 AM\n" +
+      "3. Take out the bins — Thu Nov 26, 7:00 PM, to me and mom\n" +
+      "4. Bank transfer — Fri Nov 27, 8:00 AM"
+  );
+  assert.deepEqual(f.log[0], ["list", "reminder"], "jobs are not the voice's to see");
+});
+
+test("reminders add: a time, a wait, or a repeat. Each add is noted", async () => {
+  const f = fakeReminders();
+  const { t, notes } = reminderTools(f.routes);
+  assert.equal(await t.call("reminders", { action: "add", text: "Call mom", at: "2026-11-27T15:00" }), 'Done: added "Call mom" for Fri Nov 27, 3:00 PM.');
+  assert.deepEqual(f.log.at(-1), ["add", { text: "Call mom", at: "2026-11-27T15:00" }]);
+  await t.call("reminders", { action: "add", text: "Laundry", in: "30m", days: [], day: "" });
+  assert.deepEqual(f.log.at(-1), ["add", { text: "Laundry", in: "30m" }], "empty fields are left out");
+  const weekly = await t.call("reminders", { action: "add", text: "Pills", repeat: "weekly", time: "08:00", days: ["MO", "TH"] });
+  assert.deepEqual(f.log.at(-1), ["add", { text: "Pills", repeat: "weekly", time: "08:00", days: ["MO", "TH"] }]);
+  assert.equal(weekly, 'Done: added "Pills", every day at 08:00.');
+  assert.deepEqual(notes, [
+    'added the reminder "Call mom" for Fri Nov 27, 3:00 PM',
+    'added the reminder "Laundry" for Fri Nov 27, 3:00 PM',
+    'added the reminder "Pills", every day at 08:00',
+  ]);
+});
+
+test("reminders add with no time asks, and makes no call", async () => {
+  const f = fakeReminders();
+  const { t, notes } = reminderTools(f.routes);
+  assert.match(await t.call("reminders", { action: "add", text: "Call mom" }), /^That didn't work: say when\. Never guess a time: ask the caller\.$/);
+  assert.match(await t.call("reminders", { action: "add", at: "2026-11-27T15:00" }), /say what the reminder is for/);
+  assert.equal(f.log.length, 0);
+  // A refusal from the route is words the voice can say, and nothing is noted.
+  assert.match(await t.call("reminders", { action: "add", text: "x", at: "2026-11-01T09:00" }), /^That didn't work: Sun Nov 1, 9:00 AM is in the past\.$/);
+  assert.equal(notes.length, 0);
+});
+
+test("reminders cancel by number needs a list, and the numbers hold after a change", async () => {
+  const f = fakeReminders();
+  const { t, notes } = reminderTools(f.routes);
+  assert.match(await t.call("reminders", { action: "cancel", reminders: [1] }), /list the reminders first, or give match/);
+  await t.call("reminders", { action: "list" });
+  const out = await t.call("reminders", { action: "cancel", reminders: [1, 3] });
+  assert.match(out, /^Done: cancelled "Call the bank", "Take out the bins"\./);
+  assert.deepEqual(f.log.filter((l) => l[0] === "cancel"), [["cancel", "r2aa"], ["cancel", "r4cc"]]);
+  // The list again, numbers kept: Stand-up is still 2.
+  assert.match(out, /\n\n2\. Stand-up .*\n4\. Bank transfer/);
+  assert.deepEqual(notes, ['cancelled the reminders "Call the bank", "Take out the bins"']);
+  // A new reminder gets the next number, not a free one.
+  assert.match(await t.call("reminders", { action: "add", text: "Dentist", at: "2026-11-27T15:00" }), /\n\n5\. Dentist — /);
+});
+
+test("reminders cancel by match needs no list. Several matches ask which", async () => {
+  const f = fakeReminders();
+  const { t, notes } = reminderTools(f.routes);
+  assert.match(await t.call("reminders", { action: "cancel", match: "stand-up" }), /^Done: cancelled "Stand-up"\./);
+  assert.deepEqual(f.log.filter((l) => l[0] === "cancel"), [["cancel", "r3bb"]]);
+  const several = await t.call("reminders", { action: "cancel", match: "bank" });
+  assert.match(several, /"bank" could be:\n1\. Call the bank .*\n4\. Bank transfer .*\nsay which by number/);
+  assert.equal(f.log.filter((l) => l[0] === "cancel").length, 1, "nothing more was cancelled");
+  assert.match(await t.call("reminders", { action: "cancel", match: "dentist" }), /no reminder says "dentist"/);
+  // One failed, one done: both are said plainly.
+  const mixed = await t.call("reminders", { action: "cancel", reminders: [1, 4, 7] });
+  assert.match(mixed, /^Cancelled "Call the bank"\. No reminder 7\. "Bank transfer" was not cancelled: the list is not loaded yet\./);
+  assert.equal(notes.length, 2);
+});
+
+test("reminders snooze: for a wait or until a time, one reminder at a time", async () => {
+  const f = fakeReminders();
+  const { t, notes } = reminderTools(f.routes);
+  assert.match(await t.call("reminders", { action: "snooze", match: "bins" }), /say for how long \(for\), or until when \(at\)/);
+  assert.match(await t.call("reminders", { action: "snooze", match: "bins", for: "1h", at: "2026-11-25T10:00" }), /give for or at, not both/);
+  assert.equal(await t.call("reminders", { action: "snooze", match: "bins", for: "1h" }), 'Done: snoozed "Take out the bins" to Tue Nov 24, 3:30 PM.\n\n' +
+    "1. Call the bank — Wed Nov 25, 9:00 AM\n" +
+    "2. Stand-up — every Monday and Wednesday at 9:30 AM, next Wed Nov 25, 9:30 AM\n" +
+    "3. Take out the bins — Tue Nov 24, 3:30 PM (snoozed), to me and mom\n" +
+    "4. Bank transfer — Fri Nov 27, 8:00 AM");
+  assert.deepEqual(f.log.filter((l) => l[0] === "snooze"), [["snooze", "r4cc", { for: "1h" }]]);
+  await t.call("reminders", { action: "snooze", reminders: [1], at: "2026-11-25T10:00" });
+  assert.deepEqual(f.log.at(-2), ["snooze", "r2aa", { until: "2026-11-25T10:00" }]);
+  assert.match(await t.call("reminders", { action: "snooze", reminders: [1, 2], for: "1h" }), /snooze one reminder at a time/);
+  assert.deepEqual(notes, [
+    'snoozed the reminder "Take out the bins" to Tue Nov 24, 3:30 PM',
+    'snoozed the reminder "Call the bank" to Wed Nov 25, 10:00 AM',
+  ]);
+});
+
+// The fields the tool sends must be ones the real routes accept. A fake
+// cannot show that, so this runs the real service on a temp file.
+test("reminders on the real routes: the tool's fields are ones the service accepts", async () => {
+  const clock = { t: Date.parse("2026-11-24T17:00:00Z") }; // Tue Nov 24, 12:00 PM Eastern
+  const service = makeReminders({
+    store: makeStore({ file: path.join(mkdtempSync(path.join(tmpdir(), "alfred-voice-reminders-")), "reminders.json") }),
+    contacts: parseContacts({ spec: "mom=discord:100000000000000002|+15550000002", ownerDiscordId: "100000000000000001", ownerSms: "+15550000001" }),
+    jobs: {
+      available: () => [{ name: "backup", kind: "code" }],
+      has: (name) => name === "backup",
+      run: async () => ({ ok: true, output: "", error: "", kind: "code" }),
+    },
+    sendDiscord: async () => {},
+    sendSms: async () => "msg-1",
+    smsEnabled: true,
+    now: () => clock.t,
+    log: () => {},
+  });
+  await service.load();
+  await service.add({ job: "backup", repeat: "daily", time: "03:00" }); // a job: never the voice's
+  await service.add({ text: "Call mom", in: "1h", to: "mom" });
+  const { t, notes } = reminderTools(makeReminderRoutes(service));
+
+  assert.equal(await t.call("reminders", { action: "add", text: "Call the bank", at: "2026-11-25T17:00" }), 'Done: added "Call the bank" for Wed Nov 25, 5:00 PM.');
+  assert.equal(await t.call("reminders", { action: "add", text: "Laundry", in: "30m" }), 'Done: added "Laundry" for Tue Nov 24, 12:30 PM.');
+  assert.equal(
+    await t.call("reminders", { action: "add", text: "Stand-up", repeat: "weekly", time: "09:00", days: ["MO", "WE"] }),
+    'Done: added "Stand-up", every Monday and Wednesday at 9:00 AM.'
+  );
+  assert.equal(
+    await t.call("reminders", { action: "add", text: "Pay rent", repeat: "monthly", time: "08:00", day: "last" }),
+    'Done: added "Pay rent", every month on the last day at 8:00 AM.'
+  );
+  assert.match(await t.call("reminders", { action: "add", text: "Pills", repeat: "daily", time: "8am" }), /^That didn't work: time must be HH:MM/);
+
+  assert.equal(
+    await t.call("reminders", { action: "list" }),
+    "1. Laundry — Tue Nov 24, 12:30 PM\n" +
+      "2. Call mom — Tue Nov 24, 1:00 PM, to mom\n" +
+      "3. Stand-up — every Monday and Wednesday at 9:00 AM, next Wed Nov 25, 9:00 AM\n" +
+      "4. Call the bank — Wed Nov 25, 5:00 PM\n" +
+      "5. Pay rent — every month on the last day at 8:00 AM, next Mon Nov 30, 8:00 AM"
+  );
+  assert.match(await t.call("reminders", { action: "snooze", match: "bank", at: "2026-11-25T18:00" }), /^Done: snoozed "Call the bank" to Wed Nov 25, 6:00 PM\./);
+  assert.match(await t.call("reminders", { action: "cancel", reminders: [1] }), /^Done: cancelled "Laundry"\./);
+
+  const active = service.list({ kind: "reminder" });
+  assert.deepEqual(active.map((e) => e.text), ["Call mom", "Stand-up", "Call the bank", "Pay rent"]);
+  assert.equal(active[2].dueText, "Wed Nov 25, 6:00 PM");
+  assert.ok(active.filter((e) => e.text !== "Call mom").every((e) => e.to.length === 1 && e.to[0] === "me"), "the voice reminds the user only");
+  assert.equal(service.list({ kind: "job" }).length, 1, "the job is still there");
+  assert.equal(notes.length, 6);
+});
+
+// "Remind me again in 10 minutes" right after a reminder went out: the
+// reminder is done, so the list leaves it out, but snooze finds it.
+test("reminders snooze by match finds a one-time reminder that went out in the last hours", async () => {
+  const clock = { t: Date.parse("2026-11-24T17:00:00Z") }; // Tue Nov 24, 12:00 PM Eastern
+  const sent = [];
+  const service = makeReminders({
+    store: makeStore({ file: path.join(mkdtempSync(path.join(tmpdir(), "alfred-voice-snooze-")), "reminders.json") }),
+    contacts: parseContacts({ ownerDiscordId: "100000000000000001", ownerSms: "+15550000001" }),
+    sendDiscord: async (to, text) => sent.push(text),
+    sendSms: async () => "msg-1",
+    smsEnabled: true,
+    now: () => clock.t,
+    log: () => {},
+  });
+  await service.load();
+  const notes = [];
+  const t = makeVoiceTools({
+    notionRoutes: {},
+    calendarRoutes: {},
+    reminderRoutes: makeReminderRoutes(service),
+    fetchBlockChildren: async () => [],
+    note: (x) => notes.push(x),
+    now: () => new Date(clock.t),
+  });
+  assert.equal(await t.call("reminders", { action: "add", text: "Laundry", in: "10m" }), 'Done: added "Laundry" for Tue Nov 24, 12:10 PM.');
+  clock.t += 10 * 60_000;
+  await service.tick();
+  assert.deepEqual(sent, ["⏰ Laundry"]);
+  assert.equal(await t.call("reminders", { action: "list" }), "No reminders are set.", "a reminder that went out is not in the list");
+
+  assert.equal(
+    await t.call("reminders", { action: "snooze", match: "laundry", for: "10m" }),
+    'Done: snoozed "Laundry" to Tue Nov 24, 12:20 PM.\n\n1. Laundry — Tue Nov 24, 12:20 PM (snoozed)'
+  );
+  assert.equal(notes.at(-1), 'snoozed the reminder "Laundry" to Tue Nov 24, 12:20 PM');
+  assert.equal(service.list({ kind: "reminder" })[0].status, "active");
+
+  // Six hours later it is too old to find, and cancel never looks at it.
+  clock.t += 10 * 60_000;
+  await service.tick();
+  clock.t += 6 * 3_600_000;
+  assert.match(await t.call("reminders", { action: "snooze", match: "laundry", for: "10m" }), /no reminder says "laundry"/);
+  assert.match(await t.call("reminders", { action: "cancel", match: "laundry" }), /no reminder says "laundry"/);
 });

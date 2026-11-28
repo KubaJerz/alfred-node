@@ -88,6 +88,15 @@ export function smsText(text, { files = 0, filesNote = "sent in Discord", overfl
   return (t + tail).trim();
 }
 
+// One Telnyx API error as text: its code, its title and its detail. The code
+// and the title name the cause. For a number that sent STOP, they are "40300
+// Blocked due to STOP message", and the detail names only a "block rule".
+function errorText(e) {
+  const head = [e?.code, e?.title].filter(Boolean).join(" ");
+  const detail = e?.detail && e.detail !== e.title ? e.detail : "";
+  return [head, detail].filter(Boolean).join(": ");
+}
+
 // Send one SMS, or an MMS when mediaUrls is not empty (public URLs that Telnyx
 // fetches; see telnyx/mms.js). Returns the Telnyx message id. Throws with the
 // API's own error text, so a carrier block (for example, an unverified
@@ -105,7 +114,7 @@ export async function sendSms({ apiKey, from, to, text, mediaUrls = [], messagin
   });
   const json = await res.json().catch(() => ({}));
   if (!res.ok) {
-    const detail = json?.errors?.map((e) => e.detail || e.title).join("; ") || `HTTP ${res.status}`;
+    const detail = (json?.errors || []).map(errorText).filter(Boolean).join("; ") || `HTTP ${res.status}`;
     throw new Error(`Telnyx send failed: ${detail}`);
   }
   return json?.data?.id || null;
@@ -148,8 +157,12 @@ export function makeSmsAck({ delayMs, send, setTimer = setTimeout, clearTimer = 
 // stranger that the number is live, and it costs money.
 //
 // Delivery reports (message.finalized) come to the same URL. A failed one is
-// logged, because that is where a carrier block shows up.
-export function makeMessagingRoute({ ourNumber, allowFrom, onText, log = console.log }) {
+// logged, because that is where a carrier block shows up. onReport (optional)
+// gets every report as { id, statuses, errors }: the Telnyx message id, the
+// status for each recipient, and the code of each error (40300 is a number
+// that sent STOP). The reminder service (reminders/service.js) uses it to
+// confirm a delivery. An error in onReport is logged, and the route goes on.
+export function makeMessagingRoute({ ourNumber, allowFrom, onText, onReport = null, log = console.log }) {
   const ours = normalizeNumber(ourNumber);
   const allowed = new Set(allowFrom.map(normalizeNumber));
   return async (data) => {
@@ -157,6 +170,17 @@ export function makeMessagingRoute({ ourNumber, allowFrom, onText, log = console
     if (data?.event_type === "message.finalized") {
       const failed = (p.to || []).filter((t) => t.status && t.status !== "delivered");
       if (failed.length) log(`📵 SMS ${p.id} not delivered: ${failed.map((t) => t.status).join(", ")}`);
+      if (onReport) {
+        try {
+          await onReport({
+            id: p.id,
+            statuses: (p.to || []).map((t) => t.status),
+            errors: (p.errors || []).map((e) => String(e?.code ?? "")).filter(Boolean),
+          });
+        } catch (err) {
+          log(`⚠️  SMS report for ${p.id}: ${err.message}`);
+        }
+      }
       return;
     }
     if (data?.event_type !== "message.received") return;

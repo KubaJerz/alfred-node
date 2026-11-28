@@ -75,6 +75,33 @@ test("sendSms posts to Telnyx and surfaces API errors", async () => {
   await assert.rejects(sendSms({ from: "a", to: "b", text: "c" }), /TELNYX_API_KEY/);
 });
 
+test("a send error keeps the Telnyx code and title: the detail of a STOP does not say STOP", async () => {
+  const stopped = async () => ({
+    ok: false,
+    status: 403,
+    json: async () => ({
+      errors: [
+        {
+          code: "40300",
+          title: "Blocked due to STOP message",
+          detail: "Messages cannot be sent from '+18005550100' to '+15551234567' due to an existing block rule.",
+        },
+      ],
+    }),
+  });
+  await assert.rejects(
+    sendSms({ apiKey: "k", from: "+18005550100", to: "+15551234567", text: "c", fetchImpl: stopped }),
+    (err) =>
+      err.message ===
+      "Telnyx send failed: 40300 Blocked due to STOP message: Messages cannot be sent from '+18005550100' to '+15551234567' due to an existing block rule."
+  );
+  // A title with no detail, and a detail that only repeats the title, give the title once.
+  const titled = async () => ({ ok: false, status: 422, json: async () => ({ errors: [{ code: "10015", title: "Bad request", detail: "Bad request" }] }) });
+  await assert.rejects(sendSms({ apiKey: "k", from: "a", to: "b", text: "c", fetchImpl: titled }), /^Error: Telnyx send failed: 10015 Bad request$/);
+  const empty = async () => ({ ok: false, status: 503, json: async () => ({}) });
+  await assert.rejects(sendSms({ apiKey: "k", from: "a", to: "b", text: "c", fetchImpl: empty }), /^Error: Telnyx send failed: HTTP 503$/);
+});
+
 const inbound = (from, to, text = "hello") => ({
   event_type: "message.received",
   id: "ev1",
@@ -121,6 +148,57 @@ test("messaging route logs a failed delivery", async () => {
   await route({ event_type: "message.finalized", payload: { id: "m", to: [{ status: "delivered" }] } });
   assert.equal(logs.length, 1);
   assert.match(logs[0], /delivery_failed/);
+});
+
+test("messaging route gives every delivery report to onReport, and still logs a failure", async () => {
+  const reports = [];
+  const logs = [];
+  const texts = [];
+  const route = makeMessagingRoute({
+    ourNumber: "+18005550100",
+    allowFrom: ["+15551234567"],
+    onText: async (m) => texts.push(m),
+    onReport: async (r) => reports.push(r),
+    log: (s) => logs.push(s),
+  });
+  const finalized = (id, ...statuses) => ({
+    event_type: "message.finalized",
+    payload: { id, to: statuses.map((status) => ({ phone_number: "+15551234567", status })) },
+  });
+  await route(finalized("m1", "delivered"));
+  await route(finalized("m2", "delivery_failed"));
+  await route(finalized("m3", "delivery_unconfirmed", "delivered"));
+  await route({ event_type: "message.finalized", payload: { id: "m4" } });
+  // A number that sent STOP: the report carries the code, and the code goes on.
+  await route({ ...finalized("m5", "sending_failed"), payload: { ...finalized("m5", "sending_failed").payload, errors: [{ code: "40300", title: "Blocked due to STOP message" }] } });
+  assert.deepEqual(reports, [
+    { id: "m1", statuses: ["delivered"], errors: [] },
+    { id: "m2", statuses: ["delivery_failed"], errors: [] },
+    { id: "m3", statuses: ["delivery_unconfirmed", "delivered"], errors: [] },
+    { id: "m4", statuses: [], errors: [] },
+    { id: "m5", statuses: ["sending_failed"], errors: ["40300"] },
+  ]);
+  assert.equal(logs.filter((l) => /not delivered/.test(l)).length, 3, "the failure log stays");
+
+  // An inbound text is not a report, and a report is not a turn.
+  await route(inbound("+15551234567", "+18005550100", "hi"));
+  assert.equal(reports.length, 5);
+  assert.equal(texts.length, 1);
+});
+
+test("an error in onReport is logged, and the route does not throw", async () => {
+  const logs = [];
+  const route = makeMessagingRoute({
+    ourNumber: "+1800",
+    allowFrom: [],
+    onText: async () => {},
+    onReport: async () => {
+      throw new Error("disk full");
+    },
+    log: (s) => logs.push(s),
+  });
+  await route({ event_type: "message.finalized", payload: { id: "m9", to: [{ status: "delivered" }] } });
+  assert.deepEqual(logs, ["⚠️  SMS report for m9: disk full"]);
 });
 
 test("webhook server checks the signature, answers 200, and drops repeats", async () => {

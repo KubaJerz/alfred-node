@@ -77,12 +77,13 @@ flowchart TD
     CTX["loadContext · context.js (new session)<br/>SOUL.md + USER.md + MEMORY.md<br/>yesterday's + today's daily + the last 6 h of messages<br/>and all not folded yet"] --> Q
     CU["catch-up · context.js (every turn)<br/>the phone's ledger rows since the last turn"] --> Q
     Q --> SPAWN["spawn: claude -p<br/>cwd = agent/"]
-    SPAWN -.->|"skill matches"| SK["skills<br/>gmail · gcal · notion · intervals · strength · browser"]
-    SK -.->|"names cmd + rules"| CLIS["CLIs · bin/ · run via Bash<br/>gmail.js · gcal.js · notion.js · intervals.js · strength.js · broker-client.js"]
+    SPAWN -.->|"skill matches"| SK["skills<br/>gmail · gcal · notion · intervals · strength · reminders · browser"]
+    SK -.->|"names cmd + rules"| CLIS["CLIs · bin/ · run via Bash<br/>gmail.js · gcal.js · notion.js · intervals.js · strength.js · remind.js · broker-client.js"]
     CLIS ==>|"asks"| BR["broker.js<br/>127.0.0.1 + bearer token"]
     BR --> G["Google Mail + Calendar"]
     BR --> N["Notion"]
     BR --> I["Intervals.icu<br/>(Garmin data)"]
+    BR --> RL["reminder list<br/>(see Reminders)"]
     SK -.->|"browser skill"| AB["agent-browser · headed Chrome<br/>agent-browser.json · browser.js"]
     AB --> WEB["the open web"]
     SPAWN -->|"stdout JSON"| R["reply → target<br/>Discord · SMS · call"]
@@ -215,10 +216,10 @@ session per call: it hears, decides when the caller has finished, and talks.
 **Alfred** is the same `claude -p` turn as Discord, reached only through the
 `use_tools` function. The voice starts each call with `agent/phone-voice.md`
 and a briefing of what it should know already (below); Alfred resumes his
-session as usual. Quick work skips
-Alfred: `telnyx/voice-tools.js` gives the voice its own notion, calendar
-and get_time tools, run in process on the broker's route table — no
-HTTP hop and no token, but the same guarded routes.
+session as usual. Quick work skips Alfred: `telnyx/voice-tools.js` gives the
+voice its own notion, calendar, reminders and get_time tools, run in process
+on the broker's route table — no HTTP hop and no token, but the same guarded
+routes.
 
 ```mermaid
 flowchart TD
@@ -226,11 +227,12 @@ flowchart TD
     CC -->|"signed webhook + media socket<br/>via tunnel"| VP["telnyx/pipeline.js<br/>signature + token + allow list"]
     VP <-->|"PCMU both ways"| RT["telnyx/realtime.js<br/>one session per call<br/>prompt: phone-voice.md + the briefing"]
     RT <-->|"audio · turns · function calls"| OA["OpenAI Realtime<br/>the voice"]
-    RT -->|"notion · calendar<br/>get_time"| VT["telnyx/voice-tools.js<br/>exact titles · read before write"]
-    VT ==>|"in process"| BR["broker routes<br/>NOTION_ROUTES · GOOGLE_ROUTES"]
+    RT -->|"notion · calendar · reminders<br/>get_time"| VT["telnyx/voice-tools.js<br/>exact titles · read before write"]
+    VT ==>|"in process"| BR["broker routes<br/>NOTION_ROUTES · GOOGLE_ROUTES · REMINDER_ROUTES"]
     BR --> N["Notion"]
     BR --> G["Google Calendar"]
-    VT -.->|"each change"| NOTE["today's daily note"]
+    BR --> RL["reminder list<br/>(reminders, never a job)"]
+    VT -.->|"each change, by the nightly fold"| NOTE["its day's daily note"]
     RT -->|"use_tools: the caller's request"| Q["onCallTurn → enqueueTurn<br/>[via phone call]"]
     Q --> SPAWN["claude -p --resume<br/>Alfred: email, memory, files, web"]
     SPAWN -->|"reply = function output"| RT
@@ -327,7 +329,102 @@ catch-up reads only the call and tool rows.
 **Guarantees here.** The allow list, signature and token checks in
 `pipeline.js`, and the broker's own rules (no guest-deletes), are code. In
 `voice-tools.js`, exact-title page lookup and "read before write" are code too.
-Everything about how the voice talks is the prompt, so it is guidance.
+The reminders tool has no field for a person, so a reminder from the voice goes
+to the user, and it cannot see or change a job. Everything about how the voice
+talks is the prompt, so it is guidance.
+
+## Reminders and recurring jobs
+
+One list holds the reminders and the recurring jobs, in
+`agent/var/reminders.json`. `bot.js` is its only writer, and a tick in `bot.js`
+fires it about once a minute. There is no cron line per reminder, and no model
+in the delivery path, so a Claude outage cannot lose a reminder.
+
+```mermaid
+flowchart TD
+    A["Alfred · claude -p<br/>reminders skill → bin/remind.js"] ==>|"add · edit · snooze · skip · cancel · list"| BR["broker.js<br/>9 reminder routes · reminders/routes.js<br/>contact names only · no send route"]
+    VT["2B voice · telnyx/voice-tools.js<br/>reminders tool · adds for the user only"] ==>|"in process"| BR
+    BR --> SV["reminders/service.js<br/>checks every field · caps<br/>next time: reminders/schedule.js"]
+    CT["reminders/contacts.js<br/>me + REMINDER_CONTACTS (.env)"] -->|"name → Discord id · number"| SV
+    SV <-->|"one change at a time<br/>temp file + rename"| ST["agent/var/reminders.json<br/>reminders/store.js"]
+    TK["tick · bot.js<br/>at boot · every minute · Discord ready"] -.->|"due ≤ now"| SV
+    SV -->|"DM · confirmed when Discord takes it"| D["Discord"]
+    SV -->|"SMS · to me only"| TX["Telnyx"]
+    TX -.->|"message.finalized → onReport<br/>telnyx/sms.js · confirmed, or send again"| SV
+    SV -->|"a due job · one at a time"| JB["reminders/jobs.js<br/>allowlist: committed files in agent/jobs"]
+    JB --> RUN["bash name.sh · or claude -p with name.md<br/>never --resume · cwd agent/ · broker env<br/>own process group · timeout stops all of it"]
+    SV -.->|"reminders only · retried"| CM["reminders/calendar-mirror.js<br/>one way · no popup · no guests<br/>reads first · changes only its own copy"]
+    CM --> G["Google Calendar"]
+    SV -.->|"each send"| NOTE["today's daily note<br/>+ the front of the next turn<br/>dailies.js"]
+    classDef external fill:#d6e2f2,stroke:#1f5fb8,color:#123f7d
+    classDef gateway fill:#d8ebe2,stroke:#1b6b52,color:#12503c
+    classDef agent fill:#f5e8d5,stroke:#b07a2a,color:#6e4a12
+    classDef store fill:#e7e7e7,stroke:#888,color:#333
+    class D,TX,G external
+    class BR gateway
+    class A,RUN agent
+    class ST,CT store
+```
+
+**The list.** `reminders/store.js` saves it one change at a time. Each save
+writes a temp file, then a rename puts it in place, so a crash leaves the old
+list or the new one. A corrupt file is moved aside, and the bot starts with an
+empty list. At load, the service drops a record that a hand edit broke, with
+a log line. `reminders/schedule.js` holds the time rules. A time is Eastern. A
+repeat is daily, weekly on days, or monthly on day 1-28 or the last day. It
+keeps its clock time across a daylight saving change. A time that the spring
+change skips moves forward. A time that the fall change repeats is the first
+one.
+
+**Who changes it.** Alfred, through `bin/remind.js` and the 9 routes of
+`reminders/routes.js` on the main broker. The 2B voice, through the same routes
+in process. No route sends: a reminder goes out only when its time comes.
+
+**Delivery is at least once.** A delivery is one contact on one channel.
+`reminders/service.js` saves each attempt before it starts. After a crash, a
+delivery with no confirmation goes again. A rare duplicate is acceptable. A
+lost reminder is not. Discord is confirmed when Discord takes the DM. SMS is
+confirmed by the Telnyx delivery report, which `telnyx/sms.js` gives to the
+service. A failed report, or no report in 10 min, sends again, up to the cap.
+A number that sent STOP is final at once. When a delivery fails for good, the
+owner gets one Discord message. After downtime, a reminder older than 12 hours
+goes in one summary message per contact. The service saves its line in the
+same change as the fire, so a crash cannot lose it.
+
+SMS goes to "me" only. The 10DLC campaign lets the number text another person
+only after the opt-in steps in `docs/phone-design.md`, and those do not exist
+yet. Another contact gets Discord only.
+
+**Jobs.** A job entry names a file in agent/jobs, never a command. The file
+runs only when git has committed it, with no change since, so a file that a
+turn writes does not run. `reminders/jobs.js` runs `<name>.sh` with bash, or
+`<name>.md` as the prompt of a separate `claude -p`, never `--resume`. One job
+runs at a time, in its own process group. The timeout stops the whole group,
+so a hung command cannot hold the queue. A failed run goes again after 15 min,
+and after 3 failed runs the owner is told. An agent job's answer goes to its
+contacts like a reminder.
+
+**The calendar copy.** `reminders/calendar-mirror.js` makes one Google Calendar
+event per reminder, with the reminder id in a private property. The copy goes
+one way: a change in Google Calendar does not come back. The event does not
+block time, has no Google popup and no guests, and every write sends no
+notification. Before a change or a delete, the mirror reads the event. It
+changes or deletes only its own copy with no guests, the same rule as the
+broker's delete. Any other event stays as it is. Only `bot.js` holds the
+mirror: no route gives Alfred a calendar write through it.
+
+**Guarantees here.** These five are code:
+
+- A person is a contact name from `REMINDER_CONTACTS`. No route, flag or voice
+  field takes a number or an id.
+- SMS goes to "me" only.
+- A job is a file in agent/jobs that git committed, with no change since.
+- The caps: 300 entries, 10 contacts on an entry, 25 entries for a contact. A
+  finished entry keeps its place for 24 hours, so a turn in a loop meets them.
+- No route sends.
+
+"Ask for a time" and "keep private detail out of a reminder to someone else"
+live in the skill body, so they are guidance.
 
 **Testing it without a phone.** `scripts/voice-eval.mjs` holds scripted calls
 with the same session code: `voice-eval/openai-call.js` stands in for Telnyx's
@@ -555,7 +652,7 @@ Seven properties, each a decision made on purpose:
   {}` and only `RONNIE_ROUTES` (`broker-routes.js`, 4 routes: label a message,
   and list / add / delete calendar events — the same three the gcal CLI uses, no
   edit), on its own port with its own token. It **cannot** read mail, send, or
-  touch Alfred's 18 routes — the trust boundary is the route table, made physical.
+  touch any of Alfred's routes — the trust boundary is the route table, made physical.
 
 **Two Discord-side controls**, both caught in `bot.js`'s reader and run *without*
 a turn (no `claude -p`): an `undo cal:<eventId>` / `undo mail:<id>` reply — the only
@@ -580,7 +677,7 @@ flowchart TD
         subgraph BOT["bot.js · long-running · holds the tokens"]
             direction TB
             TOK["tokens<br/>google/token.json · auth.js · authorize.js<br/>NOTION_TOKEN (.env) · notion/client.js<br/>INTERVALS_API_KEY (.env) · intervals/client.js"]
-            BR["broker · one server · 10 Google routes + 8 Notion routes + 4 Intervals routes · no send<br/>withholds codes (mail-filter.js)<br/>no delete-with-guests (calendar-rules.js)<br/>notion rules (notion/broker.js)<br/>intervals read-only (intervals/broker.js)"]
+            BR["broker · one server · 10 Google routes + 8 Notion routes + 4 Intervals routes + 9 Reminder routes · no send<br/>withholds codes (mail-filter.js)<br/>no delete-with-guests (calendar-rules.js)<br/>notion rules (notion/broker.js)<br/>intervals read-only (intervals/broker.js)"]
             TOK -->|"reads"| BR
         end
         subgraph AG["the agent · claude -p, per turn · no secret"]
@@ -785,7 +882,7 @@ from cwd.
 
 | path | holds | in git? |
 |---|---|---|
-| repo root | the app + dev process — `bot.js`, `google/`, `notion/`, `intervals/`, `strength/`, `bin/`, `test/` | yes |
+| repo root | the app + dev process — `bot.js`, `google/`, `notion/`, `intervals/`, `strength/`, `reminders/`, `bin/`, `test/` | yes |
 | `agent/` | Alfred's config — `SOUL.md`, `memory-prompt.md`, `agent-browser.json`, `.claude/skills/` | yes |
 | `agent/var/` | Alfred's state — memories, transcripts, `state.json`, tokens | **never** |
 
@@ -795,7 +892,8 @@ root would load into Alfred too. Keeping the root free of one is what makes
 
 ## Cron jobs
 
-Two entries, and that's the whole of what runs on a schedule.
+Two entries. Reminders and recurring jobs do not use cron: the tick in `bot.js`
+runs them (see Reminders and recurring jobs).
 
 | when | runs | does |
 |---|---|---|
@@ -812,7 +910,7 @@ a week of missing Google access; see "Say which code is actually running" in
 Hand-written on purpose — a generated map draws every arrow and so says nothing
 about which ones matter. `npm run map:check` verifies it's *accurate*, not that
 it's complete: it flags anything on disk that was never drawn, anything drawn
-that's since been deleted, a wrong route count for either broker (Google and
-Notion are counted separately, since each is a distinct reach), and a
+that's since been deleted, a wrong route count (Google, Notion, Intervals and
+Reminder routes are counted separately, since each is a distinct reach), and a
 `.claude/skills/` at the repo root. Not in the pre-commit hook — a diagram
 lagging one commit isn't worth blocking a commit.

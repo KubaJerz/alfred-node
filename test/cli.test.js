@@ -10,11 +10,16 @@
 // *absence*: `gmail.js send` and `gcal.js delete` must issue no HTTP request at
 // all, and neither CLI may carry credential material of any kind. A refusal that
 // still made a request would mean the capability exists and is merely declined.
+//
+// bin/remind.js is here too. Its routes mount on the same broker, so the same
+// wire rules hold. Its absences are a send command and a flag that takes a phone
+// number. One test at the end runs it against the real reminder routes, since a
+// stub cannot show that the service accepts the fields the CLI sends.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import { spawn } from "node:child_process";
-import { readdirSync, readFileSync, statSync, mkdtempSync } from "node:fs";
+import { readdirSync, readFileSync, statSync, mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -25,7 +30,17 @@ import { fileURLToPath } from "node:url";
 // against the broker's real route table, so renaming a route there fails here
 // instead of failing in front of Kuba.
 process.env.STATE_DIR = mkdtempSync(path.join(tmpdir(), "alfred-cli-test-"));
-const { OPERATIONS } = await import("../google/broker.js");
+const { OPERATIONS, startBroker } = await import("../google/broker.js");
+const { makeReminderRoutes } = await import("../reminders/routes.js");
+const { makeReminders } = await import("../reminders/service.js");
+const { makeStore } = await import("../reminders/store.js");
+const { parseContacts } = await import("../reminders/contacts.js");
+const { makeJobRunner } = await import("../reminders/jobs.js");
+const { localDate } = await import("../reminders/schedule.js");
+
+// The reminder routes come from a factory. Its keys do not depend on the
+// service, so an empty one gives the route table.
+const REMINDER_OPERATIONS = Object.keys(makeReminderRoutes({}));
 
 const BIN = fileURLToPath(new URL("../bin/", import.meta.url));
 const brokerSource = readFileSync(new URL("../google/broker.js", import.meta.url), "utf8");
@@ -78,7 +93,74 @@ const CANNED = {
     subject: "Re: lab meeting",
     note: "Reply saved as a draft, in-thread. Sending is not available here.",
   },
+  "GET /reminders": { entries: [] }, // set below, from the views
+  "GET /reminders/one": {},
+  "POST /reminders": {},
+  "PATCH /reminders": {},
+  "DELETE /reminders": {},
+  "POST /reminders/snooze": {},
+  "POST /reminders/skip": {},
+  "GET /reminders/contacts": {
+    contacts: [
+      { name: "me", channels: ["discord", "sms"] },
+      { name: "mom", channels: ["sms"] },
+      { name: "anna", channels: [] },
+    ],
+  },
+  "GET /reminders/jobs": {
+    jobs: [
+      { name: "backup", kind: "code" },
+      { name: "brief", kind: "agent" },
+    ],
+  },
 };
+
+// Views in the shape reminders/service.js gives them.
+const STANDUP = {
+  id: "r7k2",
+  kind: "reminder",
+  text: "Stand-up",
+  status: "active",
+  due: "2026-11-25T14:00:00.000Z",
+  dueText: "Wed Nov 25, 9:00 AM",
+  at: null,
+  repeat: { freq: "weekly", every: 1, time: "09:00", days: ["MO", "WE"], start: "2026-11-23" },
+  repeatText: "every Monday and Wednesday at 9:00 AM",
+  snoozed: false,
+  to: ["me", "mom"],
+  via: ["discord", "sms"],
+  line: 'r7k2: "Stand-up" — every Monday and Wednesday at 9:00 AM, next Wed Nov 25, 9:00 AM, to me by Discord and SMS, mom by SMS',
+  last: {
+    at: "2026-11-23T14:00:00.000Z",
+    atText: "Mon Nov 23, 9:00 AM",
+    firedAt: "2026-11-23T14:07:00.000Z",
+    late: true,
+    deliveries: [
+      { contact: "me", channel: "discord", state: "delivered", attempts: 1 },
+      { contact: "me", channel: "sms", state: "sent", attempts: 2 },
+      { contact: "mom", channel: "sms", state: "failed", attempts: 3, error: "Telnyx reported delivery_failed" },
+    ],
+  },
+  calendar: { state: "pending", op: "update" },
+  createdAt: "2026-11-20T17:00:00.000Z",
+  updatedAt: "2026-11-23T14:07:00.000Z",
+  finishedAt: null,
+};
+const BRIEF = {
+  id: "j3x9",
+  kind: "job",
+  text: "Morning brief",
+  job: "brief",
+  status: "active",
+  line: 'j3x9: job "brief" (Morning brief) — every day at 7:00 AM, next Wed Nov 25, 7:00 AM, to me by Discord',
+};
+CANNED["GET /reminders"] = { entries: [STANDUP, BRIEF] };
+CANNED["GET /reminders/one"] = { entry: STANDUP };
+CANNED["POST /reminders"] = { entry: STANDUP, line: STANDUP.line };
+CANNED["PATCH /reminders"] = { entry: STANDUP, line: STANDUP.line };
+CANNED["DELETE /reminders"] = { entry: { ...STANDUP, status: "cancelled" }, line: 'Cancelled r7k2: "Stand-up". The Google Calendar copy goes too.' };
+CANNED["POST /reminders/snooze"] = { entry: STANDUP, line: `Snoozed ${STANDUP.line}. Google Calendar keeps the original time.` };
+CANNED["POST /reminders/skip"] = { entry: STANDUP, line: `Skipped Wed Nov 25, 9:00 AM. ${STANDUP.line}.` };
 
 let server;
 let stubUrl;
@@ -167,6 +249,25 @@ const SURFACE = [
 
 const calls = new Map(); // "gmail.js draft" -> { result, request }
 
+// remind.js runs some commands twice with other flags, so each run has a name.
+const REMIND_SURFACE = [
+  ["list", ["list"]],
+  ["list all jobs", ["list", "--all", "--jobs"]],
+  ["show", ["show", "r7k2"]],
+  ["add", ["add", "--text", "Call mom", "--at", "2026-11-25T17:00", "--to", "me,mom", "--via", "sms"]],
+  ["add repeat", ["add", "--text", "Pay rent", "--repeat", "monthly", "--day", "last", "--time", "08:00", "--every", "2", "--start", "2026-12-01", "--until", "2027-12-31"]],
+  ["add job", ["add", "--job", "brief", "--text", "Morning brief", "--repeat", "weekly", "--days", "MO,WE", "--time", "07:00"]],
+  ["add in", ["add", "--text", "Laundry", "--in", "30m"]],
+  ["edit", ["edit", "r7k2", "--time", "10:00", "--until", "none"]],
+  ["snooze", ["snooze", "r7k2", "--for", "30m"]],
+  ["snooze until", ["snooze", "r7k2", "--until", "2026-11-25T18:00"]],
+  ["skip", ["skip", "r7k2"]],
+  ["cancel", ["cancel", "r7k2"]],
+  ["contacts", ["contacts"]],
+  ["jobs", ["jobs"]],
+];
+const remindCalls = new Map(); // "add job" -> { result, request }
+
 // One hook, not two: the stub has to be listening before the surface is run
 // through it, and separate root-level hooks don't guarantee that order.
 before(async () => {
@@ -181,10 +282,16 @@ before(async () => {
     );
     calls.set(`${file} ${args[0]}`, { result, request: requests[0] });
   }
+  for (const [name, args] of REMIND_SURFACE) {
+    requests = [];
+    const result = await run("remind.js", args);
+    assert.equal(requests.length, 1, `remind.js ${name} made ${requests.length} requests: ${result.stderr}`);
+    remindCalls.set(`remind.js ${name}`, { result, request: requests[0] });
+  }
 });
 
 test("every command authenticates with the broker token, in the header", () => {
-  for (const [name, { request }] of calls) {
+  for (const [name, { request }] of [...calls, ...remindCalls]) {
     assert.equal(
       request.headers["x-alfred-broker"],
       TOKEN,
@@ -202,7 +309,7 @@ test("every command authenticates with the broker token, in the header", () => {
 
 test("nothing that looks like a Google credential is transmitted", () => {
   const CREDENTIALISH = /client_secret|GOCSPX-|refresh_token|access_token|private_key|token\.json|ya29\./i;
-  for (const [name, { request }] of calls) {
+  for (const [name, { request }] of [...calls, ...remindCalls]) {
     const sent = JSON.stringify({
       ...request,
       headers: { ...request.headers, "x-alfred-broker": "<token>" },
@@ -402,6 +509,9 @@ test("the send refusal isn't reachable by another spelling of the same word", as
     ["gmail.js", ["Send"]],
     ["gmail.js", ["reply"]],
     ["gcal.js", ["remove", "e1"]],
+    ["remind.js", ["send", "r7k2"]],
+    ["remind.js", ["Send", "--to", "mom"]],
+    ["remind.js", ["sms", "r7k2"]],
   ]) {
     requests = [];
     const out = await run(file, args);
@@ -415,7 +525,7 @@ test("the send refusal isn't reachable by another spelling of the same word", as
 // like every other tool — stdout, exit 0 — or a piped read turns reading the
 // manual into a failed command.
 test("--help prints usage on stdout and exits 0, with no broker needed", async () => {
-  for (const file of ["gmail.js", "gcal.js"]) {
+  for (const file of ["gmail.js", "gcal.js", "remind.js"]) {
     for (const args of [["--help"], ["-h"], ["help"], []]) {
       requests = [];
       const out = await run(file, args, cleanEnv()); // no ALFRED_BROKER at all
@@ -429,6 +539,9 @@ test("--help prints usage on stdout and exits 0, with no broker needed", async (
   // without having to attempt the command first.
   assert.match((await run("gmail.js", ["--help"])).stdout, /No `send`/);
   assert.match((await run("gcal.js", ["--help"])).stdout, /guests, where deleting is refused/);
+  const remind = (await run("remind.js", ["--help"])).stdout;
+  assert.match(remind, /no flag takes a\nphone number or a Discord id/);
+  assert.match(remind, /Nothing here sends/);
 });
 
 // Both conventional spellings, because both are what someone reaches for. The
@@ -439,8 +552,14 @@ test("per-command help works and never performs the command", async () => {
     ["gcal.js", "create", /--rrule/],
     ["gmail.js", "reply", /brand-new thread/],
     ["gmail.js", "label", /to delete/],
+    ["remind.js", "cancel", /still pending/],
+    ["remind.js", "add", /--repeat daily\|weekly\|monthly --time HH:MM/],
+    ["remind.js", "snooze", /Moves the next time only/],
+    ["remind.js", "jobs", /a separate\n\s+claude -p/],
   ]) {
-    for (const args of [[command, "--help"], ["help", command]]) {
+    // remind.js also takes "<command> -h", so -h never reads as an id there.
+    const forms = [[command, "--help"], ["help", command], ...(file === "remind.js" ? [[command, "-h"]] : [])];
+    for (const args of forms) {
       requests = [];
       const out = await run(file, args, cleanEnv());
       assert.equal(out.code, 0, `${file} ${args.join(" ")} exited ${out.code}`);
@@ -454,7 +573,7 @@ test("per-command help works and never performs the command", async () => {
 });
 
 test("help for a command that doesn't exist is an error, not silence", async () => {
-  for (const file of ["gmail.js", "gcal.js"]) {
+  for (const file of ["gmail.js", "gcal.js", "remind.js"]) {
     const out = await run(file, ["help", "frobnicate"], cleanEnv());
     assert.equal(out.code, 1);
     assert.match(out.stderr, /no such command: frobnicate/);
@@ -463,7 +582,7 @@ test("help for a command that doesn't exist is an error, not silence", async () 
 });
 
 test("an unrecognised command is an error, unlike --help", async () => {
-  for (const file of ["gmail.js", "gcal.js"]) {
+  for (const file of ["gmail.js", "gcal.js", "remind.js"]) {
     requests = [];
     const out = await run(file, ["frobnicate"]);
     assert.equal(out.code, 1, `${file} frobnicate exited 0`);
@@ -494,6 +613,9 @@ test("an id may be positional or --id, on every command that takes one", async (
     ["gmail.js", ["archive", "--id", "m1"], (r) => assert.equal(r.body.id, "m1")],
     ["gmail.js", ["label", "--id", "m1", "--add", "Label_9"], (r) => assert.equal(r.body.id, "m1")],
     ["gcal.js", ["update", "--id", "e1", "--color", "basil"], (r) => assert.equal(r.query.id, "e1")],
+    ["remind.js", ["show", "--id", "r7k2"], (r) => assert.equal(r.query.id, "r7k2")],
+    ["remind.js", ["cancel", "--id", "r7k2"], (r) => assert.equal(r.query.id, "r7k2")],
+    ["remind.js", ["snooze", "--id", "r7k2", "--for", "1h"], (r) => assert.deepEqual([r.query.id, r.body], ["r7k2", { for: "1h" }])],
   ]) {
     requests = [];
     const out = await run(file, args);
@@ -507,6 +629,8 @@ test("an id may be positional or --id, on every command that takes one", async (
   for (const [file, args] of [
     ["gmail.js", ["read"]],
     ["gcal.js", ["update", "--color", "basil"]],
+    ["remind.js", ["cancel"]],
+    ["remind.js", ["snooze", "--for", "1h"]],
   ]) {
     requests = [];
     const out = await run(file, args);
@@ -540,6 +664,15 @@ test("a broker error is relayed, not swallowed or reworded", async () => {
   assert.equal(missing.code, 1);
   assert.match(missing.stderr, /Error: no such operation/);
   assert.match(missing.stderr, /Available: POST \/mail\/draft/);
+
+  // The service's plain message reaches remind.js the same way.
+  requests = [];
+  override = { status: 400, body: { error: '"bob" is not a contact. Contacts: me, mom.' } };
+  const stranger = await run("remind.js", ["add", "--text", "x", "--in", "1h", "--to", "bob"]);
+  override = null;
+  assert.equal(stranger.code, 1);
+  assert.equal(stranger.stdout, "");
+  assert.match(stranger.stderr, /^Error: "bob" is not a contact\. Contacts: me, mom\./);
 });
 
 test("without the broker env, both CLIs explain themselves and reach nothing", async () => {
@@ -552,6 +685,8 @@ test("without the broker env, both CLIs explain themselves and reach nothing", a
     ["gcal.js", ["events"]],
     ["gmail.js", ["search", "from:sarah"]],
     ["gcal.js", ["create", "--summary", "Quiz", "--start", "2026-01-21", "--end", "2026-01-21"]],
+    ["remind.js", ["list"]],
+    ["remind.js", ["add", "--text", "Call mom", "--in", "1h"]],
   ]) {
     requests = [];
     const out = await run(file, args, cleanEnv());
@@ -573,5 +708,171 @@ test("without the broker env, both CLIs explain themselves and reach nothing", a
     assert.equal(out.code, 1);
     assert.match(out.stderr, /Broker unavailable/);
     assert.equal(requests.length, 0);
+  }
+});
+
+// ── remind.js ───────────────────────────────────────────────────────────────
+
+test("remind.js: every request names a route of the reminder table", () => {
+  for (const [name, { request }] of remindCalls) {
+    const key = `${request.method} ${request.pathname}`;
+    assert.ok(REMINDER_OPERATIONS.includes(key), `${name} called ${key}, which the reminder routes do not serve`);
+  }
+  assert.ok(!REMINDER_OPERATIONS.some((op) => /send/i.test(op)), "a reminder route sends");
+});
+
+test("remind.js sends each flag as the field of the same name, and the id on the query string", () => {
+  const sent = (name) => {
+    const { request } = remindCalls.get(`remind.js ${name}`);
+    return { route: `${request.method} ${request.pathname}`, query: request.query, body: request.body };
+  };
+  assert.deepEqual(sent("list"), { route: "GET /reminders", query: { kind: "all" }, body: null });
+  assert.deepEqual(sent("list all jobs"), { route: "GET /reminders", query: { kind: "job", all: "1" }, body: null });
+  assert.deepEqual(sent("show"), { route: "GET /reminders/one", query: { id: "r7k2" }, body: null });
+  assert.deepEqual(sent("add"), {
+    route: "POST /reminders",
+    query: {},
+    body: { text: "Call mom", at: "2026-11-25T17:00", to: "me,mom", via: "sms" },
+  });
+  assert.deepEqual(sent("add repeat").body, {
+    text: "Pay rent",
+    repeat: "monthly",
+    day: "last",
+    time: "08:00",
+    every: "2",
+    start: "2026-12-01",
+    until: "2027-12-31",
+  });
+  assert.deepEqual(sent("add job").body, { job: "brief", text: "Morning brief", repeat: "weekly", days: "MO,WE", time: "07:00" });
+  assert.deepEqual(sent("add in").body, { text: "Laundry", in: "30m" });
+  assert.deepEqual(sent("edit"), { route: "PATCH /reminders", query: { id: "r7k2" }, body: { time: "10:00", until: "none" } });
+  assert.deepEqual(sent("snooze"), { route: "POST /reminders/snooze", query: { id: "r7k2" }, body: { for: "30m" } });
+  assert.deepEqual(sent("snooze until").body, { until: "2026-11-25T18:00" });
+  assert.deepEqual(sent("skip"), { route: "POST /reminders/skip", query: { id: "r7k2" }, body: null });
+  assert.deepEqual(sent("cancel"), { route: "DELETE /reminders", query: { id: "r7k2" }, body: null });
+  assert.deepEqual(sent("contacts"), { route: "GET /reminders/contacts", query: {}, body: null });
+  assert.deepEqual(sent("jobs"), { route: "GET /reminders/jobs", query: {}, body: null });
+});
+
+test("remind.js prints what came back", () => {
+  const out = (name) => {
+    const { result } = remindCalls.get(`remind.js ${name}`);
+    assert.equal(result.code, 0, `${name} exited ${result.code}: ${result.stderr}`);
+    return result.stdout;
+  };
+  assert.equal(out("list"), `Reminders:\n  ${STANDUP.line}\nJobs:\n  ${BRIEF.line}\n`);
+  assert.equal(out("add"), `Added ${STANDUP.line}\nGoogle Calendar gets a copy.\n`);
+  assert.equal(out("edit"), `Changed ${STANDUP.line}\n`);
+  assert.match(out("snooze"), /^Snoozed r7k2: .*Google Calendar keeps the original time\.\n$/);
+  assert.match(out("skip"), /^Skipped Wed Nov 25, 9:00 AM\. r7k2: /);
+  assert.equal(out("cancel"), 'Cancelled r7k2: "Stand-up". The Google Calendar copy goes too.\n');
+  assert.equal(out("contacts"), "me: Discord, SMS\nmom: SMS\nanna: no channel now\n");
+  assert.equal(out("jobs"), "backup  code job, agent/jobs/backup.sh\nbrief  agent job, agent/jobs/brief.md\n");
+  const show = out("show").split("\n");
+  assert.deepEqual(show.slice(0, -2), [
+    STANDUP.line,
+    "Status: active",
+    "Repeat: every Monday and Wednesday at 9:00 AM, counted from 2026-11-23",
+    "Last time: Mon Nov 23, 9:00 AM, sent late",
+    "  me by Discord: delivered, 1 try",
+    "  me by SMS: sent, waits for the delivery report, 2 tries",
+    "  mom by SMS: failed, 3 tries (Telnyx reported delivery_failed)",
+    "Google Calendar: the copy is not made yet. bot.js tries again (update)",
+  ]);
+  // The CLI formats these two itself, in Eastern. The year shows after 2026.
+  assert.match(show.at(-2), /^Added Fri Nov 20(, 2026)?, 12:00 PM\. Changed Mon Nov 23(, 2026)?, 9:07 AM\.$/);
+  assert.equal(show.at(-1), "");
+});
+
+test("remind.js refuses an unknown flag, a loose word, or a flag with no value, before any request", async () => {
+  for (const [args, message] of [
+    [["add", "--text", "x", "--in", "1h", "--phone", "+15551230000"], /unknown flag for add: --phone/],
+    [["add", "--text", "x", "--in", "1h", "--too", "mom"], /unknown flag for add: --too/],
+    [["edit", "r7k2", "--job", "brief"], /unknown flag for edit: --job/],
+    [["cancel", "r7k2", "--all"], /unknown flag for cancel: --all/],
+    [["add", "Call", "mom", "--in", "1h"], /add does not take "Call mom"/],
+    [["edit", "r7k2", "Call mom"], /edit does not take "Call mom"\. Put a reminder's words in --text/],
+    [["show", "r7k2", "r8m3"], /show does not take "r8m3"\. show takes one id\./],
+    [["contacts", "mom"], /contacts does not take "mom"\. contacts takes no words\./],
+    [["add", "--in", "1h", "--text"], /--text needs a value/],
+  ]) {
+    requests = [];
+    const out = await run("remind.js", args);
+    assert.equal(out.code, 1, `${args.join(" ")} exited ${out.code}`);
+    assert.match(out.stderr, message, args.join(" "));
+    assert.equal(out.stdout, "");
+    assert.equal(requests.length, 0, `${args.join(" ")} reached the broker`);
+  }
+});
+
+// The stub shows what goes on the wire. Only the real routes can show that the
+// service accepts it, so this runs remind.js against a broker with the reminder
+// routes of a real service on a temp file. The clock is the real one, so the
+// times are relative. No tick runs, so nothing is sent.
+test("remind.js against the real reminder routes: the service accepts what the CLI sends", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "alfred-remind-cli-"));
+  mkdirSync(path.join(dir, "jobs"));
+  writeFileSync(path.join(dir, "jobs", "backup.sh"), "echo ok\n");
+  const service = makeReminders({
+    store: makeStore({ file: path.join(dir, "reminders.json") }),
+    contacts: parseContacts({ spec: "mom=+15550000002", ownerDiscordId: "100000000000000001", ownerSms: "+15550000001" }),
+    // A temp dir is not a git repo: count every file in it as committed.
+    jobs: makeJobRunner({ dir: path.join(dir, "jobs"), cwd: dir, committed: (jobsDir) => new Set(readdirSync(jobsDir)) }),
+    sendDiscord: async () => assert.fail("nothing is sent here"),
+    sendSms: async () => assert.fail("nothing is sent here"),
+    smsEnabled: true,
+    log: () => {},
+  });
+  await service.load();
+  const real = await startBroker({ baseRoutes: {}, extraRoutes: makeReminderRoutes(service), log: () => {} });
+  const env = { ...cleanEnv(), ALFRED_BROKER: real.url, ALFRED_BROKER_TOKEN: real.token };
+  const ok = async (...args) => {
+    const out = await run("remind.js", args, env);
+    assert.equal(out.code, 0, `${args.join(" ")} failed: ${out.stderr}`);
+    return out.stdout;
+  };
+  const year = Number(localDate(new Date()).slice(0, 4));
+  try {
+    const bank = /^Added (r\w{3}): "Call the bank" — .*, to me by SMS\n$/.exec(
+      await ok("add", "--text", "Call the bank", "--in", "2h", "--to", "me", "--via", "sms")
+    )?.[1];
+    assert.ok(bank, "add printed the new id");
+    const standup = /^Added (r\w{3}): "Stand-up" — every 2 weeks on Monday and Wednesday at 9:00 AM, until Dec 31, \d{4}, next /.exec(
+      await ok("add", "--text", "Stand-up", "--repeat", "weekly", "--every", "2", "--days", "MO,WE", "--time", "09:00", "--until", `${year + 1}-12-31`, "--via", "discord")
+    )?.[1];
+    assert.ok(standup);
+    assert.match(await ok("add", "--text", "Pay rent", "--repeat", "monthly", "--day", "last", "--time", "08:00", "--start", `${year + 1}-01-01`), /every month on the last day at 8:00 AM, next [A-Z][a-z]{2} Jan 31, \d{4}, 8:00 AM, to me by Discord and SMS/);
+    assert.match(await ok("add", "--job", "backup", "--text", "Nightly backup", "--repeat", "daily", "--time", "03:00"), /^Added j\w{3}: job "backup" \(Nightly backup\) — every day at 3:00 AM, next /);
+
+    // The order of the lines depends on the clock: on a Monday or Wednesday
+    // morning the stand-up comes first. So each line is checked on its own.
+    const list = await ok("list");
+    assert.match(list, /^Reminders:\n(  r\w{3}: [^\n]*\n){3}Jobs:\n  j\w{3}: job "backup" [^\n]*\n$/);
+    for (const text of ["Call the bank", "Stand-up", "Pay rent"]) assert.match(list, new RegExp(`\n  r\\w{3}: "${text}" — `), text);
+    assert.match(await ok("list", "--jobs"), /^Jobs:\n  j\w{3}: job "backup" [^\n]*\n$/);
+    assert.match(await ok("show", bank), /\nStatus: active\n/);
+
+    assert.match(await ok("edit", bank, "--text", "Call the bank about the card", "--via", "discord,sms"), /^Changed r\w{3}: "Call the bank about the card" — .*, to me by Discord and SMS\n$/);
+    // mom has a number, but SMS goes to "me" only for now.
+    const mom = await run("remind.js", ["edit", bank, "--to", "me,mom"], env);
+    assert.equal(mom.code, 1);
+    assert.match(mom.stderr, /mom cannot get this by Discord and SMS: mom has no Discord, SMS goes to "me" only for now\./);
+    assert.match(await ok("edit", standup, "--until", "none"), /every 2 weeks on Monday and Wednesday at 9:00 AM, next /);
+    assert.doesNotMatch(service.get(standup).repeatText, /until/);
+    assert.match(await ok("snooze", bank, "--for", "30m"), /^Snoozed r\w{3}: .*\(snoozed\)/);
+    assert.match(await ok("skip", standup), /^Skipped /);
+    assert.match(await ok("cancel", bank), /^Cancelled r\w{3}: "Call the bank about the card"\./);
+    assert.match(await ok("list", "--all"), /"Call the bank about the card" — cancelled/);
+    assert.equal(await ok("contacts"), "me: Discord, SMS\nmom: no channel now\n");
+    assert.equal(await ok("jobs"), "backup  code job, agent/jobs/backup.sh\n");
+
+    // A number is refused by the service, with its own words.
+    const before = service.list({ all: true }).length;
+    const number = await run("remind.js", ["add", "--text", "x", "--in", "1h", "--to", "+15550000002"], env);
+    assert.equal(number.code, 1);
+    assert.match(number.stderr, /looks like a number or an account id\. A reminder goes to contact names only/);
+    assert.equal(service.list({ all: true }).length, before, "nothing was added");
+  } finally {
+    await real.close();
   }
 });

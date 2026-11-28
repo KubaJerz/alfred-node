@@ -100,6 +100,7 @@ check_routes() {
 check_routes "$ROOT/google/broker.js" "Google"
 check_routes "$ROOT/notion/broker.js" "Notion"
 check_routes "$ROOT/intervals/broker.js" "Intervals"
+check_routes "$ROOT/reminders/routes.js" "Reminder"
 
 # --- 4. the root stays free of a skills dir ----------------------------------
 # Not drift, but the map asserts it, and the assertion is load-bearing: skill
