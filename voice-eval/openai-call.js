@@ -42,10 +42,6 @@ const TURN_MAX_MS = 60000; // the longest one exchange may take
 export const ROWS_QUIET_MS = 2000;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// The clock the scenario's tools see: a fixed Wednesday morning, so dates in
-// scenarios ("tomorrow", "Friday") always mean the same day.
-export const EVAL_NOW = new Date("2026-12-02T15:00:00Z"); // 10:00 AM Eastern
-
 // The ledger of one test call, in a temp dir, and its hooks for
 // makeRealtimeSession as bot.js makes them: feed is the bot's liveFeed
 // (told(text) hears each item the call gets), onCallEvent writes the call's
@@ -140,8 +136,13 @@ export async function runOpenAICall(scenario, {
   ttsCache,
   alfredDelayMs = 4000,
 }) {
+  // The call's clock: 10:00 AM Eastern on the scenario's day (scenariosOn),
+  // running from the start of the call. The tools, the prompt's date line,
+  // the ledger and the briefing all read it.
+  if (!scenario.now) throw new Error(`Scenario ${scenario.id} has no clock: build it with scenariosOn(day)`);
   const t0 = Date.now();
   const at = () => Date.now() - t0;
+  const clock = () => new Date(+scenario.now + at());
   const events = []; // { t, kind, ... }
   const logLines = [];
   const notion = fakeNotion(scenario.world?.pages);
@@ -185,7 +186,7 @@ export async function runOpenAICall(scenario, {
     notionRoutes: notion.routes,
     calendarRoutes: calendar.routes,
     fetchBlockChildren: notion.fetchBlockChildren,
-    now: () => new Date(EVAL_NOW.getTime() + at()),
+    now: clock,
   });
   const directTools = {
     ...tools,
@@ -202,8 +203,6 @@ export async function runOpenAICall(scenario, {
       }
     },
   };
-  // The call's clock: the scenario's fixed morning, running from the start.
-  const clock = () => new Date(EVAL_NOW.getTime() + at());
   const call = makeCallLedger({ told: (text) => events.push({ t: at(), kind: "told", text }), log, now: () => clock().getTime() });
   try {
     await call.seed(scenario.briefing);

@@ -15,6 +15,9 @@
 //                         scenarios show what the briefing adds
 //          --no-feed      a control run: nothing reaches a call mid-call (as
 //                         VOICE_OPENAI_LIVE=0), for the live-* scenarios
+//          --day <YYYY-MM-DD>  the day the calls run on. Default: today,
+//                         Eastern. OpenAI tells the model the real date, so
+//                         another day gives the model two dates (scenarios.js)
 //
 // Each run writes agent/var/voice-eval/runs/<time>-<label>/: per call a .txt
 // transcript, a .json record and a .wav recording (caller left, Alfred right),
@@ -25,8 +28,9 @@ import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_MODEL } from "../telnyx/realtime.js";
+import { easternDate } from "../dailies.js";
 import { runOpenAICall } from "../voice-eval/openai-call.js";
-import { SCENARIOS } from "../voice-eval/scenarios.js";
+import { scenariosOn } from "../voice-eval/scenarios.js";
 import { judge, scoreChecks, transcript } from "../voice-eval/score.js";
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -70,6 +74,12 @@ const settings = {
 };
 // What a control run leaves out, for the header and the summary.
 const off = [!settings.briefing && "briefing off", !settings.feed && "live feed off"].filter(Boolean).map((s) => `, ${s}`).join("");
+const day = opt("day", easternDate());
+if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
+  console.error(`--day takes a date like 2026-12-02, not "${day}"`);
+  process.exit(1);
+}
+const { scenarios: SCENARIOS } = scenariosOn(day);
 const only = opt("only", "").split(",").filter(Boolean);
 const scenarios = only.length ? SCENARIOS.filter((s) => only.includes(s.id)) : SCENARIOS;
 if (only.length && scenarios.length !== only.length) {
@@ -87,7 +97,7 @@ mkdirSync(outDir, { recursive: true });
 
 const jobs = scenarios.flatMap((s) => Array.from({ length: repeat }, (_, n) => ({ s, n: n + 1 })));
 console.log(
-  `▶ ${jobs.length} test call(s): ${settings.model}, reasoning ${settings.reasoning || "default"}, ` +
+  `▶ ${jobs.length} test call(s) on ${day}: ${settings.model}, reasoning ${settings.reasoning || "default"}, ` +
     `silent chains ${settings.quietChains ? "on" : "off"}${off}, ${concurrency} at a time → ${outDir}`
 );
 
@@ -161,14 +171,14 @@ const totals = {
   firstAudioMs: mean(ok.map((r) => r.score.metrics.firstAudioMs)),
   usd: ok.reduce((n, r) => n + (r.score.metrics.usd || 0), 0),
 };
-const summary = { label, settings, stamp, totals, byScenario };
+const summary = { label, settings, day, stamp, totals, byScenario };
 writeFileSync(join(outDir, "summary.json"), JSON.stringify(summary, null, 2));
 
 const f1 = (x) => (x == null ? "–" : x.toFixed(1));
 const md = [
   `# Voice eval: ${label}`,
   "",
-  `${settings.model}, reasoning ${settings.reasoning || "default"}, silent chains ${settings.quietChains ? "on" : "off"}${off}, ${stamp}`,
+  `${settings.model}, reasoning ${settings.reasoning || "default"}, silent chains ${settings.quietChains ? "on" : "off"}${off}, calls on ${day}, ${stamp}`,
   "",
   `**${totals.callsAllPassed}/${totals.calls} calls passed every check** · checks ${pct(totals.checksPassed, totals.checksTotal)} · grader ${f1(totals.grader)}/8 · ${f1(totals.words)} words a call · first audio ${num(totals.firstAudioMs && Math.round(totals.firstAudioMs), " ms")} · $${totals.usd.toFixed(2)}`,
   "",

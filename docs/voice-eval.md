@@ -9,6 +9,7 @@ node --env-file=.env scripts/voice-eval.mjs                         # every scen
 node --env-file=.env scripts/voice-eval.mjs --only tick-two --repeat 5
 node --env-file=.env scripts/voice-eval.mjs --model gpt-realtime-2.1 --repeat 3 --label full
 node --env-file=.env scripts/voice-eval.mjs --only brief-pasta,brief-last-call,brief-dentist --repeat 3 --no-briefing --label no-briefing
+node --env-file=.env scripts/voice-eval.mjs --only calendar-add --day 2026-12-02   # another day (see "The day")
 node scripts/voice-eval.mjs --compare agent/var/voice-eval/runs/<a> agent/var/voice-eval/runs/<b>
 ```
 
@@ -27,7 +28,18 @@ node scripts/voice-eval.mjs --compare agent/var/voice-eval/runs/<a> agent/var/vo
   get_time tools are the real `telnyx/voice-tools.js`, on an in-memory Notion
   and calendar (`voice-eval/fakes.js`). `use_tools` goes to a stand-in Alfred
   with canned answers per kind of request (his to-do file, email, new pages).
-  The clock is Wednesday 2 December 2026, 10:00 AM Eastern.
+- **The day is the day of the run.** Each call's clock is 10:00 AM Eastern
+  on it, and the world is built around it (`scenariosOn` in
+  `voice-eval/scenarios.js`): the lab meeting is today, the gym and the call
+  with Mom are tomorrow, and the thesis review is in two days. A weekday that
+  a caller or a text names is one of that week: on a Wednesday, the dentist
+  goes on "Friday at 3". OpenAI tells the model the real date itself, so a
+  made-up day gives it two dates. Until #157 the clock was always Wednesday
+  2 December 2026: in 4 of the 6 calls where mini wrote a date without
+  get_time, it used the real day, and it booked "Friday" a week early. A
+  real call never has the two dates disagree. `--day YYYY-MM-DD` runs
+  another day, for a rerun of an old one, but with two dates again. The
+  examples here are for a Wednesday, as in the tests.
 - **Messages from elsewhere.** A turn can carry ledger rows (`{ rows, say }`):
   a text the user sent and Alfred's reply, built as `bot.js` builds them. Each
   call has its own ledger in a temp dir, written as the bot writes the real
@@ -43,7 +55,7 @@ node scripts/voice-eval.mjs --compare agent/var/voice-eval/runs/<a> agent/var/vo
   briefing: {
     user: "...",       // USER.md
     memory: "...",     // MEMORY.md
-    yesterday: "...",  // yesterday's daily note (Tuesday 1 December)
+    yesterday: "...",  // yesterday's daily note (the day before the call)
     today: "...",      // today's daily note
     rows: [at("09:00", texted("I'm cooking pasta tonight")), at("09:00", replied("Sounds good."))],
   }
@@ -62,12 +74,12 @@ node scripts/voice-eval.mjs --compare agent/var/voice-eval/runs/<a> agent/var/vo
   Greens ("add spinach to the greens on the list we were adding to": spinach
   under Greens, no Alfred; a Garden list has Greens too, so only the briefing
   says which; the caller names the section, since the notion tool nests a line
-  only then), the dentist by SMS ("when's the dentist?": Tuesday at 3, no tool,
-  though the calendar does not have it), and two where the background is out
-  of date: a text reply two hours ago listed the shopping list as milk, butter
-  and limes (`brief-stale-list`: read the list fresh, say kefir and eggs too),
-  and memory has the gym on Thursdays but not the call with Mom
-  (`brief-calendar-fresh`: read the calendar, say both).
+  only then), the dentist by SMS ("when's the dentist?": Tuesday at 3, six
+  days on, no tool, though the calendar does not have it), and two where the
+  background is out of date: a text reply two hours ago listed the shopping
+  list as milk, butter and limes (`brief-stale-list`: read the list fresh,
+  say kefir and eggs too), and memory has the gym on Thursdays but not the
+  call with Mom (`brief-calendar-fresh`: read the calendar, say both).
 - **Control runs.** `--no-briefing` starts each call with the prompt alone (as
   `VOICE_OPENAI_BRIEFING=0`), and `--no-feed` tells a call nothing mid-call (as
   `VOICE_OPENAI_LIVE=0`); the scenario's world and rows are written all the
@@ -160,3 +172,22 @@ scenarios now test the voice with its briefing in the prompt.
   SMS's time and says it is not on the calendar yet.
 - `brief-last-call` found a tool bug: `under: 0` with no read put spinach at
   the end of the page. It now asks for the read, and the voice nests it.
+
+### Mini's 16 failed calls, read again (#157)
+
+The transcripts of "mini after" (2026-11-24, 35/51), one by one:
+
+| calls | what happened | whose problem | now |
+|---|---|---|---|
+| 3 | a date from the real day, 24 November, not the call's 2 December | the eval's | the calls run on the day of the run |
+| 1 | "when is that Friday?": asked, booked nothing | the eval's, most likely: two dates | as above |
+| 1 | calendar `read` with no day, then asked the caller which day | the tool's | a read with no day reads today |
+| 1 | `create` with the title as `page` (another call sent it as `title`, then fixed it) | the tool's | it takes both |
+| 3 | `remove` by numbers for milk and butter only, after a read, so cheese was never said | the tool's description | it asks for every item named, in words, in one call |
+| 3 | "Lines and Keffer" searched as a page title (2), or checked as lines 3 and 7 (1) | the tool's, in part | words match the one line that sounds like them; a search with no title names the page whose lines have them |
+| 3 | only a last reply longer than 15 words | the model's | no change |
+| 1 | the shopping list sent to Alfred as a file on the computer | the model's | no change (the stand-in Alfred cannot add to Notion; the real one can) |
+
+Not rerun yet. The scenarios to rerun on mini: `calendar-add`,
+`calendar-move`, `calendar-tomorrow`, `multi-request`, `tick-two`,
+`remove-three`, `create-page`, `create-page-runon`.
