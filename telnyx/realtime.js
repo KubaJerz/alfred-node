@@ -53,10 +53,14 @@ export const DEFAULT_VOICE = "cedar";
 export const DEFAULT_EAGERNESS = "medium";
 export const DEFAULT_TRANSCRIBE_MODEL = "gpt-4o-mini-transcribe";
 export const GREETING = "Hey.";
-// Response kinds, in metadata: a silent reply after a quick tool, and the
-// spoken answer a quiet reply ended with.
+// Response kinds, in metadata: a silent reply after a quick tool, the spoken
+// answer a quiet reply ended with, the "still on it" line and the greeting.
+// A response with no kind is a reply (to the caller, or after a tool).
 const QUIET = "quiet";
 const SAY = "say";
+const STILL_WORKING = "still_working";
+const GREET = "greeting";
+const REPLY = "reply";
 // OpenAI's input noise filter: far_field (speakerphone, car), near_field
 // (phone at the ear, headset), or "off". Road noise in the car cut Alfred off.
 export const DEFAULT_NOISE = "far_field";
@@ -223,6 +227,10 @@ export function heardMs(firstSentAt, nowMs, totalMs) {
   return Math.max(0, Math.min(Math.floor(nowMs - firstSentAt), Math.floor(totalMs)));
 }
 
+export function emptyUsage() {
+  return { audioIn: 0, audioCached: 0, textIn: 0, textCached: 0, audioOut: 0, textOut: 0 };
+}
+
 // Add one response.done usage block to a running total.
 export function addUsage(total, usage) {
   if (!usage) return total;
@@ -245,6 +253,32 @@ export function usageCost(total, model = DEFAULT_MODEL) {
   return usd;
 }
 
+// Where a call's money went, in cents a minute, for the log as it ends. By
+// part of the bill: her voice, and the share of it the caller talked over;
+// what the answers read in, audio and text, at full price or from the cache;
+// what she wrote (tool calls, silent steps). Then by kind of answer, the
+// costliest first. Every answer reads the prompt, the tools and the call so
+// far again, so "in" is mostly that, not new speech: "caller spoke" is how
+// much new speech there was.
+export function costLines({ usage, byKind = {}, model = DEFAULT_MODEL, mins, cutShare = 0, speechMs = 0 }) {
+  if (!(mins > 0)) return [];
+  const p = /mini/.test(model) ? PRICES.mini : PRICES.full;
+  const rate = (tokens, price) => (tokens * price) / 1e4 / mins; // ¢ a minute
+  const f = (n) => n.toFixed(2);
+  const voice = rate(usage.audioOut, p.audioOut);
+  const lines = [
+    `📞 Where it went, ¢/min: her voice ${f(voice)} (talked over ${f(voice * cutShare)}) · ` +
+      `audio in ${f(rate(usage.audioIn, p.audioIn))} full, ${f(rate(usage.audioCached, p.audioCached))} cached · ` +
+      `text in ${f(rate(usage.textIn, p.textIn))} full, ${f(rate(usage.textCached, p.textCached))} cached · ` +
+      `text out ${f(rate(usage.textOut, p.textOut))} · caller spoke ${Math.round(speechMs / 1000)} s`,
+  ];
+  const kinds = Object.entries(byKind)
+    .map(([kind, u]) => [kind, (usageCost(u, model) * 100) / mins])
+    .sort((a, b) => b[1] - a[1]);
+  if (kinds.length) lines.push(`📞 By answer, ¢/min: ${kinds.map(([kind, c]) => `${kind} ${f(c)}`).join(" · ")}`);
+  return lines;
+}
+
 // One call, from the media "start" frame to the end of the call. It has the
 // same interface as makeCallSession in telnyx/pipeline.js.
 export function makeRealtimeSession({
@@ -259,6 +293,9 @@ export function makeRealtimeSession({
   // type start, line, cut, late or end (see callRow in ledger.js). It is not
   // awaited, and a failure is only logged: the call never waits on the ledger.
   onCallEvent = () => {},
+  // Each answer's bill as it comes: { kind, id, usage }, usage in the shape of
+  // emptyUsage(). For the voice eval; a failure is only logged.
+  onUsage = () => {},
   // What happens elsewhere while the call is live (liveFeed in context.js).
   // feed({ callId, caller, push }) is called as the call starts and returns
   // the function that stops it, which is called as the call ends.
@@ -305,7 +342,12 @@ export function makeRealtimeSession({
   if (!apiKey) throw new Error("The OpenAI engine needs OPENAI_API_KEY");
   const player = makePlayer({ send: sendFrame, now });
   const directTools = typeof makeTools === "function" ? makeTools({ caller, callId: callControlId }) : makeTools;
-  const usage = { audioIn: 0, audioCached: 0, textIn: 0, textCached: 0, audioOut: 0, textOut: 0 };
+  const usage = emptyUsage();
+  const byKind = {}; // the same, per kind of answer (REPLY, QUIET, SAY, …)
+  let outBytes = 0; // all of the voice's audio that came, at PHONE_RATE
+  let cutMs = 0; // of it, what the caller talked over
+  let speechMs = 0; // the caller's speech, as OpenAI's turn detection heard it
+  let speechFrom = null; // where the speech that runs now started, in its ms
   const startedAt = now();
   let ws = null;
   let ended = false;
@@ -485,6 +527,7 @@ export function makeRealtimeSession({
     }
     const it = item;
     it.bytes += buf.length;
+    outBytes += buf.length;
     lastAudioAt = now();
     if (update && m.response_id && m.response_id === update.id) update.heard = true;
     player.push(buf, () => {
@@ -541,6 +584,7 @@ export function makeRealtimeSession({
     player.clear();
     dropMarks();
     if (heard < total) {
+      cutMs += total - heard;
       send({ type: "conversation.item.truncate", item_id: item.id, content_index: 0, audio_end_ms: heard });
       log(`📞 Barge-in: the caller talked over Alfred (heard ${heard} of ${Math.round(total)} ms)`);
       cutLine(item.id, heard, Math.round(total));
@@ -556,7 +600,7 @@ export function makeRealtimeSession({
     if (quiet) {
       update = { id: null, heard: false, cancel: false };
       createResponse({
-        metadata: { kind: "still_working" },
+        metadata: { kind: STILL_WORKING },
         conversation: "none",
         output_modalities: ["audio"],
         tool_choice: "none",
@@ -682,7 +726,7 @@ export function makeRealtimeSession({
         return;
       case "response.created":
         activeResponse = true;
-        if (update && m.response?.metadata?.kind === "still_working") {
+        if (update && m.response?.metadata?.kind === STILL_WORKING) {
           update.id = m.response.id;
           if (update.cancel) send({ type: "response.cancel", response_id: update.id });
         }
@@ -692,8 +736,11 @@ export function makeRealtimeSession({
       case "response.output_audio.done":
         return endReply(m.item_id);
       case "input_audio_buffer.speech_started":
+        speechFrom = m.audio_start_ms ?? null;
         return bargeIn();
       case "input_audio_buffer.speech_stopped":
+        if (speechFrom != null && m.audio_end_ms != null) speechMs += Math.max(0, m.audio_end_ms - speechFrom);
+        speechFrom = null;
         callerSpeaking = false;
         speechStoppedAt = now();
         turnVoiceAt = lastVoiceAt;
@@ -728,7 +775,14 @@ export function makeRealtimeSession({
         const speaking = m.response?.metadata?.kind === QUIET && quietDone(m.response);
         if (hangingUp && !speaking) hangUpAfterGoodbye();
         if (update && (!update.id || m.response?.id === update.id)) update = null;
+        const kind = m.response?.metadata?.kind || REPLY;
         addUsage(usage, m.response?.usage);
+        addUsage((byKind[kind] ??= emptyUsage()), m.response?.usage);
+        try {
+          onUsage({ kind, id: m.response?.id ?? null, usage: addUsage(emptyUsage(), m.response?.usage) });
+        } catch (err) {
+          log(`⚠️  Usage report failed: ${err.message}`);
+        }
         if (pendingCreate && !activeResponse) {
           const ev = pendingCreate;
           pendingCreate = null;
@@ -763,7 +817,7 @@ export function makeRealtimeSession({
       for (const p of openQueue) send({ type: "input_audio_buffer.append", audio: p });
       openQueue = [];
       if (greeting) {
-        createResponse({ instructions: `Say exactly this and nothing else: "${greeting}"`, tool_choice: "none" });
+        createResponse({ metadata: { kind: GREET }, instructions: `Say exactly this and nothing else: "${greeting}"`, tool_choice: "none" });
       }
     };
     ws.on("open", () => {
@@ -830,6 +884,9 @@ export function makeRealtimeSession({
         `about $${usd.toFixed(4)}${mins > 0 ? ` ($${(usd / mins).toFixed(4)}/min)` : ""}` +
         (jobs.size ? `, ${jobs.size} use_tools request(s) still running` : "")
     );
+    const outMs = (outBytes * 1000) / PHONE_RATE;
+    const cutShare = outMs > 0 ? Math.min(1, cutMs / outMs) : 0;
+    for (const line of costLines({ usage, byKind, model, mins, cutShare, speechMs })) log(line);
     emit({ type: "end", reason, ms: now() - startedAt });
     if (hang) hangup().catch((err) => log(`⚠️  Hangup failed: ${err.message}`));
     onEnd();

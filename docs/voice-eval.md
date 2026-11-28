@@ -85,7 +85,12 @@ node scripts/voice-eval.mjs --compare agent/var/voice-eval/runs/<a> agent/var/vo
   Alfred was asked. Every call also gets the common checks: no false "I can't",
   no tool or system named, no failed tool call repeated as-is.
 - **Numbers:** words spoken, first-audio wait after the caller stops, the
-  wait for a `use_tools` answer, tool errors, cost.
+  wait for a `use_tools` answer, tool errors, cost. The cost is also split, in
+  ¢ a minute, by part of the bill and by kind of answer, from the lines a call
+  ends with (Cost in `docs/phone-design.md`): `summary.md` weighs each call by
+  its length, `--compare` puts the parts side by side, and each call's `.json`
+  keeps every answer's own bill (`usage` events), to see which ones read the
+  call again at full price.
 - **A Claude grader** (`claude -p`, Sonnet 5.5) scores done, honest, brief and
   smooth, 0–2 each, from the transcript, the starting data and the goal, and
   names the worst moment. The transcript shows what the call was told mid-call,
@@ -130,8 +135,10 @@ tick with no page finding the page.
 - What was left is the model. Mini still runs long, treats a misheard "limes
   and kefir" (`Lines and Keffer`) as a search, and gets some calendar moves
   wrong; the full model handles the same audio.
-- So the phone runs `gpt-realtime-2.1` (`VOICE_OPENAI_MODEL`), about 3¢ a call
-  against 1¢. Retry mini after the next prompt or tool change, with this suite.
+- So the phone runs `gpt-realtime-2.1` (`VOICE_OPENAI_MODEL`), about 3¢ a
+  25-second test call against 1¢; a real call of about two minutes is nearer
+  20¢ against 6¢. Retry mini after the next prompt or tool change, with this
+  suite.
 
 ### Phase two: the shared memory (#153), 2026-11-25
 
