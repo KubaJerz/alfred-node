@@ -862,9 +862,10 @@ export function makeVoiceTools({
     get_time: async () => timeNow(now()),
   };
 
-  // The descriptions with this call's day in the examples (EXAMPLE_DAY).
+  // The tool with this call's day in its examples (EXAMPLE_DAY), the
+  // parameters' descriptions too ("at: … like 2026-11-27T15:00").
   const today = localDate(now());
-  const dated = (tool) => ({ ...tool, description: tool.description.replaceAll(EXAMPLE_DAY, today) });
+  const dated = (tool) => JSON.parse(JSON.stringify(tool).replaceAll(EXAMPLE_DAY, today));
 
   return {
     defs: [NOTION_TOOL, dated(CALENDAR_TOOL), ...(reminderRoutes ? [dated(REMINDERS_TOOL)] : []), TIME_TOOL],

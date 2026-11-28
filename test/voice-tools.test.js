@@ -480,7 +480,7 @@ test("each call's calendar and reminders descriptions show its own day in the ex
   const desc = (name) => t.defs.find((d) => d.name === name).description;
   assert.match(desc("calendar"), /written like 2026-11-24T15:00; a date alone \(2026-11-24\) is all day/);
   assert.match(desc("reminders"), /written like 2026-11-24T15:00, or a wait/);
-  assert.doesNotMatch(desc("calendar") + desc("reminders"), /2026-11-27/);
+  assert.doesNotMatch(JSON.stringify(t.defs), /2026-11-27/, "nor in a parameter's description");
   assert.match(CALENDAR_TOOL.description, /2026-11-27T15:00/, "the constant keeps its own");
 });
 
