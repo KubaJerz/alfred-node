@@ -602,6 +602,11 @@ export function makeRealtimeSession({
       createResponse({
         metadata: { kind: STILL_WORKING },
         conversation: "none",
+        // The line needs nothing but its instruction. With no input, an
+        // out-of-band response reads the whole call and the tools again, at
+        // full price, since its instructions are not the call's.
+        input: [],
+        tools: [],
         output_modalities: ["audio"],
         tool_choice: "none",
         instructions:
@@ -706,6 +711,8 @@ export function makeRealtimeSession({
     createResponse({
       metadata: { kind: SAY },
       conversation: "none",
+      input: [], // only the text to say, not the call again (see stillWorking)
+      tools: [],
       output_modalities: ["audio"],
       tool_choice: "none",
       instructions: `Say exactly this and nothing else: "${text}"`,

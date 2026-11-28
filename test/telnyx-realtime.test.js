@@ -473,6 +473,17 @@ async function slowWithUpdate(opts = {}) {
   return { session, ws, logs, release: (r) => release(r), cancels, answers };
 }
 
+test("a still-working line reads only its own instruction, not the call or the tools", async () => {
+  const { session, ws, release } = await slowWithUpdate();
+  const line = ws.sent.find((e) => e.response?.metadata?.kind === "still_working").response;
+  assert.equal(line.conversation, "none");
+  assert.deepEqual(line.input, []);
+  assert.deepEqual(line.tools, []);
+  assert.match(line.instructions, /still on it/);
+  release("Done.");
+  session.end("test", { hang: false });
+});
+
 test("a still-working line that has not played is cancelled when the answer comes", async () => {
   const { session, ws, logs, release, cancels, answers } = await slowWithUpdate();
   ws.server({ type: "response.created", response: { id: "r_upd", metadata: { kind: "still_working" } } });
@@ -678,6 +689,8 @@ test("a quiet reply with no tool call is the answer, said out of band", async ()
   const [s] = say(ws);
   assert.ok(s, "the answer is spoken");
   assert.equal(s.response.conversation, "none");
+  assert.deepEqual(s.response.input, [], "it reads only the text to say, not the call again");
+  assert.deepEqual(s.response.tools, []);
   assert.deepEqual(s.response.output_modalities, ["audio"]);
   assert.equal(s.response.tool_choice, "none");
   assert.match(s.response.instructions, /^Say exactly this and nothing else: "Done, bread is off the list\."$/);

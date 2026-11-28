@@ -288,7 +288,9 @@ export async function runOpenAICall(scenario, {
     onCallEvent: call.onCallEvent,
     // Each answer's bill, to see which answers read the call again at full
     // price (the call's record keeps them; the transcript leaves them out).
-    onUsage: (u) => events.push({ t: at(), kind: "usage", ...u }),
+    // The answer's own kind (reply, greeting, …) is `answer`: spread in, it
+    // replaced "usage" as the event's kind.
+    onUsage: ({ kind, id, usage }) => events.push({ t: at(), kind: "usage", answer: kind, id, usage }),
   });
 
   // The phone line: a frame every 20 ms, the caller's words when there are
