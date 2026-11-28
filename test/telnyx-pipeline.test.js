@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import crypto from "crypto";
 import http from "http";
+import { EventEmitter } from "events";
 import WebSocket, { WebSocketServer } from "ws";
 import {
   tokenOk,
@@ -690,6 +691,104 @@ test("pipeline: a reply whose end mark never comes back counts as heard after th
     assert.ok(!s.logs.some((l) => /Barge-in/.test(l)));
     assert.equal(s.turns[1].missed, false);
     assert.ok(!peer.frames.some((f) => f.event === "clear"));
+  } finally {
+    await s.close();
+  }
+});
+
+// A stand-in for the OpenAI Realtime socket of engine "openai": it opens, and
+// takes what is sent.
+class FakeRealtimeWs extends EventEmitter {
+  constructor() {
+    super();
+    this.readyState = 0;
+    setImmediate(() => {
+      this.readyState = 1;
+      this.emit("open");
+    });
+  }
+  send() {}
+  close() {
+    this.readyState = 3;
+  }
+}
+
+test("pipeline (openai): realtime.onCallEvent gets the call's events, with its id and caller", async () => {
+  const events = [];
+  const realtime = { apiKey: "sk-test", WebSocketImpl: FakeRealtimeWs, greeting: "", onCallEvent: (e) => events.push(e) };
+  const s = await setup({ pipelineOpts: { engine: "openai", realtime } });
+  try {
+    assert.equal(await s.incoming("v3:call9"), 200);
+    await waitFor(() => s.commands.length === 1);
+    const peer = s.connectMedia();
+    await peer.open();
+    peer.start("v3:call9");
+    await waitFor(() => events.length === 1);
+    assert.deepEqual(events[0], { type: "start", callId: "v3:call9", caller: OWNER });
+    await s.postEvent("call.hangup", { call_control_id: "v3:call9", hangup_cause: "normal_clearing", hangup_source: "caller" });
+    await waitFor(() => events.length === 2 && peer.closed !== null);
+    assert.equal(events[1].type, "end");
+    assert.equal(events[1].reason, "call hung up");
+    assert.equal(events[1].callId, "v3:call9");
+    assert.equal(events.length, 2, "the socket closing after the hangup ends nothing twice");
+  } finally {
+    await s.close();
+  }
+});
+
+test("pipeline (openai): realtime.feed starts with the call, with its id and caller, and stops at the hangup", async () => {
+  const fed = [];
+  let stops = 0;
+  const feed = (f) => {
+    fed.push(f);
+    return () => stops++;
+  };
+  const realtime = { apiKey: "sk-test", WebSocketImpl: FakeRealtimeWs, greeting: "", feed };
+  const s = await setup({ pipelineOpts: { engine: "openai", realtime } });
+  try {
+    assert.equal(await s.incoming("v3:call8"), 200);
+    await waitFor(() => s.commands.length === 1);
+    const peer = s.connectMedia();
+    await peer.open();
+    peer.start("v3:call8");
+    await waitFor(() => fed.length === 1);
+    assert.equal(fed[0].callId, "v3:call8");
+    assert.equal(fed[0].caller, OWNER);
+    assert.equal(stops, 0);
+    await s.postEvent("call.hangup", { call_control_id: "v3:call8", hangup_cause: "normal_clearing", hangup_source: "caller" });
+    await waitFor(() => stops === 1 && peer.closed !== null);
+    assert.equal(stops, 1, "the socket closing after the hangup stops nothing twice");
+  } finally {
+    await s.close();
+  }
+});
+
+test("pipeline (openai): realtime.buildInstructions is asked with the call's id and caller, and its briefing is the call's prompt", async () => {
+  const asked = [];
+  const sent = [];
+  class RecordingWs extends FakeRealtimeWs {
+    send(s) {
+      sent.push(JSON.parse(s));
+    }
+  }
+  const buildInstructions = async (a) => {
+    asked.push(a);
+    return `${a.prompt}\n\nBRIEFED`;
+  };
+  const realtime = { apiKey: "sk-test", WebSocketImpl: RecordingWs, greeting: "", instructions: "PLAIN", buildInstructions };
+  const s = await setup({ pipelineOpts: { engine: "openai", realtime } });
+  try {
+    assert.equal(await s.incoming("v3:call7"), 200);
+    await waitFor(() => s.commands.length === 1);
+    const peer = s.connectMedia();
+    await peer.open();
+    peer.start("v3:call7");
+    await waitFor(() => sent.length === 1);
+    assert.deepEqual(asked, [{ callId: "v3:call7", caller: OWNER, prompt: "PLAIN" }]);
+    assert.equal(sent[0].type, "session.update");
+    assert.match(sent[0].session.instructions, /^It is .* as the call starts\.\n\nPLAIN\n\nBRIEFED$/);
+    await s.postEvent("call.hangup", { call_control_id: "v3:call7", hangup_cause: "normal_clearing", hangup_source: "caller" });
+    await waitFor(() => peer.closed !== null);
   } finally {
     await s.close();
   }

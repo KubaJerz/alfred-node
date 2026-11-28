@@ -9,10 +9,26 @@
 //
 // The direct tools are the real ones (telnyx/voice-tools.js) on the fake world
 // (fakes.js); use_tools goes to the fake Alfred.
+//
+// Each call has its own ledger in a temp dir, written as bot.js writes the
+// real one, and the bot's own live feed (context.js) tells the call what lands
+// in it. A scenario turn's rows (a text, Alfred's reply) go in there, so they
+// reach the voice by the same code as on a real call.
+//
+// That temp dir is the call's state dir too. A scenario's briefing world
+// (USER.md, MEMORY.md, the daily notes, the messages of the last hours) is
+// written there before the call, and the call's prompt is built from it by
+// the bot's own builder (callBriefing in context.js), as on a real call.
 
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { makeRealtimeSession } from "../telnyx/realtime.js";
 import { makeVoiceTools } from "../telnyx/voice-tools.js";
 import { MULAW_SILENCE, PHONE_RATE } from "../telnyx/audio.js";
+import { makeLedger, callRow, inboundRow } from "../ledger.js";
+import { callBriefing, liveFeed } from "../context.js";
+import { dailyNotePath, dayBefore, easternDate } from "../dailies.js";
 import { callerAudio, makeRecording } from "./audio.js";
 import { fakeAlfred, fakeCalendar, fakeNotion } from "./fakes.js";
 
@@ -21,12 +37,94 @@ const FRAME_MS = 20;
 const QUIET_MS = 2500; // Alfred silent this long, with nothing running: his turn is over
 const REPLY_WAIT_MS = 20000; // the longest we wait for any reply to a line
 const TURN_MAX_MS = 60000; // the longest one exchange may take
+// After messages from elsewhere land, the caller waits this long before the
+// line: the voice must stay quiet through it, since no one asked it anything.
+export const ROWS_QUIET_MS = 2000;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // The clock the scenario's tools see: a fixed Wednesday morning, so dates in
 // scenarios ("tomorrow", "Friday") always mean the same day.
 export const EVAL_NOW = new Date("2026-12-02T15:00:00Z"); // 10:00 AM Eastern
 
+// The ledger of one test call, in a temp dir, and its hooks for
+// makeRealtimeSession as bot.js makes them: feed is the bot's liveFeed
+// (told(text) hears each item the call gets), onCallEvent writes the call's
+// own lines as logCallEvent does, and asked/answered write a use_tools turn's
+// rows as handleTurn does. So the voice hears a scenario's rows, and never its
+// own, by the bot's code. inject(rows) writes rows in order.
+//
+// The dir is the call's state dir too: seed(world) writes a scenario's
+// briefing world into it, and buildInstructions is the bot's, on that dir.
+// briefing() is what it built last. now is the call's clock, for the
+// ledger's ts and the briefing's "now".
+export function makeCallLedger({ told = () => {}, log = () => {}, now = () => Date.now() } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), "voice-eval-ledger-"));
+  const errors = { error: log, log };
+  const file = join(dir, "messages.jsonl");
+  const logsDir = join(dir, "logs");
+  const ledger = makeLedger({ file, logsDir, now, log: errors });
+  let built = null;
+  return {
+    ledger,
+    stateDir: dir,
+    // The briefing world: { user, memory, yesterday, today, rows }, each part
+    // optional. The files go where the bot keeps them; the rows go into the
+    // ledger in order, each at its own ts (a row needs one), through the
+    // ledger's own append.
+    async seed({ user, memory, yesterday, today, rows = [] } = {}) {
+      const memories = join(dir, "memories");
+      const day = easternDate(new Date(now()));
+      const files = [
+        [join(dir, "USER.md"), user],
+        [join(memories, "MEMORY.md"), memory],
+        [dailyNotePath(memories, dayBefore(day)), yesterday],
+        [dailyNotePath(memories, day), today],
+      ];
+      for (const [where, text] of files) {
+        if (!text) continue;
+        mkdirSync(dirname(where), { recursive: true });
+        writeFileSync(where, text);
+      }
+      let at = 0;
+      const past = makeLedger({ file, logsDir, now: () => at, log: errors });
+      for (const row of rows) {
+        at = Date.parse(row.ts);
+        if (Number.isNaN(at)) throw new Error(`A briefing row needs its ts: ${JSON.stringify(row)}`);
+        await past.append(row);
+      }
+    },
+    buildInstructions: async ({ callId, prompt }) => {
+      built = await callBriefing({ stateDir: dir, ledger, prompt, callId, now: new Date(now()), log: errors });
+      return built;
+    },
+    briefing: () => built,
+    feed: ({ push }) =>
+      liveFeed({
+        ledger,
+        push: (text, key) => {
+          told(text);
+          push(text, key);
+        },
+        log: errors,
+      }),
+    onCallEvent: (ev) => {
+      const row = callRow(ev);
+      return row ? ledger.append(row) : null;
+    },
+    asked: ({ text, caller, callId }) =>
+      ledger.append(inboundRow({ who: { tag: `call:${caller}`, id: caller, channel: "call" }, via: "call", text, agentDir: dir, callId })),
+    answered: ({ callId }, reply) => ledger.append({ dir: "out", via: "call", kind: "reply", text: reply, callId }),
+    inject: async (rows = []) => {
+      for (const row of rows) await ledger.append(row);
+    },
+    close: () => rmSync(dir, { recursive: true, force: true }),
+  };
+}
+
+// briefing, feed: false for a control run (--no-briefing, --no-feed): the call
+// starts with the prompt alone, or is told nothing mid-call, as with
+// VOICE_OPENAI_BRIEFING=0 or VOICE_OPENAI_LIVE=0 on the box. The scenario's
+// world and rows are written all the same; only the call does not get them.
 export async function runOpenAICall(scenario, {
   apiKey,
   instructions,
@@ -36,6 +134,8 @@ export async function runOpenAICall(scenario, {
   voice,
   noise,
   quietChains = false,
+  briefing: withBriefing = true,
+  feed: withFeed = true,
   callerVoice = "ash",
   ttsCache,
   alfredDelayMs = 4000,
@@ -102,12 +202,24 @@ export async function runOpenAICall(scenario, {
       }
     },
   };
+  // The call's clock: the scenario's fixed morning, running from the start.
+  const clock = () => new Date(EVAL_NOW.getTime() + at());
+  const call = makeCallLedger({ told: (text) => events.push({ t: at(), kind: "told", text }), log, now: () => clock().getTime() });
+  try {
+    await call.seed(scenario.briefing);
+  } catch (err) {
+    call.close();
+    throw err;
+  }
   const onTurn = async (a) => {
     pending++;
     const t = at();
     try {
+      await call.asked(a);
       const reply = await alfred.onTurn(a);
-      events.push({ t, kind: "use_tools", request: a.text, reply });
+      // done: when the answer came back, so a check can tell what was said before it.
+      events.push({ t, done: at(), kind: "use_tools", request: a.text, reply });
+      await call.answered(a, reply);
       return reply;
     } finally {
       pending--;
@@ -148,9 +260,14 @@ export async function runOpenAICall(scenario, {
     reasoning,
     noise,
     instructions,
+    // The bot's builder on the scenario's briefing world. With none, it is
+    // the prompt alone, so the other scenarios run as before.
+    buildInstructions: withBriefing ? call.buildInstructions : undefined,
     quietChains,
     directTools,
-    clock: () => new Date(EVAL_NOW.getTime() + at()),
+    clock,
+    feed: withFeed ? call.feed : undefined,
+    onCallEvent: call.onCallEvent,
   });
 
   // The phone line: a frame every 20 ms, the caller's words when there are
@@ -179,6 +296,16 @@ export async function runOpenAICall(scenario, {
       events.push({ t: at(), kind: "caller", text });
       speech = { bytes, off: 0, done: resolve };
     });
+
+  // Messages from elsewhere land in the ledger, and the feed tells the call.
+  // Then the caller waits a moment, as after sending a text. spoke: the voice
+  // made a sound in that time, with no one talking to it.
+  const deliver = async (rows) => {
+    const t = at();
+    await call.inject(rows);
+    await sleep(ROWS_QUIET_MS);
+    events.push({ t, kind: "rows", rows: rows.length, spoke: lastOut > t });
+  };
 
   const speaking = () => playEnd > at();
   // Alfred's turn is over: he has said something since `since`, nothing is
@@ -209,6 +336,7 @@ export async function runOpenAICall(scenario, {
         while (!ended && !(lastOut > from && speaking()) && at() - from < REPLY_WAIT_MS) await sleep(50);
         await sleep(turn.bargeInMs);
       } else if (turn.pauseMs) await sleep(turn.pauseMs);
+      if (turn.rows?.length) await deliver(turn.rows);
       await say(lines[i], turn.say);
       // A next line that cuts in, or follows after a set pause, does not wait.
       const next = scenario.turns[i + 1];
@@ -219,6 +347,7 @@ export async function runOpenAICall(scenario, {
     clearInterval(line);
     endReason = endedByAlfred ? "Alfred hung up" : "test hung up";
     await sleep(300);
+    call.close();
   }
 
   if (apiError) throw Object.assign(new Error(apiError.replace(/^⚠️\s+/, "")), { fatal: true });
@@ -232,6 +361,8 @@ export async function runOpenAICall(scenario, {
     endedByAlfred,
     events: events.sort((a, b) => a.t - b.t),
     log: logLines,
+    // The background the call started with ("" without one), for the grader.
+    briefing: call.briefing()?.background || "",
     world: { notion: notion.dump(), calendar: calendar.events(), alfred: alfred.requests, computer: alfred.world.computer },
     notion,
     calendar,

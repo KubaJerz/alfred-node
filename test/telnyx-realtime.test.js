@@ -1,6 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "events";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { makeLedger, callRow, inboundRow } from "../ledger.js";
+import { liveFeed, callBriefing, CLEARED_UPDATE } from "../context.js";
 import {
   makeRealtimeSession,
   sessionUpdate,
@@ -13,6 +18,7 @@ import {
   USE_TOOLS,
   END_CALL,
   DEFAULT_INSTRUCTIONS,
+  BRIEFING_WAIT_MS,
   toolOutput,
   oneLine,
   GREETING,
@@ -376,7 +382,7 @@ test("a slow Alfred gets a spoken still-working line", async () => {
 });
 
 // A slow use_tools call whose still-working line has been asked for.
-async function slowWithUpdate() {
+async function slowWithUpdate(opts = {}) {
   let release;
   const logs = [];
   const session = makeRealtimeSession({
@@ -390,6 +396,7 @@ async function slowWithUpdate() {
     WebSocketImpl: FakeWs,
     greeting: "",
     updateMs: 60,
+    ...opts,
   });
   session.start();
   const ws = FakeWs.last;
@@ -637,4 +644,443 @@ test("a quiet goodbye with end_call is said, then the call hangs up", async () =
   ws.server({ type: "response.done", response: { id: "s1", status: "completed", metadata: { kind: "say" } } });
   await waitFor(() => hung() === 1, 3000);
   session.end("test", { hang: false });
+});
+
+// ── The call in the ledger (onCallEvent) ────────────────────────────────────
+
+const WHO = { callId: "v3:abc", caller: "+15551234567" };
+
+test("call events: the start, the caller's and the voice's lines as they come, and the end with its length", async () => {
+  let t = 1000;
+  const events = [];
+  const { session, ws } = setup({ opts: { greeting: "", now: () => t, onCallEvent: (e) => events.push(e) } });
+  assert.deepEqual(events, [{ type: "start", ...WHO }], "the start comes as the session starts");
+  await waitFor(() => ws.readyState === 1);
+  ws.server({ type: "conversation.item.input_audio_transcription.completed", item_id: "in1", transcript: " Add kale to the list. " });
+  ws.server({ type: "conversation.item.input_audio_transcription.completed", item_id: "in2", transcript: "  " });
+  ws.server({ type: "response.created", response: { id: "r1" } });
+  ws.server({ type: "response.output_audio_transcript.done", response_id: "r1", item_id: "out1", transcript: "Got it." });
+  assert.equal(events.length, 3, "each line goes as it comes, not at the end of the call");
+  t += 125_000;
+  session.end("call hung up", { hang: false });
+  session.end("again", { hang: false });
+  assert.deepEqual(events.slice(1), [
+    { type: "line", dir: "in", text: "Add kale to the list.", ...WHO },
+    { type: "line", dir: "out", text: "Got it.", ...WHO },
+    { type: "end", reason: "call hung up", ms: 125_000, ...WHO },
+  ]);
+});
+
+test("the text of a silent tool chain is never a line; the answer the caller heard is", async () => {
+  const events = [];
+  const { session, ws } = await quietChain({ onCallEvent: (e) => events.push(e) });
+  // Narration between tool calls: silent text, never audio.
+  ws.server({
+    type: "response.done",
+    response: { id: "q1", status: "completed", metadata: { kind: "quiet" }, output: [message("Now the eggs."), { type: "function_call", name: "notion", call_id: "c2" }] },
+  });
+  ws.server({ type: "response.created", response: { id: "q2", metadata: { kind: "quiet" } } });
+  ws.server({
+    type: "response.done",
+    response: { id: "q2", status: "completed", metadata: { kind: "quiet" }, output: [message("Done, bread is off the list.")] },
+  });
+  assert.equal(events.filter((e) => e.type === "line").length, 0, "nothing was said yet");
+  // The answer is said out of band; its audio transcript is what was heard.
+  ws.server({ type: "response.created", response: { id: "s1", metadata: { kind: "say" } } });
+  ws.server({ type: "response.output_audio_transcript.done", response_id: "s1", item_id: "s_it", transcript: "Done, bread is off the list." });
+  assert.deepEqual(events.filter((e) => e.type === "line").map((e) => [e.dir, e.text]), [["out", "Done, bread is off the list."]]);
+  session.end("test", { hang: false });
+});
+
+test("a still-working line is filler, not a line of the call", async () => {
+  const events = [];
+  const { session, ws, release } = await slowWithUpdate({ onCallEvent: (e) => events.push(e) });
+  ws.server({ type: "response.created", response: { id: "r_upd", metadata: { kind: "still_working" } } });
+  ws.server({ type: "response.output_audio.delta", response_id: "r_upd", item_id: "it_upd", delta: ulaw(200) });
+  ws.server({ type: "response.output_audio_transcript.done", response_id: "r_upd", item_id: "it_upd", transcript: "Still on it." });
+  ws.server({ type: "response.done", response: { id: "r_upd", status: "completed" } });
+  release("Two meetings.");
+  await waitFor(() => ws.sent.some((e) => e.type === "conversation.item.create"));
+  ws.server({ type: "response.created", response: { id: "r_ans" } });
+  ws.server({ type: "response.output_audio_transcript.done", response_id: "r_ans", item_id: "it_ans", transcript: "You have two meetings." });
+  assert.deepEqual(events.filter((e) => e.type === "line").map((e) => e.text), ["You have two meetings."]);
+  session.end("test", { hang: false });
+});
+
+test("a line the caller talked over says how much they heard, before or after its transcript came", async () => {
+  let t = 1000;
+  const events = [];
+  const { session, ws } = setup({ opts: { greeting: "", now: () => t, onCallEvent: (e) => events.push(e) } });
+  await waitFor(() => ws.readyState === 1);
+  // The transcript first, then the caller cuts in 400 ms into 3 s of audio.
+  ws.server({ type: "response.created", response: { id: "r1" } });
+  ws.server({ type: "response.output_audio.delta", response_id: "r1", item_id: "a", delta: ulaw(3000) });
+  ws.server({ type: "response.output_audio_transcript.done", response_id: "r1", item_id: "a", transcript: "Milk, eggs, bread, kale and spinach." });
+  t += 400;
+  ws.server({ type: "input_audio_buffer.speech_started" });
+  // The caller cuts in first; the transcript of the cut reply comes after.
+  t = 5000;
+  ws.server({ type: "response.created", response: { id: "r2" } });
+  ws.server({ type: "response.output_audio.delta", response_id: "r2", item_id: "b", delta: ulaw(2000) });
+  t += 250;
+  ws.server({ type: "input_audio_buffer.speech_started" });
+  ws.server({ type: "response.output_audio_transcript.done", response_id: "r2", item_id: "b", transcript: "Sure, the list has" });
+  // A reply heard to the end is a plain line.
+  t = 9000;
+  ws.server({ type: "response.created", response: { id: "r3" } });
+  ws.server({ type: "response.output_audio.delta", response_id: "r3", item_id: "c", delta: ulaw(500) });
+  ws.server({ type: "response.output_audio_transcript.done", response_id: "r3", item_id: "c", transcript: "Kale is on it." });
+  assert.deepEqual(ws.sent.filter((e) => e.type === "conversation.item.truncate").map((e) => [e.item_id, e.audio_end_ms]), [["a", 400], ["b", 250]]);
+  assert.deepEqual(events.slice(1).map(({ callId, caller, ...e }) => e), [
+    { type: "line", dir: "out", text: "Milk, eggs, bread, kale and spinach." },
+    { type: "cut", heardMs: 400, totalMs: 3000 },
+    { type: "line", dir: "out", text: "Sure, the list has", heardMs: 250, totalMs: 2000 },
+    { type: "line", dir: "out", text: "Kale is on it." },
+  ]);
+  session.end("test", { hang: false });
+});
+
+test("use_tools gets the call's id, and an answer after the hangup is a late event", async () => {
+  const run = async (answer) => {
+    let release;
+    const events = [];
+    const turns = [];
+    const session = makeRealtimeSession({
+      callControlId: "v3:late",
+      caller: "+1",
+      sendFrame: () => {},
+      onTurn: (t) => {
+        turns.push(t);
+        return new Promise((r) => (release = r));
+      },
+      onCallEvent: (e) => events.push(e),
+      hangup: async () => {},
+      log: () => {},
+      apiKey: "sk-test",
+      WebSocketImpl: FakeWs,
+      greeting: "",
+    });
+    session.start();
+    const ws = FakeWs.last;
+    await waitFor(() => ws.readyState === 1);
+    ws.server({ type: "response.function_call_arguments.done", name: "use_tools", call_id: "c8", arguments: '{"request":"read the list"}' });
+    await waitFor(() => release);
+    session.end("call hung up", { hang: false });
+    release(answer);
+    await sleep(20);
+    return { events, turns };
+  };
+  const { events, turns } = await run("Milk, eggs.");
+  assert.equal(turns[0].callId, "v3:late");
+  assert.deepEqual(events.map((e) => e.type), ["start", "end", "late"]);
+  assert.deepEqual(events[2], { type: "late", request: "read the list", text: "Milk, eggs.", callId: "v3:late", caller: "+1" });
+  // An empty answer sends nothing, so there is nothing to keep.
+  assert.deepEqual((await run("  ")).events.map((e) => e.type), ["start", "end"]);
+});
+
+test("the direct tools are made for the call: its caller and its id", () => {
+  let made = null;
+  const directTools = (who) => {
+    made = who;
+    return { defs: [], names: [], call: async () => "" };
+  };
+  const { session } = setup({ opts: { greeting: "", directTools } });
+  assert.deepEqual(made, WHO);
+  session.end("test", { hang: false });
+});
+
+test("an onCallEvent that throws or rejects is logged, and the call goes on", async () => {
+  const throws = () => {
+    throw new Error("disk full");
+  };
+  const rejects = async () => {
+    throw new Error("disk full");
+  };
+  for (const onCallEvent of [throws, rejects]) {
+    const { session, ws, turns, logs, ended } = setup({ opts: { greeting: "", onCallEvent } });
+    await waitFor(() => ws.readyState === 1);
+    assert.equal(ws.sent[0].type, "session.update", "the start event's failure did not stop the connect");
+    ws.server({ type: "conversation.item.input_audio_transcription.completed", item_id: "i1", transcript: "What's on today?" });
+    ws.server({ type: "response.created", response: { id: "r1" } });
+    ws.server({ type: "response.output_audio_transcript.done", response_id: "r1", item_id: "o1", transcript: "One moment." });
+    ws.server({ type: "response.function_call_arguments.done", name: "use_tools", call_id: "c1", arguments: '{"request":"today"}' });
+    await waitFor(() => ws.sent.some((e) => e.type === "conversation.item.create"));
+    assert.equal(turns.length, 1, "use_tools still reached Alfred");
+    session.end("test", { hang: false });
+    assert.equal(ended(), 1);
+    await waitFor(() => logs.filter((l) => /^⚠️ {2}Call event \w+ failed: disk full$/.test(l)).length === 4);
+    assert.deepEqual(
+      logs.map((l) => /Call event (\w+) failed/.exec(l)?.[1]).filter(Boolean),
+      ["start", "line", "line", "end"],
+    );
+  }
+});
+
+// ── The live feed ───────────────────────────────────────────────────────────
+
+// The texts of the system items sent to OpenAI.
+const systemItems = (ws) =>
+  ws.sent.filter((e) => e.type === "conversation.item.create" && e.item?.role === "system").map((e) => e.item.content[0].text);
+const asItem = (text) => ({ type: "conversation.item.create", item: { type: "message", role: "system", content: [{ type: "input_text", text }] } });
+
+test("the feed starts with the call's id and caller, and stops once when the call ends", async () => {
+  const started = [];
+  let stops = 0;
+  const feed = (who) => {
+    started.push(who);
+    return () => stops++;
+  };
+  const { session, ws } = setup({ opts: { greeting: "", feed } });
+  assert.equal(started.length, 1);
+  assert.equal(started[0].callId, "v3:abc");
+  assert.equal(started[0].caller, "+15551234567");
+  assert.equal(typeof started[0].push, "function");
+  await waitFor(() => ws.readyState === 1);
+  assert.equal(stops, 0);
+  session.end("call hung up", { hang: false });
+  session.end("again", { hang: false });
+  assert.equal(stops, 1);
+});
+
+test("a push before the socket opens is held, then goes in right after the session.update", async () => {
+  let push;
+  const feed = (f) => {
+    push = f.push;
+    f.push('[Meanwhile, by text, the user said: "one".]');
+    return () => {};
+  };
+  const { session, ws, logs } = setup({ opts: { feed } });
+  push('[You replied by text: "two"]');
+  assert.equal(ws.sent.length, 0, "nothing goes before the socket is open");
+  await waitFor(() => ws.sent.length >= 4);
+  assert.deepEqual(ws.types().slice(0, 4), ["session.update", "conversation.item.create", "conversation.item.create", "response.create"]);
+  assert.deepEqual(ws.sent[1], asItem('[Meanwhile, by text, the user said: "one".]'));
+  assert.deepEqual(ws.sent[2], asItem('[You replied by text: "two"]'));
+  assert.match(ws.sent[3].response.instructions, new RegExp(GREETING), "the only response is the greeting");
+  assert.ok(logs.includes('📞 Live update for the call (held until the socket opens): [Meanwhile, by text, the user said: "one".]'), logs.join("\n"));
+  session.end("test", { hang: false });
+});
+
+test("a push during the call is a system item and nothing more: no response.create, no session.update", async () => {
+  let push;
+  const { session, ws } = setup({ opts: { greeting: "", feed: (f) => ((push = f.push), () => {}) } });
+  await waitFor(() => ws.sent.length >= 1);
+  push('[Meanwhile, by SMS, the user said: "eggs".]');
+  assert.deepEqual(ws.sent.at(-1), asItem('[Meanwhile, by SMS, the user said: "eggs".]'));
+  // While a response runs, the item goes in and the response is left alone.
+  ws.server({ type: "response.created", response: { id: "r1" } });
+  push('[You replied by SMS: "ok"]');
+  ws.server({ type: "response.done", response: { id: "r1", status: "completed" } });
+  push("  "); // no words: nothing
+  assert.deepEqual(systemItems(ws), ['[Meanwhile, by SMS, the user said: "eggs".]', '[You replied by SMS: "ok"]']);
+  assert.deepEqual(ws.types().filter((t) => t !== "conversation.item.create"), ["session.update"], "no response asked, none cut, settings unchanged");
+  session.end("test", { hang: false });
+});
+
+test("after the call ends, a push is dropped, and what was held never goes", async () => {
+  let push;
+  const { session, ws, logs } = setup({ opts: { greeting: "", feed: (f) => ((push = f.push), () => {}) } });
+  push("[held]");
+  session.end("call hung up", { hang: false }); // before the socket opened
+  await sleep(10); // the socket opens, and the call closes it at once
+  push("[too late]");
+  assert.deepEqual(ws.sent, []);
+  assert.equal(logs.filter((l) => /Live update/.test(l)).length, 1);
+});
+
+test("a feed that throws at the start, or whose stop throws, is logged, and the call goes on", async () => {
+  const fails = setup({ opts: { greeting: "", feed: () => { throw new Error("no ledger"); } } });
+  await waitFor(() => fails.ws.sent.length >= 1);
+  assert.equal(fails.ws.sent[0].type, "session.update");
+  assert.ok(fails.logs.includes("⚠️  The call's live feed did not start: no ledger"), fails.logs.join("\n"));
+  fails.ws.server({ type: "response.function_call_arguments.done", name: "use_tools", call_id: "c1", arguments: '{"request":"today"}' });
+  await waitFor(() => fails.turns.length === 1);
+  fails.session.end("test", { hang: false });
+  assert.equal(fails.ended(), 1);
+
+  const stuck = setup({ opts: { greeting: "", feed: () => () => { throw new Error("already gone"); } } });
+  await waitFor(() => stuck.ws.readyState === 1);
+  stuck.session.end("call hung up", { hang: false });
+  assert.equal(stuck.ended(), 1, "the call still ended");
+  assert.ok(stuck.logs.includes("⚠️  The call's live feed did not stop: already gone"), stuck.logs.join("\n"));
+});
+
+test("through a real ledger: a text during the call reaches the voice, its own lines never do, /clear tells it to forget", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "alfred-live-"));
+  const ledger = makeLedger({ file: path.join(dir, "messages.jsonl"), logsDir: path.join(dir, "logs") });
+  const writes = [];
+  // As bot.js wires it: the call writes its own rows, and the feed tells it the rest.
+  const { session, ws } = setup({
+    opts: {
+      greeting: "",
+      feed: ({ push }) => liveFeed({ ledger, push }),
+      onCallEvent: (ev) => {
+        const row = callRow(ev);
+        if (row) writes.push(ledger.append(row));
+      },
+    },
+  });
+  await waitFor(() => ws.sent.length >= 1);
+  ws.server({ type: "conversation.item.input_audio_transcription.completed", item_id: "i1", transcript: "Hang on, I'm texting you." });
+  ws.server({ type: "response.created", response: { id: "r1" } });
+  ws.server({ type: "response.output_audio_transcript.done", response_id: "r1", item_id: "o1", transcript: "Of course." });
+  await Promise.all(writes);
+  const who = { tag: "kuba", id: "1", channel: "c1" };
+  await ledger.append(inboundRow({ who, via: "discord", text: "Thoughts on these?", agentDir: dir, attachments: [path.join(dir, "var", "9-0-shoes.jpg")] }));
+  await ledger.append({ dir: "out", via: "discord", kind: "reply", text: "Hoka Clifton 9s, in blue.", files: 0 });
+  await ledger.archive();
+  const items = systemItems(ws);
+  assert.equal(items.length, 3, items.join("\n"));
+  assert.match(items[0], /^\[Meanwhile, by text, the user said: "Thoughts on these\?", and sent a photo\./);
+  assert.match(items[1], /^\[You replied by text: "Hoka Clifton 9s, in blue\."/);
+  assert.equal(items[2], CLEARED_UPDATE);
+  assert.equal(ws.sent.filter((e) => e.type === "response.create").length, 0);
+  // The call's lines are in the ledger (they went to the archive), never in the call.
+  assert.equal(items.some((t) => /texting you|Of course/.test(t)), false);
+  // The end stops the feed: a text after the call does not reach it.
+  session.end("call hung up", { hang: false });
+  await Promise.all(writes);
+  await ledger.append(inboundRow({ who, via: "sms", text: "after the call", agentDir: dir }));
+  assert.equal(systemItems(ws).length, 3);
+});
+
+// ── The briefing (buildInstructions) ────────────────────────────────────────
+
+const DATE_LINE = "It is Wednesday, December 2, 2026 at 10:00 AM (Eastern) as the call starts.";
+const AT_TEN = () => new Date("2026-12-02T15:00:00Z");
+// A promise the test settles itself.
+const later = () => {
+  let resolve, reject;
+  const promise = new Promise((res, rej) => ((resolve = res), (reject = rej)));
+  return { promise, resolve, reject };
+};
+
+test("the briefing starts with the call and is awaited before the session.update: the date line first, then the briefing", async () => {
+  const asked = [];
+  const built = later();
+  const buildInstructions = (a) => {
+    asked.push(a);
+    return built.promise;
+  };
+  const { session, ws, logs } = setup({ opts: { buildInstructions, instructions: "PLAIN", clock: AT_TEN } });
+  await waitFor(() => asked.length === 1);
+  assert.deepEqual(asked[0], { callId: "v3:abc", caller: "+15551234567", prompt: "PLAIN" }, "the plain prompt goes to the builder");
+  await waitFor(() => ws.readyState === 1);
+  // The socket is open, the briefing is not ready: no settings, no audio yet.
+  session.onFrame({ event: "media", media: { track: "inbound", chunk: "1", payload: ulaw(20) } });
+  await sleep(20);
+  assert.deepEqual(ws.sent, [], "nothing goes before the briefing");
+  built.resolve({ text: "PLAIN\n\nBACKGROUND", shown: new Set() });
+  await waitFor(() => ws.sent.length >= 3);
+  assert.deepEqual(ws.types().slice(0, 3), ["session.update", "input_audio_buffer.append", "response.create"]);
+  assert.equal(ws.sent[0].session.instructions, `${DATE_LINE}\n\nPLAIN\n\nBACKGROUND`);
+  assert.ok(logs.some((l) => /^📞 Briefing: 17 characters, built in \d+ ms$/.test(l)), logs.join("\n"));
+  // From now on, caller audio goes straight in.
+  session.onFrame({ event: "media", media: { track: "inbound", chunk: "2", payload: "AAAA" } });
+  assert.deepEqual(ws.sent.at(-1), { type: "input_audio_buffer.append", audio: "AAAA" });
+  session.end("test", { hang: false });
+});
+
+test("a briefing as a plain string is the prompt too; with no instructions, the builder gets the default prompt", async () => {
+  let prompt = null;
+  const { session, ws } = setup({ opts: { greeting: "", clock: AT_TEN, buildInstructions: async (a) => ((prompt = a.prompt), "BRIEFED") } });
+  await waitFor(() => ws.sent.length >= 1);
+  assert.equal(prompt, DEFAULT_INSTRUCTIONS);
+  assert.equal(ws.sent[0].session.instructions, `${DATE_LINE}\n\nBRIEFED`);
+  session.end("test", { hang: false });
+});
+
+test("a briefing that fails, throws, comes back empty or is late: the call starts with the plain prompt, and the log says why", async () => {
+  const cases = [
+    ["rejects", async () => { throw new Error("disk on fire"); }, "⚠️  The briefing failed: disk on fire. The call starts with the plain prompt"],
+    ["throws", () => { throw new Error("no ledger"); }, "⚠️  The briefing failed: no ledger. The call starts with the plain prompt"],
+    ["empty", async () => ({ text: "  ", shown: [] }), "⚠️  The briefing came back empty: the call starts with the plain prompt"],
+    ["nothing", async () => undefined, "⚠️  The briefing came back empty: the call starts with the plain prompt"],
+    ["late", () => new Promise(() => {}), "⚠️  The briefing was not ready 30 ms after the socket opened: the call starts with the plain prompt"],
+  ];
+  for (const [name, buildInstructions, why] of cases) {
+    const { session, ws, logs } = setup({ opts: { buildInstructions, briefingWaitMs: 30, instructions: "PLAIN", clock: AT_TEN } });
+    await waitFor(() => ws.sent.length >= 2, 1000);
+    assert.equal(ws.sent[0].session.instructions, `${DATE_LINE}\n\nPLAIN`, name);
+    assert.equal(ws.sent[1].type, "response.create", `${name}: the greeting still comes`);
+    assert.ok(logs.includes(why), `${name}:\n${logs.join("\n")}`);
+    session.end("test", { hang: false });
+  }
+  assert.equal(BRIEFING_WAIT_MS, 1000, "the default wait is the named constant");
+});
+
+test("the feed starts before the briefing is asked for, so a row written meanwhile reaches the call one way or the other", async () => {
+  const order = [];
+  const { session, ws } = setup({
+    opts: { greeting: "", feed: () => (order.push("feed"), () => {}), buildInstructions: async () => (order.push("briefing"), "B") },
+  });
+  await waitFor(() => ws.sent.length >= 1);
+  assert.deepEqual(order, ["feed", "briefing"]);
+  session.end("test", { hang: false });
+});
+
+test("a held live update for a row that the briefing tells is dropped; the others go in after the session.update", async () => {
+  let push;
+  const built = later();
+  const feed = (f) => ((push = f.push), () => {});
+  const { session, ws, logs } = setup({ opts: { greeting: "", feed, buildInstructions: () => built.promise } });
+  push("[in the briefing too]", "2026-12-02T14:59:00.000Z");
+  push("[only in the feed]", "2026-12-02T14:59:30.000Z");
+  push("[The user cleared the conversation]");
+  await waitFor(() => ws.readyState === 1);
+  built.resolve({ text: "BRIEFED", shown: new Set(["2026-12-02T14:59:00.000Z"]) });
+  await waitFor(() => ws.sent.length >= 3);
+  assert.deepEqual(ws.types(), ["session.update", "conversation.item.create", "conversation.item.create"]);
+  assert.deepEqual(systemItems(ws), ["[only in the feed]", "[The user cleared the conversation]"]);
+  assert.ok(logs.includes("📞 Dropped 1 live update(s) that the briefing tells already"), logs.join("\n"));
+  session.end("test", { hang: false });
+});
+
+test("a call that ends while its briefing is built sends nothing", async () => {
+  const built = later();
+  const { session, ws, ended } = setup({ opts: { buildInstructions: () => built.promise } });
+  await waitFor(() => ws.readyState === 1);
+  session.end("caller hung up", { hang: false });
+  built.resolve("BRIEFED");
+  await sleep(20);
+  assert.deepEqual(ws.sent, []);
+  assert.equal(ended(), 1);
+});
+
+test("through a real ledger: a text written while the briefing is built reaches the call once, and the call's own start is no background", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "alfred-brief-"));
+  const ledger = makeLedger({ file: path.join(dir, "messages.jsonl"), logsDir: path.join(dir, "logs") });
+  const who = { tag: "kuba", id: "1", channel: "c1" };
+  await ledger.append(inboundRow({ who, via: "discord", text: "I'm cooking pasta tonight", agentDir: dir }));
+  await ledger.append({ dir: "out", via: "discord", kind: "reply", text: "Sounds good.", files: 0 });
+  // As bot.js wires it. The builder waits for a text that lands as the call
+  // starts, so the row is in the briefing and in the feed's held items both.
+  let text;
+  const writes = [];
+  const { session, ws } = setup({
+    opts: {
+      greeting: "",
+      feed: ({ push }) => liveFeed({ ledger, push }),
+      onCallEvent: (ev) => {
+        const row = callRow(ev);
+        if (row) writes.push(ledger.append(row));
+      },
+      buildInstructions: async ({ callId, prompt }) => {
+        await text;
+        return callBriefing({ stateDir: dir, ledger, prompt, callId });
+      },
+    },
+  });
+  text = ledger.append(inboundRow({ who, via: "sms", text: "and garlic bread", agentDir: dir }));
+  await waitFor(() => ws.sent.length >= 1);
+  await Promise.all(writes);
+  const { instructions } = ws.sent[0].session;
+  assert.match(instructions, /the user said \(by text\): I'm cooking pasta tonight\n.*you said \(by text\): Sounds good\.\n.*the user said \(by SMS\): and garlic bread/);
+  assert.equal(instructions.includes("(a phone call started)"), false, "this call is not an earlier call");
+  assert.deepEqual(systemItems(ws), [], "the text came once: in the briefing");
+  // A text after the briefing reaches the call by the feed.
+  await ledger.append(inboundRow({ who, via: "sms", text: "and wine", agentDir: dir }));
+  assert.equal(systemItems(ws).length, 1);
+  assert.match(systemItems(ws)[0], /by SMS, the user said: "and wine"/);
+  session.end("call hung up", { hang: false });
 });

@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   easternDate,
+  dayBefore,
   dailyDir,
   dailyNotePath,
   attachmentName,
@@ -25,6 +26,18 @@ test("easternDate handles DST correctly — winter is EST (UTC-5)", () => {
 
 test("easternDate: a plain daytime instant stays on its own day", () => {
   assert.equal(easternDate(new Date("2026-08-14T16:00:00Z")), "2026-08-14"); // noon EDT
+});
+
+test("dayBefore counts back one calendar day, across a month, a year and DST", () => {
+  assert.equal(dayBefore("2026-11-24"), "2026-11-23");
+  assert.equal(dayBefore("2026-03-01"), "2026-02-28");
+  assert.equal(dayBefore("2026-01-01"), "2025-12-31");
+  // 23:30 EST at the end of the 25-hour day when DST ends (1 November 2026).
+  // "Now minus 24 hours" is still 1 November there; the day before is not.
+  const late = new Date("2026-11-02T04:30:00Z");
+  assert.equal(easternDate(late), "2026-11-01");
+  assert.equal(easternDate(new Date(late.getTime() - 24 * 3600 * 1000)), "2026-11-01");
+  assert.equal(dayBefore(easternDate(late)), "2026-10-31");
 });
 
 test("dailyDir and dailyNotePath build the per-day folder layout", () => {
@@ -68,27 +81,25 @@ test("buildAttachmentBlock delimits the paths and names them as files to open", 
   assert.ok(block.includes("/m/dailies/2026-08-14/1-b.pdf"));
 });
 
-// The notes about what happened between turns. The phone wording must stay as
-// it was before reminders used the same helper.
+// The notes about what the reminder list sent between turns. The 2B voice's
+// own changes are ledger rows instead (toolRow), so they are no kind here.
 test("makeActionNotes writes each action to today's note and gives it once to the next message", async () => {
   const dir = mkdtempSync(path.join(tmpdir(), "alfred-dailies-"));
   const notes = makeActionNotes({ memoriesDir: dir, now: () => new Date("2026-11-24T22:05:00Z") }); // 17:05 EST
-  await notes.note("phone", 'added "Milk" (Notion page "Shopping list")');
   await notes.note("reminder", 'Reminder r7k2 "Call mom" went to me by Discord and SMS.');
   await notes.note("reminder", 'Job j3x9 "brief" ran. Its result went to me by Discord.');
+  assert.throws(() => notes.note("phone", 'added "Milk"'), /no action kind "phone"/, "a phone change is a ledger row");
 
   const daily = readFileSync(path.join(dir, "dailies", "2026-11-24", "daily.md"), "utf8");
   assert.equal(
     daily,
-    '\n## 17:05 — By phone\nThe phone voice added "Milk" (Notion page "Shopping list").\n' +
-      '\n## 17:05 — Reminders\nReminder r7k2 "Call mom" went to me by Discord and SMS.\n' +
+    '\n## 17:05 — Reminders\nReminder r7k2 "Call mom" went to me by Discord and SMS.\n' +
       '\n## 17:05 — Reminders\nJob j3x9 "brief" ran. Its result went to me by Discord.\n'
   );
 
   assert.equal(
     notes.take(),
-    '[Done on a phone call by the voice, without you, since your last message:\n- added "Milk" (Notion page "Shopping list")]\n\n' +
-      '[Sent from your reminder list since your last message ("me" is your user):\n' +
+    '[Sent from your reminder list since your last message ("me" is your user):\n' +
       '- Reminder r7k2 "Call mom" went to me by Discord and SMS.\n' +
       '- Job j3x9 "brief" ran. Its result went to me by Discord.]\n\n'
   );

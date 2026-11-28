@@ -22,6 +22,15 @@ cd "$AGENT_DIR" || exit 1
 TARGET=$(TZ=America/New_York date -d yesterday +%Y-%m-%d)
 NOTES_FILE="var/memories/dailies/${TARGET}/daily.md"
 
+# Fold the chat ledger first: each message not folded yet, up to the end of
+# yesterday, goes into the daily note of its own day (scripts/fold-day.mjs,
+# fold.js). Before this, only /clear wrote a note from the chat, so most nights
+# found no note and skipped. A failed fold is logged, and the dream still runs.
+# The next fold tries the same rows again.
+echo "$(date): Folding the ledger into the daily notes…"
+node "$REPO_DIR/scripts/fold-day.mjs" --nightly --agent-dir "$AGENT_DIR" --state-dir "$STATE_DIR" \
+  || echo "$(date): fold failed (non-fatal)"
+
 if [ ! -f "$NOTES_FILE" ]; then
   echo "$(date): No note for $TARGET (the day that just ended), skipping."
   exit 0
@@ -29,6 +38,11 @@ fi
 
 echo "$(date): Starting dreaming pass for $TARGET..."
 
+# --tools is what holds the pass to Read, Edit and Write: with
+# --dangerously-skip-permissions, --allowedTools holds nothing back (a test
+# fold wrote its notes with Bash and python). The notes now carry the day's
+# folded chat, mail and web text included, so the pass gets no shell and no
+# MCP server, like the fold (claudeRunner in fold.js).
 claude -p "You are Alfred's nightly dreaming pass — promote only durable facts into long-term memory.
 
 1. Read the daily note for the day that just ended: var/memories/dailies/${TARGET}/daily.md
@@ -49,7 +63,8 @@ Then append an entry to var/memories/changelog.json (read it first):
 { 'date', 'added_to_memory', 'removed_from_memory', 'summary' } — use empty
 lists when nothing changed, so the log still records that the pass ran." \
   --output-format json \
-  --allowedTools "Bash,Read,Edit,Write" \
+  --tools "Read,Edit,Write" --strict-mcp-config \
+  --allowedTools "Read,Edit,Write" \
   --dangerously-skip-permissions
 
 # Nightly strength digest: pull new Garmin lifts, interpret them with the Haiku

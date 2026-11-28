@@ -17,7 +17,10 @@ import { RONNIE_ROUTES } from "./ronnie/broker-routes.js";
 import { makeRonnie } from "./ronnie/runner.js";
 import { resolveRonnieLabels } from "./ronnie/labels.js";
 import { ensureLabels } from "./google/gmail-labels.js";
-import { easternDate, dailyDir, dailyNotePath, attachmentName, buildAttachmentBlock, makeActionNotes } from "./dailies.js";
+import { dailyDir, attachmentName, buildAttachmentBlock, makeActionNotes } from "./dailies.js";
+import { makeLedger, inboundRow, callRow, toolRow } from "./ledger.js";
+import { makeCatchUp, sessionContext, liveFeed, callBriefing } from "./context.js";
+import { ensureWatermark } from "./fold.js";
 import { makeStore as makeReminderStore } from "./reminders/store.js";
 import { parseContacts } from "./reminders/contacts.js";
 import { makeJobRunner } from "./reminders/jobs.js";
@@ -113,20 +116,34 @@ const VOICE_OPENAI = {
   noise: process.env.VOICE_OPENAI_NOISE || undefined,
   // "0": the reply after a quick tool is audio, not silent text (to compare).
   quietChains: process.env.VOICE_OPENAI_SILENT_CHAINS !== "0",
-  // The voice's own notion, calendar, reminders and get_time tools. "0" sends
-  // everything through Alfred (use_tools) again.
-  directTools: process.env.VOICE_OPENAI_DIRECT_TOOLS === "0" ? null : () =>
+  // The voice's own notion, calendar, reminders and get_time tools, made once
+  // per call, for that call. "0" sends everything through Alfred (use_tools)
+  // again.
+  directTools: process.env.VOICE_OPENAI_DIRECT_TOOLS === "0" ? null : ({ caller, callId } = {}) =>
     makeVoiceTools({
       notionRoutes: NOTION_ROUTES,
       calendarRoutes: GOOGLE_ROUTES,
       reminderRoutes: REMINDER_ROUTES,
       fetchBlockChildren,
-      note: notePhoneAction,
+      note: (text) => notePhoneAction(text, { caller, callId }),
       // Where "make a new page" puts it when no page is named (a shared page).
       homePage: process.env.VOICE_NOTION_HOME || undefined,
     }),
-  // "0" turns off the caller transcript in the log (it costs a little).
+  // "0" turns off the caller transcript (it costs a little): in the log, and
+  // the caller's lines in messages.jsonl, so the call keeps only the voice's.
   ...(process.env.VOICE_OPENAI_TRANSCRIBE === "0" ? { transcribeModel: "" } : {}),
+  // A message sent by text or SMS while a call is live, and Alfred's reply to
+  // it, go into the call as they are written, with no reply asked (liveFeed in
+  // context.js). "0" keeps the call to what is said on it.
+  feed: process.env.VOICE_OPENAI_LIVE === "0" ? null : ({ push }) => liveFeed({ ledger, push }),
+  // Each call's prompt is phone-voice.md plus a briefing of what the voice
+  // should know already: USER.md, MEMORY.md, yesterday's and today's daily
+  // notes, and the last 6 hours of messages on every channel, with any older
+  // ones no fold has put in a note yet (callBriefing in context.js). It is
+  // built while the OpenAI socket opens. "0" starts every
+  // call with the prompt alone, as before.
+  buildInstructions: process.env.VOICE_OPENAI_BRIEFING === "0" ? null : ({ callId, prompt }) =>
+    callBriefing({ stateDir: STATE_DIR, ledger, prompt, callId }),
 };
 // The pipeline speaks Alfred's reply sentence by sentence while he writes it.
 // "0" makes it wait for the whole reply, as before.
@@ -198,14 +215,22 @@ const LAST_DREAM_FILE = path.join(STATE_DIR, "last-dream");
 // Append-only JSONL transcript of every turn through the bot — one JSON object
 // per line, both inbound (user → bot) and outbound (bot → user). This is the
 // bot's OWN log, separate from Claude Code's per-session .jsonl files.
+// ledger.js owns the file: it writes the rows, archives them, and reads them.
+// It also tells a live 2B call each new row as it is written (VOICE_OPENAI.feed).
 const CHAT_LOG = path.join(STATE_DIR, "messages.jsonl");
 
-// On /clear, the live transcript is archived under LOGS_DIR and a headless
-// Claude is spawned to fold it into today's daily note using MEMORY_PROMPT_FILE.
-// The nightly dream.sh pass later promotes durable facts from dailies → MEMORY.md.
+// On /clear, the live transcript is archived under LOGS_DIR, and FOLD_SCRIPT
+// folds the rows not folded yet into the daily note of each one's own day
+// (fold.js, with the prompt in agent/memory-prompt.md). The nightly dream.sh
+// runs the same fold for yesterday first, then promotes durable facts from the
+// dailies into MEMORY.md.
 const LOGS_DIR = path.join(STATE_DIR, "logs");
 const MEMORIES_DIR = path.join(STATE_DIR, "memories");
-const MEMORY_PROMPT_FILE = path.join(AGENT_DIR, "memory-prompt.md");
+const FOLD_SCRIPT = path.join(REPO_DIR, "scripts", "fold-day.mjs");
+const ledger = makeLedger({ file: CHAT_LOG, logsDir: LOGS_DIR });
+// What the phone wrote to the ledger since Alfred's last turn (context.js).
+// Its cursor is a file in STATE_DIR, so a restart loses nothing.
+const catchUp = makeCatchUp({ ledger, stateDir: STATE_DIR });
 
 // Paths handed to a spawned `claude` must be relative to AGENT_DIR, since that
 // is its cwd — absolute paths would leak this machine's layout into prompts.
@@ -263,104 +288,33 @@ async function bootstrap() {
   }
 }
 
+// One row in messages.jsonl. ledger.js stamps the time, and logs a failed
+// write instead of throwing it. Resolves to the row as written, or null.
 async function logTurn(entry) {
-  try {
-    await appendFile(CHAT_LOG, JSON.stringify({ ts: new Date().toISOString(), ...entry }) + "\n");
-  } catch (err) {
-    console.error(`⚠️  Failed to write ${CHAT_LOG}: ${err.message}`);
-  }
+  return ledger.append(entry);
 }
 
-// On /clear: copy the just-ended conversation from messages.jsonl into
-// logs/<firstTs>_to_<lastTs>.jsonl (UTC, filename-safe), then reset the live
-// transcript so the next conversation starts clean. The /clear command line
-// never appears here — handleTurn archives *before* it logs the inbound turn,
-// so the transcript holds only the real messages. Returns the archive path, or
-// null if there was nothing to save.
-async function archiveConversation() {
-  let raw;
-  try {
-    raw = await readFile(CHAT_LOG, "utf-8");
-  } catch {
-    return null; // no transcript yet
-  }
-
-  const entries = raw
-    .split("\n")
-    .filter(Boolean)
-    .map((l) => { try { return JSON.parse(l); } catch { return null; } })
-    .filter(Boolean);
-
-  if (!entries.length) return null;
-
-  const safe = (ts) => String(ts).replace(/:/g, "-"); // ':' is awkward in filenames
-  const name = `${safe(entries[0].ts)}_to_${safe(entries[entries.length - 1].ts)}.jsonl`;
-
-  await mkdir(LOGS_DIR, { recursive: true });
-  const archivePath = path.join(LOGS_DIR, name);
-  await writeFile(archivePath, entries.map((e) => JSON.stringify(e)).join("\n") + "\n");
-
-  await writeFile(CHAT_LOG, ""); // reset live transcript for the next conversation
-  return archivePath;
-}
-
-// Spawn a headless Claude to fold an archived transcript into today's daily
-// note. The prompt lives in memory-prompt.md so it can change without touching
-// code: `{{TRANSCRIPT}}` → archive path, `{{DAILY_PATH}}` → today's note path,
-// `{{DAILY}}` → its current contents (so the pass merges instead of clobbering).
-// Detached + unref'd so it never blocks the bot or dies when the bot restarts.
+// After a /clear archive: fold the rows of the archive that no nightly pass
+// folded yet, each into the daily note of its own day. FOLD_SCRIPT (fold.js)
+// runs one headless Claude per day with agent/memory-prompt.md, and records
+// how far it got only after a run worked. Detached + unref'd so it never
+// blocks the bot or dies when the bot restarts. Its output goes to
+// logs/consolidate.log, as the old one-shot pass did.
 async function consolidateMemory(archivePath) {
-  let template;
-  try {
-    template = (await readFile(MEMORY_PROMPT_FILE, "utf-8")).trim();
-  } catch {
-    console.warn(`🧠 No ${MEMORY_PROMPT_FILE} yet — skipping memory consolidation`);
-    return;
-  }
-  if (!template) {
-    console.warn(`🧠 ${MEMORY_PROMPT_FILE} is empty — skipping memory consolidation`);
-    return;
-  }
-
-  // Target today's daily note. Inject its current contents so the pass appends
-  // to what's there instead of overwriting. Use {{DAILY}} in the prompt, else
-  // it's appended. {{DAILY_PATH}} tells the pass where to write.
-  const today = easternDate();
-  const dailyAbs = dailyNotePath(MEMORIES_DIR, today);
-  const dailyRel = agentRel(dailyAbs);
-  // The note lives in a per-day folder; make sure it exists so the pass can write.
-  await mkdir(dailyDir(MEMORIES_DIR, today), { recursive: true });
-  let daily = "";
-  try {
-    daily = (await readFile(dailyAbs, "utf-8")).trim();
-  } catch {
-    /* no note for today yet */
-  }
-
-  let prompt = template.includes("{{TRANSCRIPT}}")
-    ? template.replaceAll("{{TRANSCRIPT}}", archivePath)
-    : `${template}\n\nTranscript file: ${archivePath}`;
-
-  prompt = prompt.replaceAll("{{DAILY_PATH}}", dailyRel);
-
-  prompt = prompt.includes("{{DAILY}}")
-    ? prompt.replaceAll("{{DAILY}}", daily || "(empty)")
-    : `${prompt}\n\n=== TODAY'S DAILY NOTE (${dailyRel}) ===\n${daily || "(empty)"}\n=== END DAILY NOTE ===`;
-
-  const args = ["-p", prompt, "--allowedTools", "Read,Write,Edit", "--dangerously-skip-permissions"];
-
   try {
     await mkdir(LOGS_DIR, { recursive: true });
     const logFd = openSync(path.join(LOGS_DIR, "consolidate.log"), "a");
-    const proc = spawn("claude", args, {
+    // process.execPath is this bot's own node, so nvm/tmux PATHs don't matter.
+    const proc = spawn(process.execPath, [FOLD_SCRIPT, "--archive", archivePath], {
       cwd: AGENT_DIR,
+      env: { ...process.env, AGENT_DIR, STATE_DIR },
       detached: true,
       stdio: ["ignore", logFd, logFd],
     });
     proc.unref();
-    console.log(`🧠 Spawned headless daily-note consolidation (pid ${proc.pid}) → ${archivePath}`);
+    console.log(`🧠 Spawned the daily-note fold (pid ${proc.pid}) → ${archivePath}`);
   } catch (err) {
-    console.error(`🧠 Failed to spawn memory consolidation: ${err.message}`);
+    console.error(`🧠 Failed to spawn the daily-note fold: ${err.message}`);
   }
 }
 
@@ -884,11 +838,21 @@ async function handleTurn(target, userMessage, attachments = [], { signal, onTex
     console.log(`🧹 Clearing session for ${target.who.tag}`);
 
     // Archive the just-ended conversation, then kick off memory consolidation.
+    // The fold watermark must exist before the archive does, so the archive
+    // counts as not folded until its fold works (fold.js). Its first value
+    // marks the older archives as folded.
+    await ensureWatermark({ stateDir: STATE_DIR, logsDir: LOGS_DIR })
+      .catch((err) => console.error(`⚠️  Fold watermark: ${err.message}`));
     let archivePath = null;
     try {
-      archivePath = await archiveConversation();
+      // ledger.archive() copies messages.jsonl to logs/<firstTs>_to_<lastTs>.jsonl
+      // and empties it. The /clear command is not in the archive: the inbound
+      // turn is logged below, after the archive, without the command.
+      archivePath = await ledger.archive();
       if (archivePath) {
         console.log(`📦 Archived conversation → ${archivePath}`);
+        // The ledger starts again at 0, so Alfred's place in it does too.
+        await catchUp.reset();
         await consolidateMemory(archivePath);
       }
     } catch (err) {
@@ -918,16 +882,12 @@ async function handleTurn(target, userMessage, attachments = [], { signal, onTex
   }
 
   // Log the inbound turn now — after any /clear reset above — so it lands in the
-  // fresh transcript rather than the one we just archived.
-  await logTurn({
-    dir: "in",
-    user: target.who.tag,
-    userId: target.who.id,
-    channel: target.who.channel,
-    via: target.via,
-    text: userMessage,
-    attachments: attachments.length,
-  });
+  // fresh transcript rather than the one we just archived. The row names the
+  // saved files (Discord and SMS alike), so a fold can open a photo later.
+  const inbound = await logTurn(inboundRow({ who: target.who, via: target.via, text: userMessage, attachments, agentDir: AGENT_DIR, callId: target.callId }));
+  // An out row of this turn names its channel and call too, so no reader has to
+  // take them from the row before it: a call's own lines can come between.
+  const logOut = (row) => logTurn({ dir: "out", via: target.via, ...row, callId: target.callId });
 
   console.log(`📨 ${target.who.tag}: ${userMessage.slice(0, 100)}`);
 
@@ -944,6 +904,11 @@ async function handleTurn(target, userMessage, attachments = [], { signal, onTex
     const shouldResume = state.status === "open" && state.last_session_id && !dreamed;
     const sessionId = shouldResume ? state.last_session_id : null;
 
+    // What was said and done on the phone since Alfred's last turn: the call
+    // lines and the voice's tool changes (context.js). A use_tools turn is a
+    // turn too, so it carries the call so far, with the caller's own words.
+    const phone = await catchUp.read();
+
     // Files the user sent ride with THIS message, not the session context, so
     // they reach the turn on a resumed session too (a photo dropped mid-chat is
     // the common case). The attachment block attaches to the message body. When
@@ -953,30 +918,43 @@ async function handleTurn(target, userMessage, attachments = [], { signal, onTex
     let messageBody = attachBlock
       ? `${attachBlock}\n\n${userMessage || "(The user sent the file(s) above with no other text.)"}`
       : userMessage;
-    // The tag rides on this message only, like the attachment block, so a
-    // resumed session still sees it. A /clear above already took its prefix off.
-    messageBody = actionNotes.take() + messageBody;
-    if (VIA_TAGS[target.via]) messageBody = `${VIA_TAGS[target.via]} ${messageBody}`;
 
-    let finalMessage = messageBody;
+    let context = "";
+    let shown = null;
     if (shouldResume) {
       console.log(`🔄 Resuming session ${sessionId}`);
     } else {
       if (dreamed) console.log("🌙 A dream pass ran since the last turn — starting fresh to load new memory");
       console.log(`🆕 Starting new session - loading context...`);
-      const context = await loadContext();
-      finalMessage = context + messageBody;
+      // until: this turn's own row. The message carries it, so the recent
+      // messages leave it out.
+      ({ text: context, shown } = await loadContext({ until: inbound?.ts }));
     }
+
+    // The reminder notes, the phone block and the tag ride on this message
+    // only, like the attachment block, so a resumed session still sees them. A
+    // new session's recent messages show the newest calls already, so the
+    // block leaves those rows out. A /clear above already took its prefix off.
+    // On a use_tools turn (callId), the block says it is context: the turn
+    // does its own request, and the call does the rest. So the phone block
+    // goes last, next to the request it speaks of.
+    messageBody = actionNotes.take() + catchUp.block(phone, { skip: shown, callTurn: !!target.callId }) + messageBody;
+    if (VIA_TAGS[target.via]) messageBody = `${VIA_TAGS[target.via]} ${messageBody}`;
+    const finalMessage = context + messageBody;
 
     // Run Claude
     // onText: a phone call that speaks the reply while Alfred writes it.
     const response = await runClaude(finalMessage, sessionId, { signal, onText });
+    // Alfred read the phone's rows up to phone.end: the cursor moves there now.
+    // A dropped turn, a login lapse or a timeout leaves it, so the next turn
+    // shows those rows again.
+    await catchUp.advance(phone, response);
 
     // A dropped phone turn: Telnyx sent a longer version of the same words.
     // Keep no state and send nothing. The next turn carries the words.
     if (response.is_aborted) {
       console.log("✂️  Turn cancelled (Telnyx dropped an early guess)");
-      await logTurn({ dir: "out", kind: "cancelled", text: "" });
+      await logOut({ kind: "cancelled", text: "" });
       return;
     }
 
@@ -999,7 +977,7 @@ async function handleTurn(target, userMessage, attachments = [], { signal, onTex
     if (infraFailed) {
       const kind = response.is_auth_error ? "auth_error" : "timeout";
       await target.send(response.result);
-      await logTurn({ dir: "out", kind, text: response.result });
+      await logOut({ kind, text: response.result });
       return;
     }
 
@@ -1008,7 +986,7 @@ async function handleTurn(target, userMessage, attachments = [], { signal, onTex
     const replyText = (response.result || "").trim();
     if (isNoReply(replyText)) {
       console.log("🤫 Stayed silent (no_reply sentinel)");
-      await logTurn({ dir: "out", kind: "silent", text: "", sessionId: response.session_id || null });
+      await logOut({ kind: "silent", text: "", sessionId: response.session_id || null });
       return;
     }
 
@@ -1028,14 +1006,14 @@ async function handleTurn(target, userMessage, attachments = [], { signal, onTex
     await target.send(reply, files, { streamed: !!onText && !!cleaned.trim() });
 
     console.log(`✅ Replied (${reply.length} chars${files.length ? `, ${files.length} file(s)` : ""}${deferStrength ? ", deferred digest" : ""})`);
-    await logTurn({ dir: "out", kind: "reply", text: reply, files: files.length, sessionId: response.session_id || null });
+    await logOut({ kind: "reply", text: reply, files: files.length, sessionId: response.session_id || null });
 
     if (deferStrength) startStrengthDigestFollowup(target);
   } catch (err) {
     console.error("❌ Error:", err);
     const errReply = `Something went wrong:\n\`\`\`\n${err.message}\n\`\`\``;
     await target.send(errReply).catch((e) => console.error(`⚠️  Couldn't send the error reply: ${e.message}`));
-    await logTurn({ dir: "out", kind: "error", text: errReply, error: err.message });
+    await logOut({ kind: "error", text: errReply, error: err.message });
   } finally {
     clearInterval(typingInterval);
     target.done?.();
@@ -1108,7 +1086,7 @@ async function strengthFollowupTurn(target, { ok, out, err }) {
     const reply = cleaned.trim() || (files.length ? "" : fallback);
     await target.send(reply, files);
     console.log(`✅ Strength follow-up replied (${reply.length} chars${files.length ? `, ${files.length} file(s)` : ""})`);
-    await logTurn({ dir: "out", kind: "reply", text: reply, files: files.length, sessionId: response.session_id || null });
+    await logTurn({ dir: "out", via: target.via, kind: "reply", text: reply, files: files.length, sessionId: response.session_id || null });
   } catch (e) {
     console.error(`❌ Strength follow-up error: ${e.message}`);
     await target.send(fallback).catch(() => {});
@@ -1116,35 +1094,13 @@ async function strengthFollowupTurn(target, { ok, out, err }) {
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
-async function loadContext() {
-  const today = easternDate();
-
-  // SOUL lives with the agent's tracked config; the rest is personal state.
-  // Paths are labelled relative to AGENT_DIR so Alfred can reopen any of these
-  // files itself — the labels double as working paths from its cwd.
-  const files = [
-    { path: path.join(AGENT_DIR, "SOUL.md"), label: "SOUL" },
-    { path: path.join(STATE_DIR, "USER.md"), label: "USER" },
-    { path: path.join(MEMORIES_DIR, "MEMORY.md"), label: "LONG_TERM_MEMORY" },
-    { path: dailyNotePath(MEMORIES_DIR, today), label: "DAILY_NOTES" },
-  ];
-
-  let context = "=== SYSTEM CONTEXT START ===\n";
-  context += "The following files contain your core instructions, user preferences, and long-term memory. Use them to guide your response.\n";
-
-  for (const file of files) {
-    if (existsSync(file.path)) {
-      try {
-        const content = await readFile(file.path, "utf-8");
-        context += `\n[FILE: ${agentRel(file.path)}]\n${content}\n`;
-      } catch (e) {
-        console.error(`Error reading ${agentRel(file.path)}:`, e);
-      }
-    }
-  }
-  context += "\n=== SYSTEM CONTEXT END ===\n";
-  context += "\nUser Message: ";
-  return context;
+// A new session's context (context.js): SOUL, USER, MEMORY, the daily notes of
+// yesterday and today, and the last hours of messages on every channel (with
+// any older ones no fold has put in a note yet), word for word. Resolves to
+// { text, shown }: shown is the rows the messages show.
+// until: the row of this turn's message, which the message itself carries.
+function loadContext({ until } = {}) {
+  return sessionContext({ agentDir: AGENT_DIR, stateDir: STATE_DIR, ledger, until });
 }
 
 // Download every file attached to an inbound message into that day's folder and
@@ -1252,13 +1208,16 @@ async function postChunks(post, text, files) {
 // answer in Discord, by SMS, or in both. A target has:
 //
 //   who             { tag, id, channel } for the transcript and the console
-//   via             "sms" or "call" when the reply does not go to Discord only
+//   via             "discord", "sms" or "call": where the turn came from, for
+//                   the tag on the message and the ledger rows
+//   callId          a 2B call's id (call targets only): the turn's rows carry it
 //   typing()        show that Alfred is working. It never throws.
 //   react(emoji)    react to the inbound message. It never throws.
 //   send(text, files)  deliver a reply. It throws only if no copy arrived.
 function discordTarget(msg) {
   return {
     who: { tag: msg.author.tag, id: msg.author.id, channel: msg.channelId },
+    via: "discord",
     typing: () => msg.channel.sendTyping().catch(() => {}),
     react: (emoji) => msg.react(emoji).catch(() => {}),
     send: (text, files = []) => sendReply(msg, text, files),
@@ -1410,14 +1369,32 @@ async function postFromCall(text, files = []) {
   }
 }
 
-// What happened without Alfred: the 2B voice's changes with its own tools, and
-// the reminders and job results that went out. Each one goes in today's daily
-// note, and waits here to ride at the front of Alfred's next message, so he
-// knows the same day, on any channel (makeActionNotes, dailies.js).
-const actionNotes = makeActionNotes({ memoriesDir: MEMORIES_DIR });
-function notePhoneAction(text) {
-  actionNotes.note("phone", text);
+// What is said and done on a 2B call, as it happens (telnyx/realtime.js): each
+// line, the start and the end, an answer that came after the hangup. Each is a
+// ledger row with src "call" (callRow in ledger.js), so a reader can tell the
+// call's own lines from its use_tools turns, which are chat rows with the same
+// callId. logTurn never throws; a failed write is logged.
+function logCallEvent(ev) {
+  const row = callRow(ev);
+  return row ? logTurn(row) : null;
 }
+
+// What the 2B voice did with its own tools, without Alfred. Each action is a
+// ledger row (src "tool"). Alfred's next turn, on any channel, starts with the
+// row (the catch-up in context.js), so he knows the same day; a new session
+// and a call's briefing show it as "you did (on the call)" until the nightly
+// fold writes it into its day's note, once. The row is on disk, so a restart
+// does not lose it. No "By phone" line goes into the note as well: the
+// briefing read both, one action twice, in two wordings.
+function notePhoneAction(text, { caller, callId } = {}) {
+  logTurn(toolRow({ text, caller, callId }));
+}
+
+// The reminders and job results the reminder list sent, without Alfred. They
+// are not ledger rows: each one goes in today's daily note, and waits here to
+// ride at the front of Alfred's next message, so he knows the same day, on any
+// channel (makeActionNotes, dailies.js).
+const actionNotes = makeActionNotes({ memoriesDir: MEMORIES_DIR });
 function noteReminder(text) {
   actionNotes.note("reminder", text);
 }
@@ -1440,10 +1417,11 @@ async function onLateCallAnswer({ request, reply, caller }) {
 // route to stream back, and posts a copy in the mirror channel (if set). A late
 // send, for example a deferred strength follow-up, reaches the mirror only.
 // opts.streamed: the caller heard this text while Alfred wrote it.
-function callTarget({ discord = null, who, onReply }) {
+function callTarget({ discord = null, who, onReply, callId }) {
   return {
     who,
     via: "call",
+    callId,
     typing: () => discord?.typing() ?? Promise.resolve(),
     react: (emoji) => discord?.react(emoji) ?? Promise.resolve(),
     send: async (text, files = [], opts = {}) => {
@@ -1463,7 +1441,10 @@ function callTarget({ discord = null, who, onReply }) {
 // text while Alfred writes it. Then this resolves only to text that did not
 // stream and must be spoken whole: an error, a timeout, or a default line.
 // The mirror post still gets the whole reply.
-async function onCallTurn({ text, caller, takeMissed, signal, onText }) {
+//
+// callId (2B only): the call this use_tools request came from. The turn's rows
+// carry it next to the call's own lines (logCallEvent).
+async function onCallTurn({ text, caller, takeMissed, signal, onText, callId }) {
   let discord = null;
   if (VOICE_MIRROR_CHANNEL) {
     try {
@@ -1482,6 +1463,7 @@ async function onCallTurn({ text, caller, takeMissed, signal, onText }) {
   const target = callTarget({
     discord,
     who: { tag: `call:${caller}`, id: caller, channel: VOICE_MIRROR_CHANNEL || "call" },
+    callId,
     onReply: (t, { streamed = false } = {}) => {
       // The pipeline spoke this text from the stream. Do not give it again.
       // If no text came by the stream, give it, so the call is not silent.
@@ -1670,7 +1652,8 @@ startMailListener({ gmail: sharedGmail, enqueue: ronnie?.enqueue, onDrained: ron
 // SMS and v1 calls still start.
 let voicePipeline = null;
 // The talker prompt for engine "openai". A missing file keeps the default in
-// telnyx/realtime.js.
+// telnyx/realtime.js. Each call adds its briefing to it
+// (VOICE_OPENAI.buildInstructions); without one, it is the whole prompt.
 function readPhoneVoicePrompt() {
   try {
     return readFileSync(path.join(AGENT_DIR, "phone-voice.md"), "utf8").trim() || undefined;
@@ -1701,10 +1684,12 @@ if (voicePipelineConfigured) {
       engine: VOICE_PIPELINE_ENGINE,
       localSpeech,
       streamReply: VOICE_STREAM_REPLY,
+      // 2B only, passed through to telnyx/realtime.js like onLate.
       realtime: VOICE_PIPELINE_ENGINE === "openai" ? {
         apiKey: OPENAI_API_KEY,
         instructions: readPhoneVoicePrompt(),
         onLate: onLateCallAnswer,
+        onCallEvent: logCallEvent,
         ...VOICE_OPENAI,
       } : {},
     });

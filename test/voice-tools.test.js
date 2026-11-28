@@ -277,6 +277,18 @@ test("add or write with line means under that line", async () => {
   assert.deepEqual(n.log.at(-1), ["append", "b2", "- Temporary list\n  - [ ] Milk"]);
 });
 
+test("under or after 0 is a line not known yet: it asks for the read, and adds nothing", async () => {
+  const { t, n } = tools();
+  const before = n.log.length;
+  assert.match(await t.call("notion", { action: "add", page: "Shopping list", under: 0, items: ["Spinach"] }), /read "Shopping list" first/);
+  assert.match(await t.call("notion", { action: "add", page: "Shopping list", after: 0, items: ["Spinach"] }), /read "Shopping list" first/);
+  assert.equal(n.log.slice(before).some((e) => e[0] === "append"), false);
+  await t.call("notion", { action: "read", page: "Shopping list" });
+  assert.match(await t.call("notion", { action: "add", page: "Shopping list", under: 0, items: ["Spinach"] }), /has no line 0/);
+  // null is no section, as the model means it: the end of the page.
+  assert.match(await t.call("notion", { action: "add", page: "Shopping list", under: null, items: ["Spinach"] }), /^Done: added "Spinach"\./);
+});
+
 test("a change with no page goes to the page last read", async () => {
   const { t, n } = tools();
   assert.match(await t.call("notion", { action: "add", items: ["x"] }), /say which page/);

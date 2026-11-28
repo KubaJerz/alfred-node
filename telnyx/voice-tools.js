@@ -379,12 +379,15 @@ export function makeVoiceTools({
   // at the end of the page. A heading holds no children in Notion, so "under a
   // heading" means the end of its section: after the last line before the next
   // heading at its level. `style` is the line kind to copy for plain items.
+  // Line 0 is a number the model did not know, not "no line": with no read it
+  // sent under: 0 for "the greens" and spinach went to the end of the page
+  // (brief-last-call in the voice eval). lineOf asks for the read instead.
   async function place(page, a) {
-    if (a.after) {
+    if (a.after || a.after === 0) {
       const line = lineOf(page, a.after);
       return { parentId: line.parentId || page.id, after: line.id, style: line.type, where: ` after "${words(line.text)}"` };
     }
-    if (a.under) {
+    if (a.under || a.under === 0) {
       const line = lineOf(page, a.under);
       const where = ` under "${words(line.text)}"`;
       if (!/^heading_/.test(line.type)) {

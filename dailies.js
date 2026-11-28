@@ -36,6 +36,15 @@ export function easternDate(date = new Date()) {
   return date.toLocaleDateString("en-CA", { timeZone: TIMEZONE });
 }
 
+// The day before `date` ('YYYY-MM-DD'). It counts on the calendar. "Now minus
+// 24 hours" is wrong for this: at the end of the 25-hour day when DST ends, it
+// is still the same Eastern day.
+export function dayBefore(date) {
+  const d = new Date(`${date}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() - 1);
+  return d.toISOString().slice(0, 10);
+}
+
 export function dailyDir(memoriesDir, date = easternDate()) {
   return path.join(memoriesDir, "dailies", date);
 }
@@ -72,22 +81,20 @@ export function buildAttachmentBlock(paths) {
   );
 }
 
-// Things that happen without Alfred, between his turns: the 2B phone voice
-// changes a page or an event with its own tools ("phone"), and the reminder
-// list sends a reminder or a job result ("reminder"). Alfred must know about
-// them the same day, on any channel. So note() puts each one in two places:
+// Things that happen without Alfred, between his turns: the reminder list
+// sends a reminder or a job result ("reminder"). Alfred must know about them
+// the same day, on any channel. So note() puts each one in two places:
 //
 //   - today's daily note, at once, under the heading of its kind
 //   - a list in memory, which take() puts at the front of his next message
 //
+// The 2B voice's own tool changes are not a kind here: they are ledger rows
+// (toolRow in ledger.js), which his next turn reads (the catch-up in
+// context.js) and the nightly fold writes into the note.
+//
 // A kind is { heading, line(text), intro }: the daily-note heading, the
 // sentence in the note, and the first line of the block in the next message.
 export const ACTION_KINDS = {
-  phone: {
-    heading: "By phone",
-    line: (text) => `The phone voice ${text}.`,
-    intro: "Done on a phone call by the voice, without you, since your last message:",
-  },
   reminder: {
     heading: "Reminders",
     line: (text) => text,
