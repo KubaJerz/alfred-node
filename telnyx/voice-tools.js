@@ -14,6 +14,11 @@
 // take several lines in one call: every target is found first, then the writes
 // run one after another, and the page is re-read once at the end.
 //
+// Words that name no line as written can still name the one line that sounds
+// like them: a phone line and a transcript turn "limes" into "Lines". The tool
+// acts on that line only when no other line is as close, and its answer says
+// what it heard: Removed "Limes" (heard "Lines").
+//
 // The reminders tool has no field for a person, so a reminder that the voice
 // adds goes to the user ("me"). A reminder for another person goes through
 // Alfred. The tool lists, cancels and snoozes reminders, and never sees a job.
@@ -25,7 +30,7 @@
 
 import { blockLine, markdownToBlocks } from "../notion/blocks.js";
 import { TIMEZONE } from "../google/calendar-rules.js";
-import { WEEKDAYS } from "../reminders/schedule.js";
+import { WEEKDAYS, localDate } from "../reminders/schedule.js";
 
 const NOTION_ACTIONS = ["search", "read", "add", "write", "check", "uncheck", "edit", "remove", "create"];
 export const DEFAULT_HOME_PAGE = "Teamspace Home";
@@ -33,6 +38,12 @@ const CALENDAR_ACTIONS = ["read", "add", "edit", "delete"];
 const REMINDER_ACTIONS = ["add", "list", "cancel", "snooze"];
 const RECENT_MS = 6 * 3_600_000; // snooze finds a one-time reminder that went out this recently
 const COLORS = ["banana", "tomato", "peacock", "grape", "basil", "tangerine"];
+// The example day in the calendar and reminders descriptions. A call sends
+// them with its own day in its place, so a model that copies the example
+// writes a date near the call. Told "Friday at 3", mini wrote this exact
+// 2026-11-27T15:00, a week before the Friday of the call (voice eval,
+// 2026-11-24).
+const EXAMPLE_DAY = "2026-11-27";
 
 export const NOTION_TOOL = {
   type: "function",
@@ -40,8 +51,9 @@ export const NOTION_TOOL = {
   description:
     "Quick. Before a change, say just \"Got it.\" or \"Will do.\"; nothing before a read. The user's Notion pages: lists, notes " +
     "and ideas. Name the page by its exact title; search only when unsure of it. Lines are numbered, and a number " +
-    "stays the same all call. Several lines are one call: check, uncheck and remove take lines (numbers) or items " +
-    "(the lines' words, no read needed). To add under a section, give its line number as 'under', or 'after' to " +
+    "stays the same all call. check, uncheck and remove take items: every item the caller named, in their words, " +
+    "all in one call, even one that may not be there. No read needed; leave page out if the caller named none. " +
+    "Or lines: numbers from a read. To add under a section, give its line number as 'under', or 'after' to " +
     "put them right after a line. add is for a few plain items; for a new sub-list, a heading with items, or " +
     "anything with structure, use write with markdown.",
   parameters: {
@@ -88,7 +100,7 @@ export const CALENDAR_TOOL = {
     type: "object",
     properties: {
       action: { type: "string", enum: CALENDAR_ACTIONS },
-      from: { type: "string", description: "read: first day (or time)." },
+      from: { type: "string", description: "read: first day (or time). Left out: today." },
       to: { type: "string", description: "read: last day, if more than one." },
       events: { type: "array", items: { type: "integer" }, description: "edit, delete: event numbers, one or many." },
       match: { type: "string", description: "edit, delete: words of the event's title, instead of numbers. Give from too." },
@@ -200,11 +212,45 @@ const params = (o) =>
   new URLSearchParams(Object.entries(o).filter(([, v]) => v != null && v !== "").map(([k, v]) => [k, String(v)]));
 // A line's words without its list marker, for notes and replies.
 const words = (line) => line.replace(/^[-*] (\[[ x]\] )?|^\d+\. |^#+ /, "").trim();
-const quoted = (list) => list.map((s) => `"${s}"`).join(", ");
+// Each in quotes. A line that a near match found, { text, heard }, also says
+// what the caller said: "Limes" (heard "Lines").
+const quoted = (list) => list.map((s) => (s.heard ? `"${s.text}" (heard "${s.heard}")` : `"${s.text ?? s}"`)).join(", ");
 const cap = (t) => t.charAt(0).toUpperCase() + t.slice(1);
 const escape = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 // Whole words, with or without a plural s: "egg" finds "Eggs".
 const wordsRe = (term) => new RegExp(`\\b${escape(term.trim().replace(/s$/i, ""))}s?\\b`, "i");
+
+// Words as they sound, near enough: lower case, letters and digits only, a
+// doubled letter as one ("keffer" is "kefer"), and no plural s at the end.
+export const sound = (t) =>
+  String(t).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().replace(/([a-z])\1+/g, "$1").replace(/(\w{3})s$/, "$1");
+// Letters that a phone line mixes up. Each vowel is close to the others too.
+const ALIKE = new Set(["mn", "bp", "dt", "fv", "gk", "ck", "cs", "sz", "kq"].flatMap(([x, y]) => [x + y, y + x]));
+const VOWEL = /^[aeiouy]$/;
+
+// How far apart two words sound (each from sound()). A small change costs
+// 0.5: a letter becomes one that sounds like it, or a vowel, an h or a space
+// comes or goes. Any other change makes them Infinity apart, so "beer" never
+// finds "Beef".
+export function soundGap(a, b) {
+  const swap = (x, y) => (x === y ? 0 : (VOWEL.test(x) && VOWEL.test(y)) || ALIKE.has(x + y) ? 0.5 : Infinity);
+  const gap = (c) => (/^[aeiouyh ]$/.test(c) ? 0.5 : Infinity);
+  let row = [0];
+  for (let j = 1; j <= b.length; j++) row[j] = row[j - 1] + gap(b[j - 1]);
+  for (let i = 1; i <= a.length; i++) {
+    const next = [row[0] + gap(a[i - 1])];
+    for (let j = 1; j <= b.length; j++) {
+      next[j] = Math.min(row[j - 1] + swap(a[i - 1], b[j - 1]), row[j] + gap(a[i - 1]), next[j - 1] + gap(b[j - 1]));
+    }
+    row = next;
+  }
+  return row[b.length];
+}
+
+// How far a near match may go, by the length of the caller's words (from
+// sound()): not at all under 4 letters, where too many words sound alike. One
+// small change up to 5 letters, and two from 6.
+export const reach = (t) => (t.length < 4 ? -1 : t.length < 6 ? 0.5 : 1);
 
 // Numbers from `lines` (or one `line`/`event`), as integers.
 const numbersIn = (many, one) => [...(Array.isArray(many) ? many : []), ...(one ? [one] : [])].map(Number);
@@ -279,7 +325,8 @@ export function makeVoiceTools({
   const C = (key, args) => route(calendarRoutes, key, args);
   const R = (key, args) => route(reminderRoutes, key, args);
 
-  async function findPage(name) {
+  // orNone: null when no page has the exact title, instead of the error.
+  async function findPage(name, { orNone = false } = {}) {
     if (!name?.trim()) throw new Error("say which page, by its exact title");
     const key = name.trim().toLowerCase();
     if (pages.has(key)) return pages.get(key);
@@ -290,6 +337,7 @@ export function makeVoiceTools({
     const hits = results.filter((r) => r.title.trim().toLowerCase() === key);
     if (hits.length > 1) throw new Error(`more than one page is called "${name}"; ask use_tools`);
     const hit = hits[0];
+    if (!hit && orNone) return null;
     if (!hit) {
       const near = results.slice(0, 5).map((r) => `"${r.title}"`).join(", ");
       throw new Error(`no page is called exactly "${name}"${near ? `. Close titles: ${near}` : ""}. Use the exact title`);
@@ -300,22 +348,34 @@ export function makeVoiceTools({
     return page;
   }
 
+  // The pages edited last, newest first, with no databases.
+  async function recentPages() {
+    const { results } = await N("GET /notion/search", { params: params({ q: "", type: "page", limit: 8 }) });
+    return results.filter((r) => r.object !== "database").map((r) => ({ id: r.id, title: r.title }));
+  }
+
+  // Of the recent pages, the one that has the most of the items, if one
+  // clearly does: { page, lines }, with the lines that it has for them.
+  async function pageWithItems(recent, terms) {
+    if (!terms.length) return null;
+    const candidates = recent.slice(0, 5);
+    await Promise.all(candidates.map((p) => readPage(p)));
+    const [best, next] = candidates
+      .map((page) => ({ page, lines: linesFor(page, terms).lines }))
+      .sort((x, y) => y.lines.length - x.lines.length);
+    return best?.lines.length && best.lines.length > (next?.lines.length || 0) ? best : null;
+  }
+
   // No page named and none used yet this call ("tick off limes and kefir"):
   // the recent page that has the most of the items, if one clearly does; else
   // the recent titles, so the next call can name one instead of asking the caller.
   async function guessPage(a) {
-    const { results } = await N("GET /notion/search", { params: params({ q: "", type: "page", limit: 8 }) });
-    const recent = results.filter((r) => r.object !== "database").map((r) => ({ id: r.id, title: r.title }));
-    const terms = termsIn(a.items);
-    if (terms.length && ["check", "uncheck", "remove"].includes(a.action)) {
-      const candidates = recent.slice(0, 5);
-      await Promise.all(candidates.map((p) => readPage(p)));
-      const scored = candidates
-        .map((p) => ({ p, n: terms.filter((t) => matchLine(p, t, new Set()).line).length }))
-        .sort((x, y) => y.n - x.n);
-      if (scored[0]?.n && scored[0].n > (scored[1]?.n || 0)) {
-        pages.set(scored[0].p.title.toLowerCase(), scored[0].p);
-        return scored[0].p;
+    const recent = await recentPages();
+    if (["check", "uncheck", "remove"].includes(a.action)) {
+      const best = await pageWithItems(recent, termsIn(a.items));
+      if (best) {
+        pages.set(best.page.title.toLowerCase(), best.page);
+        return best.page;
       }
     }
     const titles = recent.map((p) => `"${p.title}"`).join(", ");
@@ -337,19 +397,60 @@ export function makeVoiceTools({
     return line;
   }
 
+  // A page's lines that a change can still take: not taken yet, no subpage.
+  const openLines = (page, taken) => [...reads.get(page.id).values()].filter((l) => !taken.has(l.id) && l.type !== "child_page");
+  const askWhich = (term, lines) => `"${term}" could be ${lines.slice(0, 3).map((l) => `"${words(l.text)}"`).join(" or ")}; say which`;
+
   // The line a caller's words name. An exact match wins (the first one not
   // already taken, so "bread" twice takes both copies); else the one line that
-  // has the words. Several → ask which.
+  // has the words. Several → ask which. None → unknown, for soundLine.
   function matchLine(page, term, taken) {
-    const open = [...reads.get(page.id).values()].filter((l) => !taken.has(l.id) && l.type !== "child_page");
+    const open = openLines(page, taken);
     const plain = (l) => words(l.text).toLowerCase();
     const exact = open.find((l) => plain(l) === term.toLowerCase());
     if (exact) return { line: exact };
     const re = wordsRe(term);
     const near = open.filter((l) => re.test(plain(l)));
     if (near.length === 1) return { line: near[0] };
-    if (near.length) return { why: `"${term}" could be ${near.slice(0, 3).map((l) => `"${words(l.text)}"`).join(" or ")}; say which` };
+    if (near.length) return { why: askWhich(term, near) };
+    return { why: `no line says "${term}"`, unknown: true };
+  }
+
+  // The one line that sounds like words that name no line as written:
+  // "Keffer" finds "Kefir". The line carries heard, the words as given. Two
+  // lines as close → ask which. It never guesses: this is the user's Notion.
+  function soundLine(page, term, taken) {
+    const t = sound(term);
+    const close = openLines(page, taken).filter((l) => soundGap(t, sound(words(l.text))) <= reach(t));
+    if (close.length === 1) return { line: { ...close[0], heard: term } };
+    if (close.length) return { why: askWhich(term, close) };
     return { why: `no line says "${term}"` };
+  }
+
+  // The lines that words name, after the lines in taken (a Map by id, which
+  // gets them too), and why the other words name none, in the words' order.
+  // Words that name a line as written go first, so a near match never takes
+  // a line that other words name exactly.
+  function linesFor(page, terms, taken = new Map()) {
+    const before = [...taken.values()];
+    const found = [];
+    const why = [];
+    const unknown = [];
+    const take = (i, r) => {
+      if (!r.line) {
+        why[i] = r.why;
+        return;
+      }
+      found[i] = r.line;
+      taken.set(r.line.id, r.line);
+    };
+    terms.forEach((t, i) => {
+      const r = matchLine(page, t, taken);
+      if (r.unknown) unknown.push(i);
+      else take(i, r);
+    });
+    for (const i of unknown) take(i, soundLine(page, terms[i], taken));
+    return { lines: [...before, ...found.filter(Boolean)], missing: why.filter(Boolean) };
   }
 
   // The lines a change names, by number and by words, all found before
@@ -367,12 +468,8 @@ export function makeVoiceTools({
       if (line) found.set(line.id, line);
       else missing.push(`no line ${n}`);
     }
-    for (const t of terms) {
-      const r = matchLine(page, t, found);
-      if (r.line) found.set(r.line.id, r.line);
-      else missing.push(r.why);
-    }
-    return { lines: [...found.values()], missing };
+    const named = linesFor(page, terms, found);
+    return { lines: named.lines, missing: [...missing, ...named.missing] };
   }
 
   // Where new lines go: inside a line (`under`), right after one (`after`), or
@@ -423,15 +520,23 @@ export function makeVoiceTools({
   async function notion(a) {
     const action = a.action;
     if (action === "search") {
-      const { results } = await N("GET /notion/search", { params: params({ q: a.page || a.text || "", limit: 10 }) });
-      if (!results.length) return "Nothing shared matches that.";
-      return results.map((r) => `${r.title}${r.object === "database" ? " (database: ask use_tools)" : ""}`).join("\n");
+      const q = String(a.page || a.text || "").trim();
+      const { results } = await N("GET /notion/search", { params: params({ q, limit: 10 }) });
+      if (results.length) return results.map((r) => `${r.title}${r.object === "database" ? " (database: ask use_tools)" : ""}`).join("\n");
+      // No title has the words. With no page named, mini searched for the
+      // items it heard ("lines and keffer") and then asked the caller for a
+      // title (voice eval, 2026-11-24). The recent page whose lines have the
+      // words is the answer.
+      const best = q && (await pageWithItems(await recentPages(), q.split(/\s*(?:,|&|\band\b)\s*/i).filter(Boolean)));
+      if (!best) return "Nothing shared matches that.";
+      const lines = best.lines.map((l) => ({ text: words(l.text), heard: l.heard }));
+      return `No page is called "${q}". "${best.page.title}" has ${quoted(lines)}.`;
     }
     // The model often names the page on the read and drops it on the change
     // that follows; the page it last read is the one it means.
     // A new page goes inside the page named, or else the home page, never
     // the page last read.
-    if (action === "create") return create(a, await findPage(a.page?.trim() || homePage));
+    if (action === "create") return create(a);
     const page = a.page?.trim() ? await findPage(a.page) : lastPage || (await guessPage(a));
     lastPage = page;
     if (action === "read") return readPage(page);
@@ -458,15 +563,17 @@ export function makeVoiceTools({
       const { lines, missing } = await targets(page, a);
       const done = [];
       let under = false;
+      // What changed, in the line's words, and what the caller said if a near match found it.
+      const said = (text, line) => (line.heard ? { text: words(text), heard: line.heard } : words(text));
       for (const line of lines) {
         try {
           if (action === "remove") {
             const r = await N("DELETE /notion/block", { params: params({ id: line.id }) });
-            done.push(words(r.removed));
+            done.push(said(r.removed, line));
             under ||= r.hasChildren;
           } else {
             const r = await N("PATCH /notion/block", { params: params({ id: line.id }), body: { checked: action === "check" } });
-            done.push(words(r.to));
+            done.push(said(r.to, line));
           }
         } catch (err) {
           missing.push(`"${words(line.text)}" failed: ${err.message}`);
@@ -494,9 +601,18 @@ export function makeVoiceTools({
     throw new Error(`unknown action "${action}"`);
   }
 
-  async function create(a, page) {
-    const title = a.text?.trim();
+  // The title is text. The model also sent it as title, or as page with no
+  // title (voice eval, 2026-11-24): a page that is not there yet, named as
+  // page, is the new page, and it goes in the home page.
+  async function create(a) {
+    let title = String(a.text || a.title || "").trim();
+    let parent = String(a.page || "").trim();
+    if (parent && (!title || parent.toLowerCase() === title.toLowerCase()) && !(await findPage(parent, { orNone: true }))) {
+      title ||= parent;
+      parent = "";
+    }
     if (!title) throw new Error("give the new page's title as text");
+    const page = await findPage(parent || homePage);
     const items = (a.items || []).map(String).map((s) => s.trim()).filter(Boolean);
     const r = await N("POST /notion/page", {
       body: { page: page.id, title, markdown: items.map((i) => `- ${i}`).join("\n") || undefined },
@@ -568,8 +684,9 @@ export function makeVoiceTools({
   async function calendar(a) {
     const action = a.action;
     if (action === "read") {
-      if (!a.from) throw new Error("say which day");
-      setRange(a.from, a.to);
+      // A read with no day reads today. Told "say which day", mini asked the
+      // caller which day the lab meeting was (voice eval, 2026-11-24).
+      setRange(a.from || localDate(now()), a.to);
       return readRange();
     }
 
@@ -745,8 +862,12 @@ export function makeVoiceTools({
     get_time: async () => timeNow(now()),
   };
 
+  // The descriptions with this call's day in the examples (EXAMPLE_DAY).
+  const today = localDate(now());
+  const dated = (tool) => ({ ...tool, description: tool.description.replaceAll(EXAMPLE_DAY, today) });
+
   return {
-    defs: [NOTION_TOOL, CALENDAR_TOOL, ...(reminderRoutes ? [REMINDERS_TOOL] : []), TIME_TOOL],
+    defs: [NOTION_TOOL, dated(CALENDAR_TOOL), ...(reminderRoutes ? [dated(REMINDERS_TOOL)] : []), TIME_TOOL],
     // The id of a page this call found or made, by title (for the smoke test).
     pageId: (title) => pages.get(String(title).trim().toLowerCase())?.id || null,
     names: Object.keys(run),
