@@ -645,11 +645,39 @@ to compare the two; the settings log line says which is on.
 
 ### Cost
 
-From openai.com pricing (read 2026-11-11), per 1M tokens:
-`gpt-realtime-2.1-mini` audio $10 in, $0.30 cached, $20 out;
-`gpt-realtime-2.1` audio $32 in, $0.40 cached, $64 out. Expect about
-$0.02 a minute with the mini model, plus the line (about $0.005). The log line
-at the end of each call shows the real token count and cost.
+From openai.com pricing (read 2026-11-25), per 1M tokens:
+
+| | audio in | cached | audio out | text in | cached | text out |
+|---|---|---|---|---|---|---|
+| `gpt-realtime-2.1-mini` | $10 | $0.30 | $20 | $0.60 | $0.06 | $2.40 |
+| `gpt-realtime-2.1` | $32 | $0.40 | $64 | $4 | $0.40 | $24 |
+
+Each answer is billed for what it reads (the prompt, the tools and the whole
+call so far) and for what it says. Past calls, priced at the full model, come
+to about 12¢ a minute with the briefing; at mini, about 3¢. The line adds about
+0.5–0.9¢ a minute and transcribing the caller about 0.1¢; neither is in the
+numbers below.
+
+A call ends with three lines in the log:
+
+```
+📞 Call session ended: … — 2.1 min, OpenAI 3480 audio in / 2000 audio out tokens, about $0.2232 ($0.1063/min)
+📞 Where it went, ¢/min: her voice 6.10 (talked over 1.50) · audio in 2.90 full, 0.03 cached · text in 1.10 full, 0.20 cached · text out 0.30 · caller spoke 41 s
+📞 By answer, ¢/min: reply 7.93 · quiet 1.10 · still_working 0.70 · say 0.60 · greeting 0.30
+```
+
+- **her voice** is the audio she spoke; **talked over** is the part of it the
+  caller cut off, paid for and never heard.
+- **audio in** and **text in** are what the answers read, at the full price or
+  the cached one. The caller's new speech is about 10 tokens a second
+  (**caller spoke**); audio in at full price far above that means answers read
+  the call again without the cache.
+- **text out** is what she wrote: tool calls, and the silent steps of a chain.
+- **By answer** splits the same bill by kind of answer: a `reply` (to the
+  caller, or after a tool), a `quiet` silent step, the `say` that speaks its
+  answer, the `still_working` line and the `greeting`.
+
+The voice eval sums the same numbers over a run (`docs/voice-eval.md`).
 
 ### Enable 2B
 
@@ -691,7 +719,8 @@ From the log, per call:
   and `📞 Answer audio …` for the full wait until the answer was heard.
 - `📞 Barge-in` for interruptions, and any `⚠️  Telnyx …` line for audio that
   played late or not at all.
-- `📞 Call session ended … ($/min)` for the cost.
+- `📞 Call session ended … ($/min)` for the cost, and the `Where it went` and
+  `By answer` lines after it for what it went on (see Cost above).
 
 Also note what the log cannot show: how the voice sounded, and whether it cut
 in on a pause.

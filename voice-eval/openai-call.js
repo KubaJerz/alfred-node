@@ -42,6 +42,24 @@ const TURN_MAX_MS = 60000; // the longest one exchange may take
 export const ROWS_QUIET_MS = 2000;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// The two lines costLines (telnyx/realtime.js) ends a call with, as events:
+// ¢ a minute by part of the bill, and by kind of answer. null for any other.
+const COST_LINE =
+  /^📞 Where it went, ¢\/min: her voice ([\d.]+) \(talked over ([\d.]+)\) · audio in ([\d.]+) full, ([\d.]+) cached · text in ([\d.]+) full, ([\d.]+) cached · text out ([\d.]+) · caller spoke (\d+) s$/;
+export function costEvent(line) {
+  let m = COST_LINE.exec(line);
+  if (m) {
+    const [voice, talkedOver, audioIn, audioCached, textIn, textCached, textOut, speechS] = m.slice(1).map(Number);
+    return { kind: "cost", parts: { voice, talkedOver, audioIn, audioCached, textIn, textCached, textOut }, speechS };
+  }
+  if ((m = /^📞 By answer, ¢\/min: (.*)$/.exec(line))) {
+    const kinds = {};
+    for (const s of m[1].split(" · ")) kinds[s.slice(0, s.lastIndexOf(" "))] = Number(s.slice(s.lastIndexOf(" ") + 1));
+    return { kind: "cost-kinds", kinds };
+  }
+  return null;
+}
+
 // The clock the scenario's tools see: a fixed Wednesday morning, so dates in
 // scenarios ("tomorrow", "Friday") always mean the same day.
 export const EVAL_NOW = new Date("2026-12-02T15:00:00Z"); // 10:00 AM Eastern
@@ -178,7 +196,8 @@ export async function runOpenAICall(scenario, {
       events.push({ t, kind: "answer-latency", ms: Number(m[2]) });
     else if ((m = /^📞 Call session ended: (.*?) — .*about \$([\d.]+)/.exec(line))) {
       events.push({ t, kind: "end", reason: m[1], usd: Number(m[2]) });
-    } else if (/^📞 end_call/.test(line)) endedByAlfred = true;
+    } else if ((m = costEvent(line))) events.push({ t, ...m });
+    else if (/^📞 end_call/.test(line)) endedByAlfred = true;
   };
 
   const tools = makeVoiceTools({
@@ -268,6 +287,9 @@ export async function runOpenAICall(scenario, {
     clock,
     feed: withFeed ? call.feed : undefined,
     onCallEvent: call.onCallEvent,
+    // Each answer's bill, to see which answers read the call again at full
+    // price (the call's record keeps them; the transcript leaves them out).
+    onUsage: (u) => events.push({ t: at(), kind: "usage", ...u }),
   });
 
   // The phone line: a frame every 20 ms, the caller's words when there are

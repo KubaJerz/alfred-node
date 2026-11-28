@@ -15,6 +15,8 @@ import {
   heardMs,
   addUsage,
   usageCost,
+  emptyUsage,
+  costLines,
   USE_TOOLS,
   END_CALL,
   DEFAULT_INSTRUCTIONS,
@@ -170,6 +172,68 @@ test("usage adds up and prices the mini model", () => {
   // 500*10 + 100*0.3 + 200*0.6 + 800*0.06 + 1200*20 + 50*2.4, per 1M
   assert.ok(Math.abs(usd - 0.029318) < 1e-6, String(usd));
   assert.ok(usageCost(t, "gpt-realtime-2.1") > usd);
+});
+
+test("costLines splits a call's cost by part and by kind of answer, in cents a minute", () => {
+  const reply = { audioIn: 500, audioCached: 1000, textIn: 2000, textCached: 10000, audioOut: 800, textOut: 100 };
+  const still = { ...emptyUsage(), audioOut: 200 };
+  const usage = emptyUsage();
+  for (const u of [reply, still]) for (const k of Object.keys(usage)) usage[k] += u[k];
+  // Full prices per 1M: audio 32 in (0.4 cached), 64 out; text 4 in (0.4 cached), 24 out.
+  const lines = costLines({ usage, byKind: { still_working: still, reply }, model: "gpt-realtime-2.1", mins: 2, cutShare: 0.25, speechMs: 41_400 });
+  assert.deepEqual(lines, [
+    "📞 Where it went, ¢/min: her voice 3.20 (talked over 0.80) · audio in 0.80 full, 0.02 cached · " +
+      "text in 0.40 full, 0.20 cached · text out 0.12 · caller spoke 41 s",
+    "📞 By answer, ¢/min: reply 4.10 · still_working 0.64",
+  ]);
+  assert.deepEqual(costLines({ usage, mins: 0 }), [], "a call that never started has no rate");
+  assert.equal(costLines({ usage, mins: 1 }).length, 1, "no kinds, no second line");
+});
+
+test("the end of a call logs where the money went, and onUsage gets each answer's bill", async () => {
+  let t = 0;
+  const billed = [];
+  const { session, ws, logs } = setup({ opts: { now: () => t, model: "gpt-realtime-2.1", onUsage: (u) => billed.push(u) } });
+  await waitFor(() => ws.sent.some((e) => e.type === "response.create"));
+  assert.equal(ws.sent.find((e) => e.type === "response.create").response.metadata.kind, "greeting");
+  // The greeting, 1 s of audio, heard whole.
+  ws.server({ type: "response.output_audio.delta", item_id: "g", delta: ulaw(1000) });
+  ws.server({
+    type: "response.done",
+    response: { id: "r1", metadata: { kind: "greeting" }, usage: { input_token_details: { text_tokens: 2000 }, output_token_details: { audio_tokens: 500 } } },
+  });
+  // The caller speaks for 3 s; a reply of 1 s, which the caller talks over at once.
+  t = 2000;
+  ws.server({ type: "input_audio_buffer.speech_started", audio_start_ms: 1500 });
+  ws.server({ type: "input_audio_buffer.speech_stopped", audio_end_ms: 4500 });
+  t = 5000;
+  ws.server({ type: "response.output_audio.delta", item_id: "a", delta: ulaw(1000) });
+  ws.server({
+    type: "response.done",
+    response: {
+      id: "r2",
+      usage: {
+        input_token_details: { audio_tokens: 300, text_tokens: 2100, cached_tokens_details: { text_tokens: 1920 } },
+        output_token_details: { audio_tokens: 500 },
+      },
+    },
+  });
+  ws.server({ type: "input_audio_buffer.speech_started", audio_start_ms: 5000 });
+  t = 60_000;
+  session.end("test", { hang: false });
+  // Full prices: her voice 1000 × 64; half her audio was cut, so half of it was not heard.
+  assert.ok(
+    logs.includes(
+      "📞 Where it went, ¢/min: her voice 6.40 (talked over 3.20) · audio in 0.96 full, 0.00 cached · " +
+        "text in 0.87 full, 0.08 cached · text out 0.00 · caller spoke 3 s"
+    ),
+    logs.join("\n")
+  );
+  assert.ok(logs.includes("📞 By answer, ¢/min: reply 4.31 · greeting 4.00"), logs.join("\n"));
+  assert.deepEqual(billed, [
+    { kind: "greeting", id: "r1", usage: { ...emptyUsage(), textIn: 2000, audioOut: 500 } },
+    { kind: "reply", id: "r2", usage: { ...emptyUsage(), audioIn: 300, textIn: 180, textCached: 1920, audioOut: 500 } },
+  ]);
 });
 
 test("the prompt opens with the date and time the call starts", async () => {
