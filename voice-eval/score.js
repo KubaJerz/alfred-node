@@ -5,8 +5,10 @@
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { COMMON_CHECKS } from "./scenarios.js";
+import { timeNow } from "../telnyx/voice-tools.js";
 
-const EVAL_NOW_TEXT = "Wednesday 2 December 2026, 10:00 AM Eastern, during the call";
+// When the call is, for the grader: the scenario's clock (scenariosOn).
+const whenText = ({ now }) => (now ? `It is ${timeNow(now)}, during the call.\n\n` : "");
 
 // The starting pages, events and computer files, so the grader can tell a
 // faithful read from an invented one.
@@ -122,7 +124,7 @@ export function graderPrompt(record, scenario) {
   const rubric = [RUBRIC, told && TOLD_RUBRIC, record.briefing && BRIEFED_RUBRIC].filter(Boolean).join("\n\n");
   const background = record.briefing ? `\n\nWhat Alfred knew as the call started (the background in his instructions):\n${record.briefing}` : "";
   return (
-    `${rubric}\n\nIt is ${EVAL_NOW_TEXT}.\n\nThe user's data before the call:\n${worldText(scenario)}${background}\n\n` +
+    `${rubric}\n\n${whenText(scenario)}The user's data before the call:\n${worldText(scenario)}${background}\n\n` +
     `What the caller wanted: ${scenario.goal}\n\nThe call:\n${transcript(record, { full: true })}`
   );
 }

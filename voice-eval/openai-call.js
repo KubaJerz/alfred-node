@@ -23,7 +23,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { makeRealtimeSession } from "../telnyx/realtime.js";
+import { makeRealtimeSession, fileClips } from "../telnyx/realtime.js";
 import { makeVoiceTools } from "../telnyx/voice-tools.js";
 import { MULAW_SILENCE, PHONE_RATE } from "../telnyx/audio.js";
 import { makeLedger, callRow, inboundRow } from "../ledger.js";
@@ -59,10 +59,6 @@ export function costEvent(line) {
   }
   return null;
 }
-
-// The clock the scenario's tools see: a fixed Wednesday morning, so dates in
-// scenarios ("tomorrow", "Friday") always mean the same day.
-export const EVAL_NOW = new Date("2026-12-02T15:00:00Z"); // 10:00 AM Eastern
 
 // The ledger of one test call, in a temp dir, and its hooks for
 // makeRealtimeSession as bot.js makes them: feed is the bot's liveFeed
@@ -156,10 +152,18 @@ export async function runOpenAICall(scenario, {
   feed: withFeed = true,
   callerVoice = "ash",
   ttsCache,
+  // Where the greeting's audio is kept from one call to the next, as the bot
+  // keeps it (greetingClip). Unset: every call has the voice say it.
+  greetingCache,
   alfredDelayMs = 4000,
 }) {
+  // The call's clock: 10:00 AM Eastern on the scenario's day (scenariosOn),
+  // running from the start of the call. The tools, the prompt's date line,
+  // the ledger and the briefing all read it.
+  if (!scenario.now) throw new Error(`Scenario ${scenario.id} has no clock: build it with scenariosOn(day)`);
   const t0 = Date.now();
   const at = () => Date.now() - t0;
+  const clock = () => new Date(+scenario.now + at());
   const events = []; // { t, kind, ... }
   const logLines = [];
   const notion = fakeNotion(scenario.world?.pages);
@@ -204,7 +208,7 @@ export async function runOpenAICall(scenario, {
     notionRoutes: notion.routes,
     calendarRoutes: calendar.routes,
     fetchBlockChildren: notion.fetchBlockChildren,
-    now: () => new Date(EVAL_NOW.getTime() + at()),
+    now: clock,
   });
   const directTools = {
     ...tools,
@@ -221,8 +225,6 @@ export async function runOpenAICall(scenario, {
       }
     },
   };
-  // The call's clock: the scenario's fixed morning, running from the start.
-  const clock = () => new Date(EVAL_NOW.getTime() + at());
   const call = makeCallLedger({ told: (text) => events.push({ t: at(), kind: "told", text }), log, now: () => clock().getTime() });
   try {
     await call.seed(scenario.briefing);
@@ -287,9 +289,12 @@ export async function runOpenAICall(scenario, {
     clock,
     feed: withFeed ? call.feed : undefined,
     onCallEvent: call.onCallEvent,
+    greetingClip: greetingCache ? fileClips(greetingCache) : null,
     // Each answer's bill, to see which answers read the call again at full
     // price (the call's record keeps them; the transcript leaves them out).
-    onUsage: (u) => events.push({ t: at(), kind: "usage", ...u }),
+    // The answer's own kind (reply, greeting, …) is `answer`: spread in, it
+    // replaced "usage" as the event's kind.
+    onUsage: ({ kind, id, usage }) => events.push({ t: at(), kind: "usage", answer: kind, id, usage }),
   });
 
   // The phone line: a frame every 20 ms, the caller's words when there are

@@ -192,15 +192,40 @@ allow list stops strangers, not a determined attacker. These close the gaps.
 
 ### Phone — 2B on OpenAI
 
-- [ ] **Try GPT-Live (`gpt-live-1`) as a 2B engine.** OpenAI's newer voice model
-      is built for this shape: full duplex, and "client delegation" sends the
-      backend work to us (Alfred), with results spoken as commentary. It takes
-      PCMU over WebSocket, so Telnyx stays the same. On hold: it is a flat
-      $0.05/min, about twice our Realtime cost ($0.019–0.029/min), it has no
-      documented turn-detection settings, and Realtime works well now. A/B it
-      with the standard test call in `docs/phone-design.md`. It is also the only
-      way to use a voice designed from a description (prompt-to-voice); Realtime
-      takes only named voices or recording-based ones.
+- [ ] **Next, the big test: GPT-Live (`gpt-live-1`) as the 2B engine.** After
+      the cost cuts on the full model. Realtime bills by the token: about
+      12–13¢ a minute on `gpt-realtime-2.1` with the briefing, and maybe 8–9¢
+      after the cuts. mini is about 3¢, but in the voice eval (2026-11-27) it
+      edited the wrong list items, so the phone stays on the full model.
+      GPT-Live is a flat $0.05 a minute while active ($0.02 on standby, WebRTC
+      only), plus the work it hands back to us, billed by the token.
+      - It is built for this shape: full duplex, and "client delegation" sends
+        the backend work to us (Alfred), with results spoken as commentary.
+      - It takes PCMU over WebSocket (`/v1/live/sessions`), so Telnyx stays the
+        same.
+      - The plan: a GPT-Live session next to `telnyx/realtime.js`, with the same
+        interface, so the voice eval runs the whole suite on it. Compare checks,
+        grader, first-audio wait and cost a minute (the `Where it went` lines,
+        #156) with the full model. Then the standard test call in
+        `docs/phone-design.md`.
+      - Open questions: it has no documented turn-detection settings, and our
+        quick tools (notion, calendar, reminders) have to fit its delegation.
+      - It is also the only way to use a voice designed from a description
+        (prompt-to-voice). Realtime takes only named voices or recording-based
+        ones.
+- [ ] **Watch the cost of real calls after the cuts (#161).** Each call ends
+      with `Where it went` and `By answer` (#156). After a week of calls: is
+      audio in at full price down near the caller's own speech, what does a
+      minute cost, and does the text history ever confuse a later turn (the
+      voice reads its transcription of the caller, which can mishear)? If it
+      does, `VOICE_OPENAI_TEXT_HISTORY=0`.
+- [ ] **Decide the reasoning level: `low` or `minimal`.** Hidden reasoning is
+      about half of the text the voice writes, about 0.3–0.6¢ a minute. The
+      eval compares the two on the full model (#161); switch `.env` only if
+      minimal passes as well.
+- [ ] **Maybe: trim the briefing to about half.** Each note is cut to its last
+      4,000 characters; 2,000 would save about 0.7–1¢ a minute, every answer
+      reading less. On hold: the voice would know less as a call starts.
 
 ### Phone — 2B direct tools and turn detection
 

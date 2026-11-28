@@ -7,9 +7,14 @@ import { makeVoiceTools } from "../telnyx/voice-tools.js";
 import { makeRealtimeSession, costLines, emptyUsage } from "../telnyx/realtime.js";
 import { callBriefing, liveUpdate } from "../context.js";
 import { fakeAlfred, fakeCalendar, fakeNotion } from "../voice-eval/fakes.js";
-import { makeCallLedger, EVAL_NOW, costEvent } from "../voice-eval/openai-call.js";
-import { SCENARIOS, COMMON_CHECKS, EVERYDAY } from "../voice-eval/scenarios.js";
+import { makeCallLedger, runOpenAICall, costEvent } from "../voice-eval/openai-call.js";
+import { scenariosOn, COMMON_CHECKS } from "../voice-eval/scenarios.js";
 import { scoreChecks, transcript, graderPrompt } from "../voice-eval/score.js";
+
+// The tests' day: Wednesday 2 December 2026. Each call's clock is 10:00 AM
+// Eastern on it.
+const { scenarios: SCENARIOS, everyday: EVERYDAY } = scenariosOn("2026-12-02");
+const EVAL_NOW = SCENARIOS[0].now;
 
 const world = () => {
   const notion = fakeNotion([
@@ -99,7 +104,41 @@ test("scenarios have unique ids, a goal, lines and checks", () => {
   for (const s of SCENARIOS) {
     assert.ok(s.goal && s.turns.length && s.checks.length, s.id);
     assert.ok(s.world.pages.length && s.alfred.length, s.id);
+    assert.equal(s.now.toISOString(), "2026-12-02T15:00:00.000Z", `${s.id}: 10:00 AM Eastern`);
   }
+});
+
+// OpenAI tells the model the real date itself, so the calls run on the day of
+// the run, with the world built around it.
+test("scenarios on another day: the world, the weekdays and the clock follow the day", () => {
+  const { scenarios, everyday } = scenariosOn("2027-07-09"); // a Friday, in summer time
+  const s = (id) => scenarios.find((x) => x.id === id);
+  assert.ok(scenarios.every((x) => x.now.toISOString() === "2027-07-09T14:00:00.000Z" && x.day === "2027-07-09"));
+  assert.deepEqual(s("add-two").world.events.map((e) => [e.summary, e.start]), [
+    ["Lab meeting", "2027-07-09T14:00:00-04:00"],
+    ["Gym", "2027-07-10T07:00:00-04:00"],
+    ["Call with Mom", "2027-07-10T18:00:00-04:00"],
+    ["Thesis review", "2027-07-11T11:00:00-04:00"],
+  ]);
+  assert.match(everyday.memory, /Lab meeting every Friday at 2 PM\.\n- Thesis advisor reviews chapters on Sundays\./);
+  assert.ok(everyday.rows.every((r) => r.ts.startsWith("2027-07-09T12:15")), "08:15 Eastern");
+  // Two days on is Sunday: what the caller says, and what the check wants.
+  const add = s("calendar-add");
+  assert.equal(add.turns[0].say, "Put the dentist on my calendar Sunday at 3 for an hour.");
+  assert.match(add.goal, /this Sunday \(Jul 11\) at 3 PM/);
+  const booked = (start) => scoreChecks({ ...run([]), world: { calendar: [{ summary: "Dentist", start }], computer: {} } }, add).checks[0].pass;
+  assert.equal(booked("2027-07-11T15:00:00"), true);
+  assert.equal(booked("2026-12-04T15:00:00"), false);
+  assert.match(graderPrompt(run([]), add), /It is Friday, July 9, 2027 at 10:00 AM \(Eastern\), during the call\./);
+  // The dentist by SMS is six days on: Thursday.
+  assert.ok(s("brief-dentist").briefing.rows.some((r) => r.text === "The dentist is Thursday at 3."));
+  assert.deepEqual(s("live-photo").turns[0].rows[0].files, ["var/memories/dailies/2027-07-09/1-0-shoes.jpg"]);
+  // On the tests' Wednesday, the line is the one the TTS cache already has.
+  assert.equal(SCENARIOS.find((x) => x.id === "calendar-add").turns[0].say, "Put the dentist on my calendar Friday at 3 for an hour.");
+});
+
+test("a scenario with no clock is refused before any call or text-to-speech", async () => {
+  await assert.rejects(runOpenAICall({ id: "x", turns: [{ say: "Hi." }] }, { apiKey: "sk-test" }), /Scenario x has no clock: build it with scenariosOn/);
 });
 
 const record = (voice, extra = []) => ({

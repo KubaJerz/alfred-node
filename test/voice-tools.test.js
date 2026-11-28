@@ -3,7 +3,10 @@ import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { makeVoiceTools, numberLines, nextDay, timeNow, REMINDERS_TOOL } from "../telnyx/voice-tools.js";
+import {
+  makeVoiceTools, numberLines, nextDay, timeNow, sound, soundGap, reach, NOTION_TOOL, CALENDAR_TOOL, REMINDERS_TOOL,
+} from "../telnyx/voice-tools.js";
+import { fakeNotion as markdownNotion } from "../voice-eval/fakes.js";
 import { makeStore } from "../reminders/store.js";
 import { makeReminders } from "../reminders/service.js";
 import { parseContacts } from "../reminders/contacts.js";
@@ -353,6 +356,132 @@ test("check and edit take items too", async () => {
   assert.match(await t.call("notion", { action: "check", page: "Shopping list", items: ["sprite zero", "eggs"] }), /^Done: checked off "Sprite Zero", "Eggs"\./);
   assert.deepEqual(n.log.filter((l) => l[0] === "patch").map((l) => l[1]), ["b3", "b7"]);
   assert.match(await t.call("notion", { action: "edit", page: "Shopping list", items: ["eggs"], text: "Brown eggs" }), /changed "Eggs" to "Brown eggs"/);
+});
+
+// ── Words heard wrong ───────────────────────────────────────────────────────
+
+// The voice eval's shopping list, and a page that has none of it.
+const SHOPPING = "- [ ] Milk\n- [ ] Butter\n- [ ] Limes\n- [ ] Kefir\n- [x] Olive oil\n- [ ] Greens\n  - [ ] Spinach\n  - [ ] Kale\n- [ ] Eggs";
+function listTools(markdown = SHOPPING) {
+  const notion = markdownNotion([
+    { title: "Home", markdown: "" },
+    { title: "Shopping list", markdown, parent: "Home" },
+    { title: "Reading list", markdown: "- [ ] The Mom Test\n- [x] Deep Work", parent: "Home" },
+  ]);
+  const notes = [];
+  const t = makeVoiceTools({
+    notionRoutes: notion.routes,
+    calendarRoutes: {},
+    fetchBlockChildren: notion.fetchBlockChildren,
+    note: (x) => notes.push(x),
+    homePage: "Home",
+  });
+  const ticked = () => notion.lines("Shopping list").filter((l) => l.checked).map((l) => l.text);
+  return { t, notion, notes, ticked };
+}
+
+test("a near match is a small change in sound only, and never for a short word", () => {
+  const near = (said, line) => soundGap(sound(said), sound(line)) <= reach(sound(said));
+  // As the eval's transcripts heard limes and kefir, and other spellings.
+  for (const [said, line] of [["Lines", "Limes"], ["Keffer", "Kefir"], ["khefer", "Kefir"], ["line", "Limes"], ["yoghurt", "Yogurt"],
+    ["brocoli", "Broccoli"], ["bred", "Bread"], ["zukini", "Zucchini"], ["greek yoghurt", "Greek yogurt"]]) {
+    assert.equal(near(said, line), true, `${said} → ${line}`);
+  }
+  // A word that is not on the list must not take another line.
+  for (const [said, line] of [["cheese", "Greens"], ["beer", "Beef"], ["milk", "Silk"], ["pear", "Peas"], ["potatoes", "Tomatoes"],
+    ["chefer", "Kefir"], ["tea", "Pea"], ["egg", "Eel"], ["lines", "Lime juice"]]) {
+    assert.equal(near(said, line), false, `${said} ↛ ${line}`);
+  }
+});
+
+test("words heard wrong find the one line that sounds like them, and the answer says what was heard", async () => {
+  const { t, notes, ticked } = listTools();
+  const out = await t.call("notion", { action: "check", page: "Shopping list", items: ["Lines", "Keffer"] });
+  assert.match(out, /^Done: checked off "Limes" \(heard "Lines"\), "Kefir" \(heard "Keffer"\)\./);
+  assert.deepEqual(ticked(), ["- [x] Limes", "- [x] Kefir", "- [x] Olive oil"]);
+  assert.deepEqual(notes, ['checked off "Limes" (heard "Lines"), "Kefir" (heard "Keffer") (Notion page "Shopping list")']);
+  assert.match(await t.call("notion", { action: "remove", page: "Shopping list", items: ["Lines"] }), /^Done: removed "Limes" \(heard "Lines"\) \(in Notion's Trash\)\./);
+});
+
+test("an item that is not on the list takes no other line", async () => {
+  const { t, notion } = listTools();
+  const out = await t.call("notion", { action: "remove", page: "Shopping list", items: ["milk", "butter", "cheese"] });
+  assert.match(out, /^Removed "Milk", "Butter" \(in Notion's Trash\)\. No line says "cheese"\./);
+  assert.equal(notion.lines("Shopping list").length, 7);
+  assert.match(await t.call("notion", { action: "check", page: "Shopping list", items: ["tea"] }), /^That didn't work: no line says "tea"\.$/);
+});
+
+test("two lines that sound as close ask which, and nothing changes", async () => {
+  const { t, ticked } = listTools("- [ ] Limes\n- [ ] Lanes\n- [ ] Kefir");
+  const out = await t.call("notion", { action: "check", page: "Shopping list", items: ["lines", "kefir"] });
+  assert.match(out, /^Checked off "Kefir"\. "lines" could be "Limes" or "Lanes"; say which\./);
+  assert.deepEqual(ticked(), ["- [x] Kefir"]);
+});
+
+test("words that name a line as written go first, so a near match never takes it from them", async () => {
+  const { t, ticked } = listTools("- [ ] Limes\n- [ ] Kefir");
+  // "lines" first: as a near match it would take Limes from "limes".
+  const out = await t.call("notion", { action: "check", page: "Shopping list", items: ["lines", "limes"] });
+  assert.match(out, /^Checked off "Limes"\. No line says "lines"\./);
+  // The answer keeps the caller's order.
+  const { t: t2 } = listTools("- [ ] Limes\n- [ ] Kefir");
+  assert.match(await t2.call("notion", { action: "check", page: "Shopping list", items: ["Keffer", "limes"] }), /^Done: checked off "Kefir" \(heard "Keffer"\), "Limes"\./);
+  assert.deepEqual(ticked(), ["- [x] Limes"]);
+});
+
+test("with no page named, words heard wrong still find the page that has them", async () => {
+  const { t, ticked } = listTools();
+  assert.match(await t.call("notion", { action: "check", items: ["Lines", "Keffer"] }), /^Done: checked off "Limes" \(heard "Lines"\), "Kefir" \(heard "Keffer"\)\./);
+  assert.deepEqual(ticked(), ["- [x] Limes", "- [x] Kefir", "- [x] Olive oil"]);
+});
+
+// Asked to "check off limes and kefir" (heard "Lines and Keffer"), mini
+// searched for a page called that, found none, and asked the caller.
+test("a search that finds no title names the page whose lines have the words", async () => {
+  const { t, notion } = listTools();
+  assert.equal(
+    await t.call("notion", { action: "search", page: "lines and kefir" }),
+    'No page is called "lines and kefir". "Shopping list" has "Limes" (heard "lines"), "Kefir".'
+  );
+  assert.equal(await t.call("notion", { action: "search", page: "caviar" }), "Nothing shared matches that.");
+  assert.equal(notion.lines("Shopping list").filter((l) => l.checked).length, 1, "a search changes nothing");
+});
+
+test("create takes the title as title, or as a page that is not there yet", async () => {
+  for (const args of [{ title: "Think List" }, { page: "Think List" }, { page: "Think List", text: "Think List" }]) {
+    const { t, notion } = listTools();
+    assert.equal(await t.call("notion", { action: "create", ...args }), 'Done: made the page "Think List".', JSON.stringify(args));
+    assert.deepEqual(notion.dump().Home, ["- 📄 Shopping list", "- 📄 Reading list", "- 📄 Think List"]);
+  }
+  // A page that is there is a parent, so the title is still missing.
+  const { t, notion } = listTools();
+  assert.match(await t.call("notion", { action: "create", page: "Shopping list" }), /give the new page's title as text/);
+  assert.match(await t.call("notion", { action: "create", page: "Shopping list", title: "Party" }), /made the page "Party" under "Shopping list"/);
+  assert.equal(notion.titles().length, 4);
+});
+
+test("the notion description asks for every item, in one call, with no read", () => {
+  assert.match(NOTION_TOOL.description, /every item the caller named, in their words,\s+all in one call, even one that may not be there/);
+  assert.match(NOTION_TOOL.description, /leave page out if the caller named none/);
+});
+
+test("calendar read with no day reads today, Eastern", async () => {
+  const { t, c } = tools(); // 3:04 PM on Sunday 22 November, Eastern
+  assert.match(await t.call("calendar", { action: "read", match: "lab" }), /Lab meeting/);
+  assert.deepEqual(c.log.at(-1), ["list", "2026-11-22", "2026-11-23"]);
+  // 10 PM Eastern is the next day in UTC: today is still the 22nd.
+  const late = makeVoiceTools({ notionRoutes: {}, calendarRoutes: c.routes, fetchBlockChildren: async () => [], now: () => new Date("2026-11-23T03:00:00Z") });
+  await late.call("calendar", { action: "read" });
+  assert.deepEqual(c.log.at(-1), ["list", "2026-11-22", "2026-11-23"]);
+});
+
+test("each call's calendar and reminders descriptions show its own day in the example", () => {
+  const { t } = reminderTools(); // Tuesday 24 November, Eastern
+  const desc = (name) => t.defs.find((d) => d.name === name).description;
+  assert.match(desc("calendar"), /written like 2026-11-24T15:00; a date alone \(2026-11-24\) is all day/);
+  assert.match(desc("reminders"), /written like 2026-11-24T15:00, or a wait/);
+  assert.doesNotMatch(JSON.stringify(t.defs), /2026-11-27/, "nor in a parameter's description");
+  assert.match(CALENDAR_TOOL.description, /2026-11-27T15:00/, "the constant keeps its own");
 });
 
 test("calendar delete takes several events; one blocked is said plainly", async () => {

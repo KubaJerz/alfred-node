@@ -42,6 +42,9 @@
 // path: a briefing that fails, or is not ready soon after the socket opens,
 // is logged, and the call starts with the plain prompt.
 
+import { createHash } from "node:crypto";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import path from "node:path";
 import WebSocket from "ws";
 import { makePlayer, makeReorder } from "./pipeline.js";
 import { PHONE_RATE, mulawToLinear } from "./audio.js";
@@ -279,6 +282,29 @@ export function costLines({ usage, byKind = {}, model = DEFAULT_MODEL, mins, cut
   return lines;
 }
 
+// Greetings as said on earlier calls, for greetingClip: one file of PCMU
+// audio in dir per voice and line. A read or write that fails is no clip.
+export function fileClips(dir, { log = console.warn } = {}) {
+  const file = (key) => path.join(dir, `${createHash("sha256").update(key).digest("hex").slice(0, 16)}.ulaw`);
+  return {
+    get(key) {
+      try {
+        return readFileSync(file(key));
+      } catch {
+        return null;
+      }
+    },
+    set(key, audio) {
+      try {
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(file(key), audio);
+      } catch (err) {
+        log(`⚠️  Could not keep the greeting's audio: ${err.message}`);
+      }
+    },
+  };
+}
+
 // One call, from the media "start" frame to the end of the call. It has the
 // same interface as makeCallSession in telnyx/pipeline.js.
 export function makeRealtimeSession({
@@ -332,6 +358,16 @@ export function makeRealtimeSession({
   // again, as before, to compare the two.
   quietChains = true,
   greeting = GREETING,
+  // The greeting as said on an earlier call: { get(key), set(key, audio) }
+  // (fileClips). With a recording for this voice and line, the call plays it
+  // and puts the line in the conversation as text: no response to pay for.
+  // Without one, the voice says it, and its audio is kept for next time.
+  greetingClip = null,
+  // A caller turn the voice has answered is read from then on as its
+  // transcript, not its audio. Every answer reads the whole call again, and
+  // the caller's audio went at the full audio price (voice eval, 2026-11-27).
+  // false keeps the audio, as before.
+  textHistory = true,
   // The date and time the prompt opens with. Without it the model guessed
   // "Friday" a week off and booked it (voice eval, 2026-11-24).
   clock = () => new Date(),
@@ -348,6 +384,12 @@ export function makeRealtimeSession({
   let cutMs = 0; // of it, what the caller talked over
   let speechMs = 0; // the caller's speech, as OpenAI's turn detection heard it
   let speechFrom = null; // where the speech that runs now started, in its ms
+  // The caller's audio turns, in order: { id, text, swap }. swap is "sent"
+  // while the turn's text item is on its way, "done" once its audio is gone.
+  const turns = [];
+  const swaps = new Map(); // our text item's id → the turn it stands for
+  let turnsAsText = 0;
+  let greet = null; // the greeting being said, to keep: { key, id, chunks, cut }
   const startedAt = now();
   let ws = null;
   let ended = false;
@@ -385,6 +427,45 @@ export function makeRealtimeSession({
     type: "conversation.item.create",
     item: { type: "message", role: "system", content: [{ type: "input_text", text }] },
   });
+
+  // The caller's turns before the newest one with words are answered (the
+  // caller has moved on). Each goes into the conversation as its transcript,
+  // right after its audio, and the audio goes once the text is in, so a turn
+  // that fails to swap stays as it was.
+  const swapAnswered = () => {
+    if (!textHistory) return;
+    const newest = turns.findLastIndex((t) => t.text);
+    turns.slice(0, Math.max(0, newest)).forEach((t, i) => {
+      if (!t.text || t.swap) return;
+      const id = `alfred_said_${i}`;
+      t.swap = "sent";
+      swaps.set(id, t);
+      send({
+        type: "conversation.item.create",
+        previous_item_id: t.id,
+        item: { id, type: "message", role: "user", content: [{ type: "input_text", text: t.text }] },
+      });
+    });
+  };
+
+  // The greeting: its recording when there is one (greetingClip), else the
+  // voice says it and the audio is kept for the next call.
+  const sayGreeting = () => {
+    const key = `${voice || DEFAULT_VOICE}|${greeting}`;
+    const clip = greetingClip?.get(key);
+    if (!clip?.length) {
+      greet = { key, id: null, chunks: [], cut: false };
+      createResponse({ metadata: { kind: GREET }, instructions: `Say exactly this and nothing else: "${greeting}"`, tool_choice: "none" });
+      return;
+    }
+    send({ type: "conversation.item.create", item: { type: "message", role: "assistant", content: [{ type: "output_text", text: greeting }] } });
+    player.push(clip);
+    player.mark("greeting:end");
+    lastAudioAt = now();
+    log(`🗣️  Voice: ${greeting}`);
+    log("📞 The greeting played from its recording");
+    emit({ type: "line", dir: "out", text: greeting });
+  };
 
   // The feed's push: into the call now, or once the session is set up. key
   // names the row it tells, so the briefing can drop it (dropShown).
@@ -528,6 +609,7 @@ export function makeRealtimeSession({
     const it = item;
     it.bytes += buf.length;
     outBytes += buf.length;
+    if (greet?.id && m.response_id === greet.id) greet.chunks.push(buf);
     lastAudioAt = now();
     if (update && m.response_id && m.response_id === update.id) update.heard = true;
     player.push(buf, () => {
@@ -578,6 +660,7 @@ export function makeRealtimeSession({
 
   const bargeIn = () => {
     callerSpeaking = true;
+    if (greet?.id) greet.cut = true; // a greeting talked over is not kept
     if (!item || !player.busy) return;
     const total = (item.bytes * 1000) / PHONE_RATE;
     const heard = heardMs(item.firstAt, now(), total);
@@ -602,6 +685,11 @@ export function makeRealtimeSession({
       createResponse({
         metadata: { kind: STILL_WORKING },
         conversation: "none",
+        // The line needs nothing but its instruction. With no input, an
+        // out-of-band response reads the whole call and the tools again, at
+        // full price, since its instructions are not the call's.
+        input: [],
+        tools: [],
         output_modalities: ["audio"],
         tool_choice: "none",
         instructions:
@@ -706,6 +794,8 @@ export function makeRealtimeSession({
     createResponse({
       metadata: { kind: SAY },
       conversation: "none",
+      input: [], // only the text to say, not the call again (see stillWorking)
+      tools: [],
       output_modalities: ["audio"],
       tool_choice: "none",
       instructions: `Say exactly this and nothing else: "${text}"`,
@@ -730,7 +820,22 @@ export function makeRealtimeSession({
           update.id = m.response.id;
           if (update.cancel) send({ type: "response.cancel", response_id: update.id });
         }
+        if (greet && m.response?.metadata?.kind === GREET) greet.id = m.response.id;
         return;
+      case "input_audio_buffer.committed":
+        if (m.item_id) turns.push({ id: m.item_id, text: null, swap: null });
+        return;
+      // A turn's text is in: its audio can go (swapAnswered).
+      case "conversation.item.added":
+      case "conversation.item.created": {
+        const t = swaps.get(m.item?.id);
+        if (!t) return;
+        swaps.delete(m.item.id);
+        send({ type: "conversation.item.delete", item_id: t.id });
+        t.swap = "done";
+        turnsAsText++;
+        return;
+      }
       case "response.output_audio.delta":
         return onAudio(m);
       case "response.output_audio.done":
@@ -748,12 +853,16 @@ export function makeRealtimeSession({
           log(`📞 Turn end decided ${speechStoppedAt - lastVoiceAt} ms after the caller's last sound`);
         }
         return;
-      case "conversation.item.input_audio_transcription.completed":
+      case "conversation.item.input_audio_transcription.completed": {
         if (m.transcript?.trim()) {
           log(`📞 Caller: ${oneLine(m.transcript)}`);
           emit({ type: "line", dir: "in", text: m.transcript.trim() });
         }
+        const turn = turns.find((t) => t.id === m.item_id);
+        if (turn && m.transcript?.trim()) turn.text = m.transcript.trim();
+        swapAnswered();
         return;
+      }
       case "response.output_audio_transcript.done":
         if (m.transcript?.trim()) {
           log(`🗣️  Voice: ${oneLine(m.transcript)}`);
@@ -782,6 +891,13 @@ export function makeRealtimeSession({
           onUsage({ kind, id: m.response?.id ?? null, usage: addUsage(emptyUsage(), m.response?.usage) });
         } catch (err) {
           log(`⚠️  Usage report failed: ${err.message}`);
+        }
+        // The greeting said whole, with no one talking over it: kept.
+        if (greet?.id && m.response?.id === greet.id) {
+          if (m.response.status === "completed" && !greet.cut && greet.chunks.length) {
+            greetingClip?.set(greet.key, Buffer.concat(greet.chunks));
+          }
+          greet = null;
         }
         if (pendingCreate && !activeResponse) {
           const ev = pendingCreate;
@@ -816,9 +932,7 @@ export function makeRealtimeSession({
       held = [];
       for (const p of openQueue) send({ type: "input_audio_buffer.append", audio: p });
       openQueue = [];
-      if (greeting) {
-        createResponse({ metadata: { kind: GREET }, instructions: `Say exactly this and nothing else: "${greeting}"`, tool_choice: "none" });
-      }
+      if (greeting) sayGreeting();
     };
     ws.on("open", () => {
       if (ended) return ws.close();
@@ -887,6 +1001,7 @@ export function makeRealtimeSession({
     const outMs = (outBytes * 1000) / PHONE_RATE;
     const cutShare = outMs > 0 ? Math.min(1, cutMs / outMs) : 0;
     for (const line of costLines({ usage, byKind, model, mins, cutShare, speechMs })) log(line);
+    if (turnsAsText) log(`📞 Read back as text: ${turnsAsText} caller turn(s) after their answer`);
     emit({ type: "end", reason, ms: now() - startedAt });
     if (hang) hangup().catch((err) => log(`⚠️  Hangup failed: ${err.message}`));
     onEnd();

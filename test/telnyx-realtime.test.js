@@ -17,6 +17,7 @@ import {
   usageCost,
   emptyUsage,
   costLines,
+  fileClips,
   USE_TOOLS,
   END_CALL,
   DEFAULT_INSTRUCTIONS,
@@ -473,6 +474,17 @@ async function slowWithUpdate(opts = {}) {
   return { session, ws, logs, release: (r) => release(r), cancels, answers };
 }
 
+test("a still-working line reads only its own instruction, not the call or the tools", async () => {
+  const { session, ws, release } = await slowWithUpdate();
+  const line = ws.sent.find((e) => e.response?.metadata?.kind === "still_working").response;
+  assert.equal(line.conversation, "none");
+  assert.deepEqual(line.input, []);
+  assert.deepEqual(line.tools, []);
+  assert.match(line.instructions, /still on it/);
+  release("Done.");
+  session.end("test", { hang: false });
+});
+
 test("a still-working line that has not played is cancelled when the answer comes", async () => {
   const { session, ws, logs, release, cancels, answers } = await slowWithUpdate();
   ws.server({ type: "response.created", response: { id: "r_upd", metadata: { kind: "still_working" } } });
@@ -678,6 +690,8 @@ test("a quiet reply with no tool call is the answer, said out of band", async ()
   const [s] = say(ws);
   assert.ok(s, "the answer is spoken");
   assert.equal(s.response.conversation, "none");
+  assert.deepEqual(s.response.input, [], "it reads only the text to say, not the call again");
+  assert.deepEqual(s.response.tools, []);
   assert.deepEqual(s.response.output_modalities, ["audio"]);
   assert.equal(s.response.tool_choice, "none");
   assert.match(s.response.instructions, /^Say exactly this and nothing else: "Done, bread is off the list\."$/);
@@ -1147,4 +1161,85 @@ test("through a real ledger: a text written while the briefing is built reaches 
   assert.equal(systemItems(ws).length, 1);
   assert.match(systemItems(ws)[0], /by SMS, the user said: "and wine"/);
   session.end("call hung up", { hang: false });
+});
+
+test("an answered caller turn is read from then on as its transcript: the text goes in after the audio, then the audio goes", async () => {
+  const { session, ws, logs } = setup({ opts: { greeting: "" } });
+  await waitFor(() => ws.readyState === 1);
+  const sent = (type) => ws.sent.filter((e) => e.type === type);
+  ws.server({ type: "input_audio_buffer.committed", item_id: "u1" });
+  ws.server({ type: "conversation.item.input_audio_transcription.completed", item_id: "u1", transcript: "Add milk to the list." });
+  assert.equal(sent("conversation.item.create").length, 0, "the newest turn keeps its audio");
+  ws.server({ type: "input_audio_buffer.committed", item_id: "u2" });
+  ws.server({ type: "conversation.item.input_audio_transcription.completed", item_id: "u2", transcript: "And eggs." });
+  assert.deepEqual(sent("conversation.item.create"), [
+    {
+      type: "conversation.item.create",
+      previous_item_id: "u1",
+      item: { id: "alfred_said_0", type: "message", role: "user", content: [{ type: "input_text", text: "Add milk to the list." }] },
+    },
+  ]);
+  assert.equal(sent("conversation.item.delete").length, 0, "the audio stays until the text is in");
+  ws.server({ type: "conversation.item.added", item: { id: "alfred_said_0" } });
+  assert.deepEqual(sent("conversation.item.delete"), [{ type: "conversation.item.delete", item_id: "u1" }]);
+  ws.server({ type: "conversation.item.added", item: { id: "alfred_said_0" } });
+  assert.equal(sent("conversation.item.delete").length, 1, "one delete per turn");
+  session.end("test", { hang: false });
+  assert.ok(logs.includes("📞 Read back as text: 1 caller turn(s) after their answer"), logs.join("\n"));
+});
+
+test("a caller turn with no words, or every turn with textHistory off, keeps its audio", async () => {
+  for (const [opts, first] of [[{ textHistory: false }, "Add milk."], [{}, "  "]]) {
+    const { session, ws } = setup({ opts: { greeting: "", ...opts } });
+    await waitFor(() => ws.readyState === 1);
+    ws.server({ type: "input_audio_buffer.committed", item_id: "u1" });
+    ws.server({ type: "conversation.item.input_audio_transcription.completed", item_id: "u1", transcript: first });
+    ws.server({ type: "input_audio_buffer.committed", item_id: "u2" });
+    ws.server({ type: "conversation.item.input_audio_transcription.completed", item_id: "u2", transcript: "And eggs." });
+    assert.equal(ws.sent.filter((e) => e.type === "conversation.item.create").length, 0, JSON.stringify(opts));
+    session.end("test", { hang: false });
+  }
+});
+
+test("the greeting is said once and kept; a later call plays it, with no response to pay for", async () => {
+  const kept = new Map();
+  const greetingClip = { get: (k) => kept.get(k) ?? null, set: (k, a) => kept.set(k, a) };
+  const first = setup({ opts: { greetingClip } });
+  await waitFor(() => first.ws.sent.some((e) => e.type === "response.create"));
+  first.ws.server({ type: "response.created", response: { id: "g1", metadata: { kind: "greeting" } } });
+  first.ws.server({ type: "response.output_audio.delta", response_id: "g1", item_id: "gi", delta: ulaw(300) });
+  first.ws.server({ type: "response.output_audio.delta", response_id: "g1", item_id: "gi", delta: ulaw(200) });
+  first.ws.server({ type: "response.done", response: { id: "g1", status: "completed", metadata: { kind: "greeting" } } });
+  first.session.end("test", { hang: false });
+  assert.deepEqual([...kept.keys()], ["cedar|Hey."]);
+  assert.equal(kept.get("cedar|Hey.").length, 4000, "the 500 ms the voice said");
+
+  const second = setup({ opts: { greetingClip } });
+  await waitFor(() => second.frames.some((f) => f.event === "media"));
+  assert.ok(!second.ws.sent.some((e) => e.type === "response.create"), "no response for the greeting");
+  const line = second.ws.sent.find((e) => e.type === "conversation.item.create");
+  assert.deepEqual(line.item, { type: "message", role: "assistant", content: [{ type: "output_text", text: "Hey." }] });
+  assert.ok(second.logs.includes("🗣️  Voice: Hey."), second.logs.join("\n"));
+  second.session.end("test", { hang: false });
+});
+
+test("a greeting the caller talks over is not kept", async () => {
+  const kept = new Map();
+  const { session, ws } = setup({ opts: { greetingClip: { get: () => null, set: (k, a) => kept.set(k, a) } } });
+  await waitFor(() => ws.sent.some((e) => e.type === "response.create"));
+  ws.server({ type: "response.created", response: { id: "g1", metadata: { kind: "greeting" } } });
+  ws.server({ type: "response.output_audio.delta", response_id: "g1", item_id: "gi", delta: ulaw(300) });
+  ws.server({ type: "input_audio_buffer.speech_started", audio_start_ms: 100 });
+  ws.server({ type: "response.done", response: { id: "g1", status: "cancelled", metadata: { kind: "greeting" } } });
+  session.end("test", { hang: false });
+  assert.equal(kept.size, 0);
+});
+
+test("fileClips keeps one greeting per voice and line on disk", () => {
+  const dir = path.join(mkdtempSync(path.join(tmpdir(), "alfred-clips-")), "greetings");
+  const clips = fileClips(dir);
+  assert.equal(clips.get("cedar|Hey."), null);
+  clips.set("cedar|Hey.", Buffer.from([1, 2, 3]));
+  assert.deepEqual([...clips.get("cedar|Hey.")], [1, 2, 3]);
+  assert.equal(clips.get("marin|Hey."), null, "another voice has its own");
 });
