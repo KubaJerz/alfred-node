@@ -50,6 +50,16 @@ const mean = (xs) => {
   const v = xs.filter((x) => x != null);
   return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null;
 };
+// The parts of the bill, as costLines in telnyx/realtime.js logs them.
+const COST_PARTS = [
+  ["voice", "her voice"],
+  ["talkedOver", "of it talked over"],
+  ["audioIn", "audio in, full price"],
+  ["audioCached", "audio in, cached"],
+  ["textIn", "text in, full price"],
+  ["textCached", "text in, cached"],
+  ["textOut", "text out"],
+];
 
 if (flag("compare")) {
   compare(argv.slice(argv.indexOf("--compare") + 1).filter((a) => !a.startsWith("--")));
@@ -124,7 +134,7 @@ async function worker() {
       writeFileSync(join(outDir, `${name}.txt`), `${s.goal}\n\n${briefing}${text}\n\n${score.checks.map((c) => `${c.pass ? "✓" : "✗"} ${c.name}`).join("\n")}\n${grade ? `\ngrader: ${JSON.stringify(grade)}\n` : ""}`);
       writeFileSync(join(outDir, `${name}.json`), JSON.stringify({ ...saved, score, grade }, null, 2));
       writeFileSync(join(outDir, `${name}.wav`), wav);
-      results.push({ id: s.id, name, score, grade });
+      results.push({ id: s.id, name, ms: record.ms, score, grade });
       const failed = score.checks.filter((c) => !c.pass).map((c) => c.name);
       console.log(
         `${failed.length ? "✗" : "✓"} ${name.padEnd(22)} ${score.passed}/${score.total} checks` +
@@ -170,6 +180,7 @@ const totals = {
   words: mean(ok.map((r) => r.score.metrics.words)),
   firstAudioMs: mean(ok.map((r) => r.score.metrics.firstAudioMs)),
   usd: ok.reduce((n, r) => n + (r.score.metrics.usd || 0), 0),
+  cost: costMix(ok),
 };
 const summary = { label, settings, day, stamp, totals, byScenario };
 writeFileSync(join(outDir, "summary.json"), JSON.stringify(summary, null, 2));
@@ -181,6 +192,7 @@ const md = [
   `${settings.model}, reasoning ${settings.reasoning || "default"}, silent chains ${settings.quietChains ? "on" : "off"}${off}, calls on ${day}, ${stamp}`,
   "",
   `**${totals.callsAllPassed}/${totals.calls} calls passed every check** · checks ${pct(totals.checksPassed, totals.checksTotal)} · grader ${f1(totals.grader)}/8 · ${f1(totals.words)} words a call · first audio ${num(totals.firstAudioMs && Math.round(totals.firstAudioMs), " ms")} · $${totals.usd.toFixed(2)}`,
+  ...(totals.cost ? ["", costText(totals.cost)] : []),
   "",
   "| scenario | all checks | checks | grader /8 | words | first audio | worst moment |",
   "|---|---|---|---|---|---|---|",
@@ -191,6 +203,38 @@ const md = [
 ].join("\n");
 writeFileSync(join(outDir, "summary.md"), `${md}\n`);
 console.log(`\n${md}\n\nSaved in ${outDir}`);
+
+// Where a run's money went: each call's ¢ a minute by part and by kind of
+// answer, weighted by the call's length. null when no call logged its cost.
+function costMix(rs) {
+  const parts = {};
+  const kinds = {};
+  let mins = 0;
+  for (const r of rs) {
+    const { costParts, costKinds } = r.score.metrics;
+    if (!costParts || !r.ms) continue;
+    const m = r.ms / 60000;
+    mins += m;
+    for (const [k, v] of Object.entries(costParts)) parts[k] = (parts[k] || 0) + v * m;
+    for (const [k, v] of Object.entries(costKinds || {})) kinds[k] = (kinds[k] || 0) + v * m;
+  }
+  if (!mins) return null;
+  const per = (o) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, v / mins]));
+  return { mins, parts: per(parts), kinds: per(kinds) };
+}
+
+function costText({ mins, parts, kinds }) {
+  const f = (x) => x.toFixed(2);
+  const byKind = Object.entries(kinds)
+    .sort((a, b) => b[1] - a[1])
+    .map(([k, v]) => `${k} ${f(v)}`)
+    .join(" · ");
+  return (
+    `Where the money went, ¢ a minute over ${mins.toFixed(1)} min of calls: her voice ${f(parts.voice)} ` +
+    `(talked over ${f(parts.talkedOver)}) · audio in ${f(parts.audioIn)} full, ${f(parts.audioCached)} cached · ` +
+    `text in ${f(parts.textIn)} full, ${f(parts.textCached)} cached · text out ${f(parts.textOut)}. By answer: ${byKind}`
+  );
+}
 
 function compare(dirs) {
   const runs = dirs
@@ -210,6 +254,9 @@ function compare(dirs) {
     `| **words a call** | ${runs.map((r) => (r.totals.words == null ? "–" : r.totals.words.toFixed(0))).join(" | ")} |`,
     `| **first audio** | ${runs.map((r) => num(r.totals.firstAudioMs && Math.round(r.totals.firstAudioMs), " ms")).join(" | ")} |`,
     `| **cost** | ${runs.map((r) => `$${r.totals.usd.toFixed(2)}`).join(" | ")} |`,
+    ...(runs.some((r) => r.totals.cost)
+      ? COST_PARTS.map(([key, name]) => `| ${name}, ¢/min | ${runs.map((r) => (r.totals.cost ? r.totals.cost.parts[key].toFixed(2) : "–")).join(" | ")} |`)
+      : []),
   ];
   console.log("Each cell: calls that passed every check / runs · grader score out of 8\n");
   console.log(lines.join("\n"));

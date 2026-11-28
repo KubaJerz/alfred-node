@@ -51,6 +51,9 @@ export function scoreChecks(record, scenario) {
       toolErrors: record.events.filter((e) => e.kind === "tool" && /^That didn't work/.test(e.result)).length,
       useTools: record.events.filter((e) => e.kind === "use_tools").length,
       usd: record.events.find((e) => e.kind === "end")?.usd ?? null,
+      // ¢ a minute by part of the bill and by kind of answer (costLines).
+      costParts: record.events.find((e) => e.kind === "cost")?.parts ?? null,
+      costKinds: record.events.find((e) => e.kind === "cost-kinds")?.kinds ?? null,
     },
   };
 }

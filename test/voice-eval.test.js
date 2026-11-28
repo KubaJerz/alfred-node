@@ -4,10 +4,10 @@ import { EventEmitter } from "node:events";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { makeVoiceTools } from "../telnyx/voice-tools.js";
-import { makeRealtimeSession } from "../telnyx/realtime.js";
+import { makeRealtimeSession, costLines, emptyUsage } from "../telnyx/realtime.js";
 import { callBriefing, liveUpdate } from "../context.js";
 import { fakeAlfred, fakeCalendar, fakeNotion } from "../voice-eval/fakes.js";
-import { makeCallLedger, runOpenAICall } from "../voice-eval/openai-call.js";
+import { makeCallLedger, runOpenAICall, costEvent } from "../voice-eval/openai-call.js";
 import { scenariosOn, COMMON_CHECKS } from "../voice-eval/scenarios.js";
 import { scoreChecks, transcript, graderPrompt } from "../voice-eval/score.js";
 
@@ -166,6 +166,27 @@ test("the common checks catch a false 'I can't' and a repeated failed call", () 
 
   const fine = scoreChecks(record(["Two things: reminders, then the KO systems."]), { checks: [] });
   assert.equal(fine.passed, fine.total);
+});
+
+test("the eval reads the cost lines a call ends with, by part and by kind, into the metrics", () => {
+  const reply = { ...emptyUsage(), audioIn: 300, textIn: 180, textCached: 1920, audioOut: 500 };
+  const greeting = { ...emptyUsage(), textIn: 2000, audioOut: 500 };
+  const usage = { ...emptyUsage(), audioIn: 300, textIn: 2180, textCached: 1920, audioOut: 1000 };
+  const [parts, kinds] = costLines({ usage, byKind: { greeting, reply }, model: "gpt-realtime-2.1", mins: 1, cutShare: 0.5, speechMs: 3000 });
+  const cost = costEvent(parts);
+  const byKind = costEvent(kinds);
+  assert.deepEqual(cost, {
+    kind: "cost",
+    parts: { voice: 6.4, talkedOver: 3.2, audioIn: 0.96, audioCached: 0, textIn: 0.87, textCached: 0.08, textOut: 0 },
+    speechS: 3,
+  });
+  assert.deepEqual(byKind, { kind: "cost-kinds", kinds: { reply: 4.31, greeting: 4 } });
+  assert.equal(costEvent("📞 Call session ended: stream stopped — 1.0 min"), null);
+
+  const { metrics } = scoreChecks(record(["Done."], [{ t: 9600, ...cost }, { t: 9600, ...byKind }]), { checks: [] });
+  assert.deepEqual(metrics.costParts, cost.parts);
+  assert.deepEqual(metrics.costKinds, byKind.kinds);
+  assert.equal(scoreChecks(record(["Done."]), { checks: [] }).metrics.costParts, null, "an older run has none");
 });
 
 test("the calendar scenarios take Mom said the British way, as Mum", () => {
