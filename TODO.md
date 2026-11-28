@@ -213,6 +213,19 @@ allow list stops strangers, not a determined attacker. These close the gaps.
       - It is also the only way to use a voice designed from a description
         (prompt-to-voice). Realtime takes only named voices or recording-based
         ones.
+- [ ] **Watch the cost of real calls after the cuts (#161).** Each call ends
+      with `Where it went` and `By answer` (#156). After a week of calls: is
+      audio in at full price down near the caller's own speech, what does a
+      minute cost, and does the text history ever confuse a later turn (the
+      voice reads its transcription of the caller, which can mishear)? If it
+      does, `VOICE_OPENAI_TEXT_HISTORY=0`.
+- [ ] **Decide the reasoning level: `low` or `minimal`.** Hidden reasoning is
+      about half of the text the voice writes, about 0.3–0.6¢ a minute. The
+      eval compares the two on the full model (#161); switch `.env` only if
+      minimal passes as well.
+- [ ] **Maybe: trim the briefing to about half.** Each note is cut to its last
+      4,000 characters; 2,000 would save about 0.7–1¢ a minute, every answer
+      reading less. On hold: the voice would know less as a call starts.
 
 ### Phone — 2B direct tools and turn detection
 

@@ -123,6 +123,7 @@ async function worker() {
         instructions,
         ...settings,
         ttsCache: join(HOME, "tts"),
+        greetingCache: join(HOME, "greetings"),
         alfredDelayMs: Number(opt("alfred-ms", 4000)),
       });
       const score = scoreChecks(record, s);

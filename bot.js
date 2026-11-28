@@ -35,6 +35,7 @@ import { startTelnyxWebhook, makeMessagingRoute, sendSms, smsText, parseNumberLi
 import { downloadMedia, pickMmsFiles, makeMediaHost, MEDIA_ROUTE } from "./telnyx/mms.js";
 import { makeVoiceLlmRoutes } from "./telnyx/voice.js";
 import { makeVoicePipeline, EVENTS_PATH as VOICE_EVENTS_PATH } from "./telnyx/pipeline.js";
+import { fileClips } from "./telnyx/realtime.js";
 import { startLocalSpeech, sidecarConfig } from "./voice/local-speech.js";
 import { makeStreamParser } from "./claude-stream.js";
 
@@ -116,6 +117,10 @@ const VOICE_OPENAI = {
   noise: process.env.VOICE_OPENAI_NOISE || undefined,
   // "0": the reply after a quick tool is audio, not silent text (to compare).
   quietChains: process.env.VOICE_OPENAI_SILENT_CHAINS !== "0",
+  // A caller turn the voice has answered is read from then on as its
+  // transcript, not its audio, which every answer read again at the full audio
+  // price. "0" keeps the audio, as before.
+  textHistory: process.env.VOICE_OPENAI_TEXT_HISTORY !== "0",
   // The voice's own notion, calendar, reminders and get_time tools, made once
   // per call, for that call. "0" sends everything through Alfred (use_tools)
   // again.
@@ -1690,6 +1695,8 @@ if (voicePipelineConfigured) {
         instructions: readPhoneVoicePrompt(),
         onLate: onLateCallAnswer,
         onCallEvent: logCallEvent,
+        // The greeting as the voice said it once, played on later calls.
+        greetingClip: fileClips(path.join(STATE_DIR, "voice-greetings")),
         ...VOICE_OPENAI,
       } : {},
     });

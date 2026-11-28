@@ -23,7 +23,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { makeRealtimeSession } from "../telnyx/realtime.js";
+import { makeRealtimeSession, fileClips } from "../telnyx/realtime.js";
 import { makeVoiceTools } from "../telnyx/voice-tools.js";
 import { MULAW_SILENCE, PHONE_RATE } from "../telnyx/audio.js";
 import { makeLedger, callRow, inboundRow } from "../ledger.js";
@@ -152,6 +152,9 @@ export async function runOpenAICall(scenario, {
   feed: withFeed = true,
   callerVoice = "ash",
   ttsCache,
+  // Where the greeting's audio is kept from one call to the next, as the bot
+  // keeps it (greetingClip). Unset: every call has the voice say it.
+  greetingCache,
   alfredDelayMs = 4000,
 }) {
   // The call's clock: 10:00 AM Eastern on the scenario's day (scenariosOn),
@@ -286,6 +289,7 @@ export async function runOpenAICall(scenario, {
     clock,
     feed: withFeed ? call.feed : undefined,
     onCallEvent: call.onCallEvent,
+    greetingClip: greetingCache ? fileClips(greetingCache) : null,
     // Each answer's bill, to see which answers read the call again at full
     // price (the call's record keeps them; the transcript leaves them out).
     // The answer's own kind (reply, greeting, …) is `answer`: spread in, it

@@ -679,6 +679,27 @@ A call ends with three lines in the log:
 
 The voice eval sums the same numbers over a run (`docs/voice-eval.md`).
 
+What each answer reads, from the eval's per-answer bills (2026-11-27, full
+model):
+
+- The prompt, the tools and the briefing. The first reply of a call reads
+  them at the full price (the date line at the top differs on every call);
+  later answers read them from the cache.
+- The caller's audio, all of it so far, almost all at the full audio price:
+  no audio was ever billed as cached. The voice's own spoken answers are not
+  read back as audio.
+- So a caller turn the voice has answered is read from then on as its
+  transcript (`textHistory`, `VOICE_OPENAI_TEXT_HISTORY`). The transcript
+  goes in right after the audio, and the audio goes once the text is in. A
+  turn waits until the caller says something new, so a tool chain still
+  works from the audio it heard.
+- The greeting is its own response. It is said once and kept, in
+  `agent/var/voice-greetings/` (one file per voice and line), and later calls
+  play it and put the line in the conversation as text, with no response.
+- The still-working line and the spoken answer of a quiet chain read nothing
+  but their own instruction (`input: []`, `tools: []`). With no input, an
+  out-of-band response reads the whole call and the tools again.
+
 ### Enable 2B
 
 1. Put `OPENAI_API_KEY` in `.env`, and set `VOICE_PIPELINE_ENGINE=openai`.
