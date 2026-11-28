@@ -195,6 +195,37 @@ The transcripts of "mini after" (2026-11-24, 35/51), one by one:
 | 3 | only a last reply longer than 15 words | the model's | no change |
 | 1 | the shopping list sent to Alfred as a file on the computer | the model's | no change (the stand-in Alfred cannot add to Notion; the real one can) |
 
-Not rerun yet. The scenarios to rerun on mini: `calendar-add`,
-`calendar-move`, `calendar-tomorrow`, `multi-request`, `tick-two`,
-`remove-three`, `create-page`, `create-page-runon`.
+Rerun on mini (25 scenarios × 3, 2026-11-27): 63/75 calls passed every check
+(35/51 before), grader 5.8 (4.9 before), for $0.53 against the full model's
+$1.97. The dates, calendar moves and new pages now pass. mini never used
+`items`: it removed and ticked by line numbers, and twice the wrong ones
+(Eggs for "cheese"; Milk and Butter for limes and kefir), so the near match
+never ran. The phone stays on the full model; on it, the same code passed
+25/25 (grader 6.8, $0.69).
+
+### Cost cuts on the full model (#161), 2026-11-27
+
+25 scenarios × 1 each, on the full model. "Baseline" is #159; the cuts read
+answered caller turns as text, replay the kept greeting, and give the
+still-working line no input.
+
+| | baseline | cuts, reasoning low | cuts, reasoning minimal |
+|---|---|---|---|
+| calls that passed every check | 25/25 | 23/25 | 23/25 |
+| grader /8 | 6.8 | 6.8 | 6.8 |
+| cost of the 25 calls | $0.69 | $0.64 | $0.58 |
+| the greeting, ¢/min | 0.89 | 0.09 | 0 |
+| text in at full price, ¢/min | 1.77 | 1.35 | 1.29 |
+| text out, ¢/min | 0.81 | 0.85 | 0.70 |
+| audio in at full price, ¢/min | 0.61 | 0.64 | 0.65 |
+
+- No API errors. 6 and 5 answered caller turns went in as text; the kept
+  greeting played on 21 and 25 calls.
+- `brief-dentist` read the calendar before answering, in both runs (the
+  answer was right; it has passed about half the time on the full model).
+  `goodbye` (low) ran past 8 words.
+- With minimal reasoning, `calendar-move` asked "do you mean starting at
+  3 PM?" instead of moving the meeting. So reasoning stays `low` for now.
+- A test call is short, with one or two caller turns, so the text history
+  barely shows here: audio in did not move. Real calls are longer; their
+  `Where it went` lines will show it.
